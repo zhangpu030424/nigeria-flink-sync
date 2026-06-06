@@ -10,7 +10,7 @@ ARG MYSQL_DRIVER_VERSION=8.3.0
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fL -o /opt/flink/lib/flink-sql-connector-mysql-cdc-${FLINK_CDC_VERSION}.jar \
-         https://repo1.maven.org/maven2/com/ververica/flink-sql-connector-mysql-cdc/${FLINK_CDC_VERSION}/flink-sql-connector-mysql-cdc-${FLINK_CDC_VERSION}.jar \
+         https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-mysql-cdc/${FLINK_CDC_VERSION}/flink-sql-connector-mysql-cdc-${FLINK_CDC_VERSION}.jar \
     && curl -fL -o /opt/flink/lib/flink-connector-jdbc-${FLINK_JDBC_VERSION}.jar \
          https://repo1.maven.org/maven2/org/apache/flink/flink-connector-jdbc/${FLINK_JDBC_VERSION}/flink-connector-jdbc-${FLINK_JDBC_VERSION}.jar \
     && curl -fL -o /opt/flink/lib/mysql-connector-j-${MYSQL_DRIVER_VERSION}.jar \

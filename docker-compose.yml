@@ -29,7 +29,9 @@ services:
       - flink-network
 
   taskmanager:
+    build: .
     image: nigeria-flink:1.18-cdc
+    pull_policy: never
     container_name: nigeria-flink-taskmanager
     depends_on:
       - jobmanager
