@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS src_user (
     app_code STRING,
     mobile STRING,
     device_id STRING,
-    status INT,·
+    status INT,
     create_time TIMESTAMP(3),
     update_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
