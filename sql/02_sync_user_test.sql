@@ -66,7 +66,7 @@ SELECT
     u.mobile,
     CAST(0 AS BIGINT) AS closed_time,
     COALESCE(u.device_id, '') AS reg_device_uuid,
-    UNIX_TIMESTAMP(u.create_time) * 1000 AS reg_time,
+    UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000 AS reg_time,
     CAST(0 AS TINYINT) AS test_flag,
     u.create_time AS created_at,
     u.update_time AS updated_at
