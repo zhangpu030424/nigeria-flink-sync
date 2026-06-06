@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS src_user (
 );
 
 CREATE TABLE IF NOT EXISTS dim_app_config (
-    id INT,
+    id BIGINT,
     app_code STRING,
     PRIMARY KEY (app_code) NOT ENFORCED
 ) WITH (
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS dim_app_config (
 
 CREATE TABLE IF NOT EXISTS sink_user (
     user_id BIGINT,
-    app_id INT,
+    app_id BIGINT,
     group_user_id BIGINT,
     info_user_id BIGINT,
     mobile STRING,
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS sink_user (
 INSERT INTO sink_user
 SELECT
     u.id + 100000000 AS user_id,
-    COALESCE(a.id, 0) AS app_id,
+    COALESCE(a.id, CAST(0 AS BIGINT)) AS app_id,
     u.id + 100000000 AS group_user_id,
     u.id + 100000000 AS info_user_id,
     u.mobile,
