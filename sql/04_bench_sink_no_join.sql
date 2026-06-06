@@ -1,22 +1,19 @@
--- 阶段 B：user 表同步（全量 + 增量一体）
--- 执行: ./scripts/run-sql.sh sql/02_sync_user_test.sql
---
--- 性能：4 核建议 parallelism=4；全量慢时见 docs/PERFORMANCE.md
+-- 性能诊断：CDC + 写目标库，但不 Join app_config（隔离「写」瓶颈）
+-- 执行: ./scripts/run-sql.sh sql/04_bench_sink_no_join.sql
+-- 若比 02 快很多 → Lookup Join 是瓶颈；若仍慢 → JDBC/目标库是瓶颈
 
 SET 'parallelism.default' = '4';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '5s';
 SET 'table.exec.mini-batch.size' = '5000';
 
-CREATE TABLE IF NOT EXISTS src_user (
+CREATE TABLE IF NOT EXISTS bench_src_user (
     id BIGINT,
     app_code STRING,
     mobile STRING,
     device_id STRING,
-    status INT,
     create_time TIMESTAMP(3),
     update_time TIMESTAMP(3),
-    proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
@@ -32,21 +29,7 @@ CREATE TABLE IF NOT EXISTS src_user (
     'scan.incremental.snapshot.parallelism' = '4'
 );
 
-CREATE TABLE IF NOT EXISTS dim_app_config (
-    id BIGINT,
-    app_code STRING,
-    PRIMARY KEY (app_code) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'app_config',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '10000',
-    'lookup.cache.ttl' = '1h'
-);
-
-CREATE TABLE IF NOT EXISTS sink_user (
+CREATE TABLE IF NOT EXISTS bench_sink_user (
     user_id BIGINT,
     app_id BIGINT,
     group_user_id BIGINT,
@@ -66,23 +49,20 @@ CREATE TABLE IF NOT EXISTS sink_user (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '5000',
-    'sink.buffer-flush.interval' = '2s',
-    'sink.max-retries' = '3'
+    'sink.buffer-flush.interval' = '2s'
 );
 
-INSERT INTO sink_user
+INSERT INTO bench_sink_user
 SELECT
-    u.id + 100000000 AS user_id,
-    COALESCE(a.id, CAST(0 AS BIGINT)) AS app_id,
-    u.id + 100000000 AS group_user_id,
-    u.id + 100000000 AS info_user_id,
+    u.id + 100000000,
+    CAST(0 AS BIGINT),
+    u.id + 100000000,
+    u.id + 100000000,
     u.mobile,
-    CAST(0 AS BIGINT) AS closed_time,
-    COALESCE(u.device_id, '') AS reg_device_uuid,
-    UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000 AS reg_time,
-    CAST(0 AS TINYINT) AS test_flag,
-    u.create_time AS created_at,
-    u.update_time AS updated_at
-FROM src_user AS u
-LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF u.proc_time AS a
-    ON u.app_code = a.app_code;
+    CAST(0 AS BIGINT),
+    COALESCE(u.device_id, ''),
+    UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000,
+    CAST(0 AS TINYINT),
+    u.create_time,
+    u.update_time
+FROM bench_src_user AS u;
