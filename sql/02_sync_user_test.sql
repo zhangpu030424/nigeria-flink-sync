@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS src_user (
     app_code STRING,
     mobile STRING,
     device_id STRING,
-    status INT,
+    status INT,·
     create_time TIMESTAMP(3),
     update_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
@@ -59,10 +59,10 @@ CREATE TABLE IF NOT EXISTS sink_user (
 
 INSERT INTO sink_user
 SELECT
-    u.id + ${USER_ID_OFFSET} AS user_id,
+    u.id + 100000000 AS user_id,
     COALESCE(a.id, 0) AS app_id,
-    u.id + ${USER_ID_OFFSET} AS group_user_id,
-    u.id + ${USER_ID_OFFSET} AS info_user_id,
+    u.id + 100000000 AS group_user_id,
+    u.id + 100000000 AS info_user_id,
     u.mobile,
     CAST(0 AS BIGINT) AS closed_time,
     COALESCE(u.device_id, '') AS reg_device_uuid,
