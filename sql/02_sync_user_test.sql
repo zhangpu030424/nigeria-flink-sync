@@ -1,6 +1,8 @@
 -- 阶段 B：user 表同步（全量 + 增量一体）
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_test.sql
 
+SET 'parallelism.default' = '4';
+
 CREATE TABLE IF NOT EXISTS src_user (
     id BIGINT,
     app_code STRING,
