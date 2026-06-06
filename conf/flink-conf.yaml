@@ -1,0 +1,11 @@
+# 非 Docker 部署参考；Docker 环境主要用 docker-compose.yml 中的 FLINK_PROPERTIES
+
+jobmanager.rpc.address: jobmanager
+taskmanager.numberOfTaskSlots: 4
+
+state.backend: rocksdb
+execution.checkpointing.interval: 60s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+table.local-time-zone: Africa/Lagos

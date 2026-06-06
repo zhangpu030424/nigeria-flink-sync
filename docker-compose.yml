@@ -1,0 +1,56 @@
+# Flink CDC 同步 — 服务器部署
+#
+# 使用前：
+#   cp .env.example .env   # 填写源库/目标库
+#   ./scripts/up.sh
+#
+# Web UI：http://<服务器IP>:8081
+
+services:
+  jobmanager:
+    build: .
+    image: nigeria-flink:1.18-cdc
+    container_name: nigeria-flink-jobmanager
+    ports:
+      - "${FLINK_WEB_PORT:-8081}:8081"
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        state.backend: rocksdb
+        execution.checkpointing.interval: 60s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        table.local-time-zone: Africa/Lagos
+    volumes:
+      - flink_checkpoints:/tmp/flink-checkpoints
+      - flink_savepoints:/tmp/flink-savepoints
+      - ./sql:/opt/flink/sql:ro
+    networks:
+      - flink-network
+
+  taskmanager:
+    image: nigeria-flink:1.18-cdc
+    container_name: nigeria-flink-taskmanager
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        table.local-time-zone: Africa/Lagos
+    volumes:
+      - flink_checkpoints:/tmp/flink-checkpoints
+      - flink_savepoints:/tmp/flink-savepoints
+      - ./sql:/opt/flink/sql:ro
+    networks:
+      - flink-network
+
+volumes:
+  flink_checkpoints:
+  flink_savepoints:
+
+networks:
+  flink-network:
+    driver: bridge
