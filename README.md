@@ -21,7 +21,8 @@ nigeria-flink-sync/
     ├── up.sh               # 启动集群
     ├── down.sh             # 停止集群
     ├── sql-client.sh       # 进入 SQL Client 交互模式
-    └── run-sql.sh          # 直接执行 sql/*.sql（读 .env）
+    ├── run-sql.sh          # 直接执行 sql/*.sql（读 .env）
+    └── monitor-sync.sh     # 每分钟统计同步条数/速率
 ```
 
 ## 快速开始（服务器）
