@@ -4,15 +4,16 @@
 #   cp .env.example .env   # 填写源库/目标库
 #   ./scripts/up.sh
 #
-# Web UI：http://<服务器IP>:8081
+# Web UI：http://<服务器IP>:8089
 
 services:
   jobmanager:
     build: .
     image: nigeria-flink:1.18-cdc
     container_name: nigeria-flink-jobmanager
+    restart: unless-stopped
     ports:
-      - "${FLINK_WEB_PORT:-8081}:8081"
+      - "${FLINK_WEB_PORT:-8089}:8089"
     command: jobmanager
     environment:
       FLINK_PROPERTIES: |
@@ -33,6 +34,7 @@ services:
     image: nigeria-flink:1.18-cdc
     pull_policy: never
     container_name: nigeria-flink-taskmanager
+    restart: unless-stopped
     depends_on:
       - jobmanager
     command: taskmanager
