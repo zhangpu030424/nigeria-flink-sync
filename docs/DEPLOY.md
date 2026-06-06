@@ -81,7 +81,25 @@ curl -s http://127.0.0.1:8081/overview | head
 
 Web UI：`http://<ECS公网IP>:8081`（安全组需放行 8081）。
 
-## 7. 阶段 A — CDC 冒烟
+## 7. 执行 SQL 文件（推荐）
+
+`.env` 填好后，一条命令执行整个 SQL 文件（自动替换 `${SOURCE_MYSQL_HOST}` 等占位符）：
+
+```bash
+chmod +x scripts/run-sql.sh
+
+# 阶段 A：CDC 冒烟（默认只建表，INSERT 在文件里被注释）
+./scripts/run-sql.sh sql/01_cdc_smoke.sql
+
+# 阶段 B：user 全量+增量同步
+./scripts/run-sql.sh sql/02_sync_user_test.sql
+```
+
+等价于在容器内：`./bin/sql-client.sh -f /path/to/file.sql`
+
+手动交互仍可用：`./scripts/sql-client.sh`
+
+## 8. 阶段 A — CDC 冒烟（手动方式）
 
 ```bash
 ./scripts/sql-client.sh

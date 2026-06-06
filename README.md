@@ -20,7 +20,8 @@ nigeria-flink-sync/
 └── scripts/
     ├── up.sh               # 启动集群
     ├── down.sh             # 停止集群
-    └── sql-client.sh       # 进入 SQL Client
+    ├── sql-client.sh       # 进入 SQL Client 交互模式
+    └── run-sql.sh          # 直接执行 sql/*.sql（读 .env）
 ```
 
 ## 快速开始（服务器）
@@ -64,5 +65,4 @@ chmod +x scripts/*.sh
 
 完整映射见 `nigeria-backend-api` 仓库的 `docs/字段映射.md`。本项目 `docs/FIELD_MAPPING.md` 为关键口径摘要。
 
-- `user_id = 源 id + 100000000`
-- `group_user_id = 源 id`（不加偏移）
+- `user_id = group_user_id = 源 id + 100000000`
