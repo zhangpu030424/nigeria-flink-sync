@@ -13,6 +13,7 @@ INTERVAL="${2:-60}"
 JOB_ID="${3:-}"
 LOG_DIR="logs"
 LOG_FILE="${LOG_DIR}/sync-monitor.log"
+LAST_MYSQL_ERR=""
 
 mkdir -p "$LOG_DIR"
 
@@ -24,10 +25,17 @@ fi
 # shellcheck disable=SC1091
 set -a && source .env && set +a
 FLINK_WEB_PORT="${FLINK_WEB_PORT:-8081}"
+TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
+SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 
 mysql_q() {
   local host=$1 port=$2 user=$3 pass=$4 db=$5 sql=$6
-  MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null
+  local err
+  err=$(MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>&1) || {
+    LAST_MYSQL_ERR="$err"
+    return 1
+  }
+  echo "$err"
 }
 
 count_target() {
@@ -41,7 +49,7 @@ count_source() {
 }
 
 flink_records_out() {
-  [[ -z "$JOB_ID" ]] && return 0
+  [[ -z "$JOB_ID" ]] && echo "n/a" && return 0
   local raw
   raw=$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/${JOB_ID}/metrics?get=0.numRecordsOut" 2>/dev/null || true)
   echo "$raw" | grep -oE '"value":"[0-9]+"' | head -1 | grep -oE '[0-9]+' || echo "n/a"
@@ -53,21 +61,39 @@ log_line() {
 
 log_line "========================================"
 log_line "[$(date '+%Y-%m-%d %H:%M:%S')] 监控开始 表=${TABLE} 间隔=${INTERVAL}s"
+log_line "源库: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}"
+log_line "目标: ${TARGET_MYSQL_USER}@${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}"
 [[ -n "$JOB_ID" ]] && log_line "Flink Job: ${JOB_ID}  Web UI: http://127.0.0.1:${FLINK_WEB_PORT}"
 log_line "日志: ${LOG_FILE}  (Ctrl+C 停止)"
+
+# 启动时测一次目标库，失败则打印原因
+if ! count_target >/dev/null 2>&1; then
+  log_line "[WARN] 目标库查询失败: ${LAST_MYSQL_ERR}"
+  log_line "[WARN] 请在本机执行: mysql -h \$TARGET_MYSQL_HOST -u \$TARGET_MYSQL_USER -p \$TARGET_MYSQL_DATABASE -e 'SELECT COUNT(*) FROM ${TABLE};'"
+fi
 log_line "----------------------------------------"
 
 prev_target=""
 prev_ts=$(date +%s)
 round=0
+err_logged=0
 
 while true; do
   round=$((round + 1))
   now=$(date '+%Y-%m-%d %H:%M:%S')
   now_ts=$(date +%s)
 
-  target_cnt=$(count_target || echo "ERR")
-  source_cnt=$(count_source || echo "ERR")
+  if target_cnt=$(count_target 2>/dev/null); then
+    :
+  else
+    target_cnt="ERR"
+    if (( err_logged == 0 )) && [[ -n "$LAST_MYSQL_ERR" ]]; then
+      log_line "[ERR] 目标库: ${LAST_MYSQL_ERR}"
+      err_logged=1
+    fi
+  fi
+
+  source_cnt=$(count_source 2>/dev/null || echo "ERR")
 
   delta="n/a"
   rate="n/a"
