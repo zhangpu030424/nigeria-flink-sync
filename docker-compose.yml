@@ -4,7 +4,7 @@
 #   cp .env.example .env   # 填写源库/目标库
 #   ./scripts/up.sh
 #
-# Web UI：http://<服务器IP>:8081
+# Web UI：http://<服务器IP>:8089
 
 services:
   jobmanager:
@@ -18,6 +18,8 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
+        rest.port: 8089
+        rest.bind-port: 8089
         state.backend: rocksdb
         execution.checkpointing.interval: 120s
         execution.checkpointing.mode: EXACTLY_ONCE

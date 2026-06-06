@@ -23,8 +23,16 @@ if [[ ! -f .env ]]; then
 fi
 
 # shellcheck disable=SC1091
-set -a && source .env && set +a
-FLINK_WEB_PORT="${FLINK_WEB_PORT:-8081}"
+set -a
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%%#*}"
+  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$line" ]] && continue
+  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+  export "$line"
+done < .env
+set +a
+FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 

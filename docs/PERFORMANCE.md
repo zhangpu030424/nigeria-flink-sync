@@ -55,7 +55,8 @@ chmod +x scripts/diagnose-job.sh
 |----|-----|------|
 | `parallelism.default` | 4 | 与 4 slot 对齐，快照分片并行读 |
 | `scan.incremental.snapshot.chunk.size` | 50000 | 增大 CDC 快照分片 |
-| `scan.incremental.snapshot.parallelism` | 4 | 快照阶段 4 路并行 |
+| `scan.snapshot.fetch.size` | 5000 | 快照 fetch 批次 |
+| `parallelism.default` | 4 | 快照分片并行度（CDC 3.1 用 SQL 并行度，不用 snapshot.parallelism 参数） |
 | `sink.buffer-flush.max-rows` | 5000 | JDBC 批量刷盘 |
 | `sink.buffer-flush.interval` | 2s | 刷盘间隔 |
 | mini-batch | 5000 / 5s | SQL 层微批 |

@@ -19,7 +19,16 @@ if [[ -z "$SQL_FILE" || ! -f "$SQL_FILE" ]]; then
 fi
 
 # shellcheck disable=SC1091
-set -a && source .env && set +a
+set -a
+# 只加载 KEY=VALUE 行，避免中文注释无 # 导致 source 报错
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%%#*}"
+  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$line" ]] && continue
+  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+  export "$line"
+done < .env
+set +a
 export USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
 
 VARS='${SOURCE_MYSQL_HOST} ${SOURCE_MYSQL_PORT} ${SOURCE_MYSQL_USER} ${SOURCE_MYSQL_PASSWORD} ${SOURCE_MYSQL_DATABASE} ${TARGET_MYSQL_HOST} ${TARGET_MYSQL_PORT} ${TARGET_MYSQL_USER} ${TARGET_MYSQL_PASSWORD} ${TARGET_MYSQL_DATABASE}'

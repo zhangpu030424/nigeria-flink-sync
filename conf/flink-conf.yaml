@@ -3,6 +3,9 @@
 jobmanager.rpc.address: jobmanager
 taskmanager.numberOfTaskSlots: 4
 
+rest.port: 8089
+rest.bind-port: 8089
+
 state.backend: rocksdb
 execution.checkpointing.interval: 60s
 execution.checkpointing.mode: EXACTLY_ONCE

@@ -25,8 +25,7 @@ CREATE TABLE IF NOT EXISTS bench_src_user (
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
     'scan.incremental.snapshot.chunk.size' = '50000',
-    'scan.snapshot.fetch.size' = '5000',
-    'scan.incremental.snapshot.parallelism' = '4'
+    'scan.snapshot.fetch.size' = '5000'
 );
 
 CREATE TABLE IF NOT EXISTS bench_sink_user (

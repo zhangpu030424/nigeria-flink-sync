@@ -20,7 +20,7 @@ fi
 
 # shellcheck disable=SC1091
 [[ -f .env ]] && set -a && source .env && set +a
-FLINK_WEB_PORT="${FLINK_WEB_PORT:-8081}"
+FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 BASE="http://127.0.0.1:${FLINK_WEB_PORT}"
 
 fetch() {
@@ -108,7 +108,7 @@ except Exception as e:
       echo "    调优: lookup.cache↑、全量阶段去掉 Join、或 app_config 改广播维表"
     elif [[ "$max_bp_name" == *"Source"* || "$max_bp_name" == *"src_user"* ]]; then
       echo "  → 瓶颈在【CDC 读源库】"
-      echo "    调优: scan.incremental.snapshot.parallelism↑、chunk.size↑、源库读性能/网络"
+      echo "    调优: SET parallelism.default↑、chunk.size↑、源库读性能/网络"
     else
       echo "  → 看算子名称判断；Web UI 点该算子 → Back Pressure 标签页"
     fi

@@ -53,7 +53,7 @@ chmod +x scripts/*.sh
 | 源库 binlog | `ROW` 格式，账号需 `REPLICATION SLAVE` + `SELECT` |
 | 目标库 | 先执行 `docs/schema/Target.sql` |
 | Docker | 20.10+，含 compose v2 |
-| 端口 | 默认 `8081`（Flink Web UI） |
+| 端口 | 默认 `8089`（宿主机与容器内均为 8089） |
 
 ## 测试阶段
 
