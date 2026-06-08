@@ -1,9 +1,6 @@
--- 阶段 B：user 表同步（全量 + 增量）
--- 字段映射见 docs/FIELD_MAPPING.md §3.1
--- 前置：源库执行 sql/ddl/source_views_adjust.sql + source_materialize_user_adjust.sql
--- 执行: ./scripts/run-sql.sh sql/02_sync_user_test.sql
-
-CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+-- 阶段 B（无 VT）：user 表同步，mobile 直传/仅规范化，不调用 /v2t
+-- 用于验证 CDC + Lookup + Sink 链路速度
+-- 执行: ./scripts/run-sql.sh sql/02_sync_user_no_vt.sql
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -35,7 +32,6 @@ CREATE TABLE IF NOT EXISTS src_user (
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
--- 单次 Lookup（按 user_id），替代原 3 链式 LookupJoin
 CREATE TABLE IF NOT EXISTS dim_user_adjust (
     user_id BIGINT,
     network_name STRING,
@@ -93,15 +89,7 @@ SELECT
     CAST(u.app_code AS INT) AS app_id,
     u.id + 100000000 AS group_user_id,
     u.id + 100000000 AS info_user_id,
-    vt_tokenize(
-        CASE
-            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN u.mobile
-            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-            ELSE CONCAT('+234', TRIM(u.mobile))
-        END
-    ) AS mobile,
+    u.mobile AS mobile,
     CAST(0 AS BIGINT) AS closed_time,
     COALESCE(u.device_id, '') AS reg_device_uuid,
     UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000 AS reg_time,

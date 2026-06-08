@@ -74,10 +74,16 @@ if [[ -f .env ]]; then
   done < .env
   set +a
   if command -v mysql >/dev/null 2>&1; then
-    for v in v_user_adjust_latest v_adjust_latest_by_gps_adid v_adjust_latest_by_idfa v_adjust_latest_by_idfv; do
-      cnt=$(MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
-        -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" -N -e \
-        "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${SOURCE_MYSQL_DATABASE}' AND table_name='${v}';" 2>/dev/null || echo "ERR")
+    for v in user_adjust_cache v_user_adjust_latest; do
+      if [[ "$v" == "user_adjust_cache" ]]; then
+        cnt=$(MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+          -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" -N -e \
+          "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${SOURCE_MYSQL_DATABASE}' AND table_name='user_adjust_cache';" 2>/dev/null || echo "ERR")
+      else
+        cnt=$(MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+          -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" -N -e \
+          "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${SOURCE_MYSQL_DATABASE}' AND table_name='${v}';" 2>/dev/null || echo "ERR")
+      fi
       if [[ "$cnt" == "1" ]]; then
         echo "  ✓ ${v}"
       else
