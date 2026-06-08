@@ -33,7 +33,10 @@ public class UserSyncFastJob {
 
         // CDC 源带 UPDATE/DELETE changelog，JDBC Sink 仅支持 INSERT；全量快照按 insert-only 处理
         Table prepared = tEnv.sqlQuery(transformSql());
-        DataStream<Row> stream = tEnv.toChangelogStream(prepared, ChangelogMode.insertOnly());
+        Schema querySchema = Schema.newBuilder()
+                .fromResolvedSchema(prepared.getResolvedSchema())
+                .build();
+        DataStream<Row> stream = tEnv.toChangelogStream(prepared, querySchema, ChangelogMode.insertOnly());
         DataStream<Row> tokenized = stream.process(new VtBatchRowProcessFunction());
 
         Schema outSchema = Schema.newBuilder()
