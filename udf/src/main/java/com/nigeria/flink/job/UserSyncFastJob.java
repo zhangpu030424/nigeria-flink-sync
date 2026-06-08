@@ -8,7 +8,9 @@ import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 
 /**
  * 全量 user 同步（宽表 CDC + 批量 VT 10 万条/次 + JDBC Sink）。
@@ -30,10 +32,11 @@ public class UserSyncFastJob {
         tEnv.executeSql(sourceDdl(env));
         tEnv.executeSql(sinkDdl(env));
 
-        // user_sync_staging 全量表仅 INSERT；CDC 源开启 append-only，避免 PK 导致 upsert changelog 与 DataStream 不兼容
+        // CDC 3.1.1 对有主键的表输出 upsert changelog，toDataStream 无法消费；走 changelog 流并只保留 INSERT
         Table prepared = tEnv.sqlQuery(transformSql());
-        DataStream<Row> stream = tEnv.toDataStream(prepared);
-        DataStream<Row> tokenized = stream.process(new VtBatchRowProcessFunction());
+        DataStream<Row> insertsOnly = tEnv.toChangelogStream(prepared)
+                .filter(row -> row.getKind() == RowKind.INSERT);
+        DataStream<Row> tokenized = insertsOnly.process(new VtBatchRowProcessFunction());
 
         Schema outSchema = Schema.newBuilder()
                 .column("user_id", DataTypes.BIGINT())
@@ -55,13 +58,11 @@ public class UserSyncFastJob {
                 .column("advertiser_id", DataTypes.STRING())
                 .build();
 
-        tEnv.fromDataStream(tokenized, outSchema)
+        tEnv.fromChangelogStream(tokenized, outSchema, ChangelogMode.insertOnly())
                 .executeInsert("sink_user");
     }
 
     private static String sourceDdl(SyncEnv env) {
-        // 全量 staging 表只读 INSERT：Flink DDL 不声明 PRIMARY KEY → CDC 输出 append-only（+I），兼容 toDataStream。
-        // CDC 3.1.1 不支持 scan.read-changelog-as-append-only；无 PK 时需指定 chunk.key-column 做快照分片。
         return String.format("""
                 CREATE TABLE src_user_staging (
                     id BIGINT,
@@ -76,7 +77,8 @@ public class UserSyncFastJob {
                     creative_name STRING,
                     adgroup_tracker STRING,
                     creative_tracker STRING,
-                    adgroup_name STRING
+                    adgroup_name STRING,
+                    PRIMARY KEY (id) NOT ENFORCED
                 ) WITH (
                     'connector' = 'mysql-cdc',
                     'hostname' = '%s',
@@ -86,7 +88,6 @@ public class UserSyncFastJob {
                     'database-name' = '%s',
                     'table-name' = 'user_sync_staging',
                     'server-time-zone' = 'Africa/Lagos',
-                    'scan.incremental.snapshot.chunk.key-column' = 'id',
                     'scan.incremental.snapshot.chunk.size' = '%s',
                     'scan.snapshot.fetch.size' = '%s'
                 )

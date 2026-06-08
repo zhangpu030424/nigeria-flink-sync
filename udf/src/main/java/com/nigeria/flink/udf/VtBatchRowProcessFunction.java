@@ -3,6 +3,7 @@ package com.nigeria.flink.udf;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -90,7 +91,7 @@ public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> {
                 fields[j] = in.getField(j);
             }
             fields[MOBILE_PLAIN_INDEX] = tokens.get(i);
-            out.collect(Row.of(fields));
+            out.collect(Row.ofKind(RowKind.INSERT, fields));
         }
         buffer.clear();
         pendingTimerTs = -1L;
