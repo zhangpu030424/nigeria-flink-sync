@@ -20,6 +20,7 @@ services:
         jobmanager.rpc.address: jobmanager
         rest.port: 8089
         rest.bind-port: 8089
+        jobmanager.memory.process.size: 2048m
         state.backend: rocksdb
         execution.checkpointing.interval: 120s
         execution.checkpointing.mode: EXACTLY_ONCE
@@ -43,8 +44,8 @@ services:
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
-        taskmanager.numberOfTaskSlots: 4
-        taskmanager.memory.process.size: 4096m
+        taskmanager.numberOfTaskSlots: ${FLINK_TASK_SLOTS:-16}
+        taskmanager.memory.process.size: ${FLINK_TM_MEMORY:-40960m}
         state.backend: rocksdb
         state.backend.rocksdb.memory.managed: true
         table.local-time-zone: Africa/Lagos

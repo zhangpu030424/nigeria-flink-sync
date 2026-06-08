@@ -1,11 +1,10 @@
 -- 性能诊断：CDC + 写目标库，但不 Join app_config（隔离「写」瓶颈）
 -- 执行: ./scripts/run-sql.sh sql/04_bench_sink_no_join.sql
--- 若比 02 快很多 → Lookup Join 是瓶颈；若仍慢 → JDBC/目标库是瓶颈
 
-SET 'parallelism.default' = '4';
+SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '5s';
-SET 'table.exec.mini-batch.size' = '5000';
+SET 'table.exec.mini-batch.allow-latency' = '3s';
+SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
 CREATE TABLE IF NOT EXISTS bench_src_user (
     id BIGINT,
@@ -24,8 +23,8 @@ CREATE TABLE IF NOT EXISTS bench_src_user (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
-    'scan.incremental.snapshot.chunk.size' = '50000',
-    'scan.snapshot.fetch.size' = '5000'
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE IF NOT EXISTS bench_sink_user (
@@ -47,8 +46,8 @@ CREATE TABLE IF NOT EXISTS bench_sink_user (
     'table-name' = 'user',
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
-    'sink.buffer-flush.max-rows' = '5000',
-    'sink.buffer-flush.interval' = '2s'
+    'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
+    'sink.buffer-flush.interval' = '1s'
 );
 
 INSERT INTO bench_sink_user

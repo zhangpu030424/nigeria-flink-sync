@@ -1,8 +1,7 @@
 -- 性能诊断：只测 CDC 读源库速度（不写目标库）
 -- 执行: ./scripts/run-sql.sh sql/03_bench_cdc_read.sql
--- 看 TaskManager 日志 + Web UI Source 算子 numRecordsOutPerSecond
 
-SET 'parallelism.default' = '4';
+SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE IF NOT EXISTS bench_src_user (
     id BIGINT,
@@ -18,8 +17,8 @@ CREATE TABLE IF NOT EXISTS bench_src_user (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
-    'scan.incremental.snapshot.chunk.size' = '50000',
-    'scan.snapshot.fetch.size' = '5000'
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE IF NOT EXISTS bench_print (

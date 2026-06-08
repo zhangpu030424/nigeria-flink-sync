@@ -1,7 +1,7 @@
 # 非 Docker 部署参考；Docker 环境主要用 docker-compose.yml 中的 FLINK_PROPERTIES
 
 jobmanager.rpc.address: jobmanager
-taskmanager.numberOfTaskSlots: 4
+taskmanager.numberOfTaskSlots: 16
 
 rest.port: 8089
 rest.bind-port: 8089

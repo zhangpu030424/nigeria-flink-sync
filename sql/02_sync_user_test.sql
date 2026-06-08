@@ -1,12 +1,11 @@
 -- 阶段 B：user 表同步（全量 + 增量一体）
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_test.sql
---
--- 性能：4 核建议 parallelism=4；全量慢时见 docs/PERFORMANCE.md
+-- 并行度/批量由 .env 中 FLINK_* 控制（32C64G 默认 16）
 
-SET 'parallelism.default' = '4';
+SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '5s';
-SET 'table.exec.mini-batch.size' = '5000';
+SET 'table.exec.mini-batch.allow-latency' = '3s';
+SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
 CREATE TABLE IF NOT EXISTS src_user (
     id BIGINT,
@@ -27,8 +26,8 @@ CREATE TABLE IF NOT EXISTS src_user (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
-    'scan.incremental.snapshot.chunk.size' = '50000',
-    'scan.snapshot.fetch.size' = '5000'
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_app_config (
@@ -41,8 +40,8 @@ CREATE TABLE IF NOT EXISTS dim_app_config (
     'table-name' = 'app_config',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '10000',
-    'lookup.cache.ttl' = '1h'
+    'lookup.cache.max-rows' = '50000',
+    'lookup.cache.ttl' = '2h'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user (
@@ -64,8 +63,8 @@ CREATE TABLE IF NOT EXISTS sink_user (
     'table-name' = 'user',
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
-    'sink.buffer-flush.max-rows' = '5000',
-    'sink.buffer-flush.interval' = '2s',
+    'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
+    'sink.buffer-flush.interval' = '1s',
     'sink.max-retries' = '3'
 );
 

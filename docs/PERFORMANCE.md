@@ -49,25 +49,39 @@ chmod +x scripts/diagnose-job.sh
 - 03 快、04 快、02 慢 → **Lookup Join 慢** → 加大 cache 或全量去掉 Join
 - 03 就慢 → **CDC/源库/网络慢** → 调 snapshot parallelism、chunk、源库
 
+## 32C64G 默认配置（`.env`）
+
+| 变量 | 32C64G 默认 | 4C8G 可改为 |
+|------|-------------|-------------|
+| `FLINK_TASK_SLOTS` | 16 | 4 |
+| `FLINK_TM_MEMORY` | 40960m | 4096m |
+| `FLINK_PARALLELISM` | 16 | 4 |
+| `FLINK_MINI_BATCH_SIZE` | 10000 | 5000 |
+| `FLINK_SINK_BUFFER_ROWS` | 10000 | 5000 |
+| `FLINK_CDC_CHUNK_SIZE` | 100000 | 50000 |
+| `FLINK_CDC_FETCH_SIZE` | 10000 | 5000 |
+
+内存分配：JobManager 2G + TaskManager 40G + 系统预留 ~22G。
+
 ## 已在 `02_sync_user_test.sql` 里的优化
 
-| 项 | 值 | 作用 |
-|----|-----|------|
-| `parallelism.default` | 4 | 与 4 slot 对齐，快照分片并行读 |
-| `scan.incremental.snapshot.chunk.size` | 50000 | 增大 CDC 快照分片 |
-| `scan.snapshot.fetch.size` | 5000 | 快照 fetch 批次 |
-| `parallelism.default` | 4 | 快照分片并行度（CDC 3.1 用 SQL 并行度，不用 snapshot.parallelism 参数） |
-| `sink.buffer-flush.max-rows` | 5000 | JDBC 批量刷盘 |
-| `sink.buffer-flush.interval` | 2s | 刷盘间隔 |
-| mini-batch | 5000 / 5s | SQL 层微批 |
+以上 `FLINK_*` 由 `run-sql.sh` 注入 SQL；与 `docker-compose` 中 slot/内存一致。
+
+| 项 | 32C64G 默认 | 作用 |
+|----|-------------|------|
+| `parallelism.default` | 16 | 与 slot 对齐 |
+| CDC chunk / fetch | 100000 / 10000 | 快照读批次 |
+| JDBC sink buffer | 10000 / 1s | 写目标库批量 |
+| mini-batch | 10000 / 3s | SQL 微批 |
+| lookup cache | 50000 / 2h | 维表缓存 |
 
 ## 应用步骤
 
 ```bash
 cd /opt/nigeria-flink-sync
 
-# 1. 更新 sql + compose 后重启 TM（内存 4G）
-docker compose --env-file .env up -d
+# 1. .env 含 FLINK_TASK_SLOTS=16 等（见 .env.example）
+docker compose --env-file .env up -d --build
 
 # 2. 取消旧 Job
 docker exec nigeria-flink-jobmanager ./bin/flink cancel <job_id>
@@ -126,8 +140,8 @@ Flink 官方也推荐：**大批量历史用离线导入，CDC 负责增量**。
 
 | 配置 | 大致速率 |
 |------|----------|
-| 默认 parallelism=1 | 5k～2 万/分钟 |
-| parallelism=4 + JDBC 批量 | 3 万～10 万/分钟 |
+| 4C8G parallelism=4 | 1～3 万/分钟 |
+| **32C64G parallelism=16（当前默认）** | **5～15 万/分钟** |
 | 同机房 + 目标库高配 + 无 Lookup | 10 万～30 万/分钟 |
 | JDBC 单表写 MySQL | 100 万/分钟 通常达不到 |
 
