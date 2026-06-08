@@ -8,7 +8,6 @@ import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
-import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.types.Row;
 
 /**
@@ -31,12 +30,9 @@ public class UserSyncFastJob {
         tEnv.executeSql(sourceDdl(env));
         tEnv.executeSql(sinkDdl(env));
 
-        // CDC 源带 UPDATE/DELETE changelog，JDBC Sink 仅支持 INSERT；全量快照按 insert-only 处理
+        // user_sync_staging 全量表仅 INSERT；CDC 源开启 append-only，避免 PK 导致 upsert changelog 与 DataStream 不兼容
         Table prepared = tEnv.sqlQuery(transformSql());
-        Schema querySchema = Schema.newBuilder()
-                .fromResolvedSchema(prepared.getResolvedSchema())
-                .build();
-        DataStream<Row> stream = tEnv.toChangelogStream(prepared, querySchema, ChangelogMode.insertOnly());
+        DataStream<Row> stream = tEnv.toDataStream(prepared);
         DataStream<Row> tokenized = stream.process(new VtBatchRowProcessFunction());
 
         Schema outSchema = Schema.newBuilder()
@@ -59,7 +55,7 @@ public class UserSyncFastJob {
                 .column("advertiser_id", DataTypes.STRING())
                 .build();
 
-        tEnv.fromChangelogStream(tokenized, outSchema, ChangelogMode.insertOnly())
+        tEnv.fromDataStream(tokenized, outSchema)
                 .executeInsert("sink_user");
     }
 
@@ -89,6 +85,7 @@ public class UserSyncFastJob {
                     'database-name' = '%s',
                     'table-name' = 'user_sync_staging',
                     'server-time-zone' = 'Africa/Lagos',
+                    'scan.read-changelog-as-append-only.enabled' = 'true',
                     'scan.incremental.snapshot.chunk.size' = '%s',
                     'scan.snapshot.fetch.size' = '%s'
                 )
