@@ -1,7 +1,7 @@
 package com.nigeria.flink.udf;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
@@ -14,9 +14,10 @@ import java.util.List;
 
 /**
  * DataStream 攒批 VT：默认 10 万条/次 POST /v2t；不足一批时由 processing-time 定时器刷尾批。
+ * 须配合 keyBy 使用（KeyedProcessFunction 才支持定时器）。
  * mobile_plain 固定在第 5 列（index=4）。
  */
-public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> {
+public class VtBatchRowProcessFunction extends KeyedProcessFunction<Integer, Row, Row> {
 
     private static final Logger LOG = LoggerFactory.getLogger(VtBatchRowProcessFunction.class);
     public static final int MOBILE_PLAIN_INDEX = 4;

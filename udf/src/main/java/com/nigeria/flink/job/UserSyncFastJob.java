@@ -38,7 +38,9 @@ public class UserSyncFastJob {
         Table prepared = tEnv.sqlQuery(transformSql());
         DataStream<Row> insertsOnly = tEnv.toChangelogStream(prepared)
                 .filter(row -> row.getKind() == RowKind.INSERT);
+        // KeyedProcessFunction 才支持 processing-time 定时器（尾批刷新）
         DataStream<Row> tokenized = insertsOnly
+                .keyBy(row -> 0)
                 .process(new VtBatchRowProcessFunction())
                 .returns(sinkRowType());
 
