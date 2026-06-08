@@ -16,6 +16,7 @@ services:
       - "${FLINK_WEB_PORT:-8089}:8089"
     command: jobmanager
     environment:
+      VT_BASE_URL: ${VT_BASE_URL:-http://101.47.23.241:9505}
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         rest.port: 8089
@@ -42,6 +43,7 @@ services:
       - jobmanager
     command: taskmanager
     environment:
+      VT_BASE_URL: ${VT_BASE_URL:-http://101.47.23.241:9505}
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: ${FLINK_TASK_SLOTS:-16}

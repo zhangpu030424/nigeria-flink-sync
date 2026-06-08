@@ -1,4 +1,10 @@
-# Flink 1.18 + MySQL CDC / JDBC 连接器
+# Flink 1.18 + MySQL CDC / JDBC + 同步 UDF（VT 令牌化）
+FROM maven:3.9-eclipse-temurin-17 AS udf-build
+WORKDIR /build
+COPY udf/pom.xml udf/pom.xml
+COPY udf/src udf/src
+RUN mvn -f udf/pom.xml -q package -DskipTests
+
 FROM flink:1.18-scala_2.12-java17
 
 USER root
@@ -16,5 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && curl -fL -o /opt/flink/lib/mysql-connector-j-${MYSQL_DRIVER_VERSION}.jar \
          https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/${MYSQL_DRIVER_VERSION}/mysql-connector-j-${MYSQL_DRIVER_VERSION}.jar \
     && chown -R flink:flink /opt/flink/lib
+
+COPY --from=udf-build /build/udf/target/flink-sync-udf.jar /opt/flink/lib/flink-sync-udf.jar
+RUN chown flink:flink /opt/flink/lib/flink-sync-udf.jar
 
 USER flink

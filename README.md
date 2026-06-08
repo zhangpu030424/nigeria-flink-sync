@@ -12,7 +12,8 @@ nigeria-flink-sync/
 ├── conf/flink-conf.yaml    # 非 Docker 部署参考
 ├── sql/
 │   ├── 01_cdc_smoke.sql    # 阶段 A：CDC 冒烟
-│   └── 02_sync_user_test.sql  # 阶段 B：user 最小同步
+│   ├── 02_sync_user_test.sql  # 阶段 B：user 全字段同步（含 UTM + VT）
+│   └── ddl/source_views_adjust.sql  # 源库 adjust 维表视图（执行一次）
 ├── docs/
 │   ├── DEPLOY.md           # 服务器部署与测试步骤
 │   ├── FIELD_MAPPING.md    # 字段映射要点
@@ -38,10 +39,14 @@ cp .env.example .env
 # 编辑 .env 填写 SOURCE_* / TARGET_*
 
 chmod +x scripts/*.sh
+
+# 源库执行一次（adjust UTM 维表）
+mysql -h ... -u ... -p nigeria_backend < sql/ddl/source_views_adjust.sql
+
 ./scripts/up.sh
 
-# 3. SQL Client
-./scripts/sql-client.sh
+# 3. 提交 user 同步 Job
+./scripts/run-sql.sh sql/02_sync_user_test.sql
 ```
 
 详细步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
