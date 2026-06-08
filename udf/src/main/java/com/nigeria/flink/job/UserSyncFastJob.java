@@ -60,6 +60,8 @@ public class UserSyncFastJob {
     }
 
     private static String sourceDdl(SyncEnv env) {
+        // 全量 staging 表只读 INSERT：Flink DDL 不声明 PRIMARY KEY → CDC 输出 append-only（+I），兼容 toDataStream。
+        // CDC 3.1.1 不支持 scan.read-changelog-as-append-only；无 PK 时需指定 chunk.key-column 做快照分片。
         return String.format("""
                 CREATE TABLE src_user_staging (
                     id BIGINT,
@@ -74,8 +76,7 @@ public class UserSyncFastJob {
                     creative_name STRING,
                     adgroup_tracker STRING,
                     creative_tracker STRING,
-                    adgroup_name STRING,
-                    PRIMARY KEY (id) NOT ENFORCED
+                    adgroup_name STRING
                 ) WITH (
                     'connector' = 'mysql-cdc',
                     'hostname' = '%s',
@@ -85,7 +86,7 @@ public class UserSyncFastJob {
                     'database-name' = '%s',
                     'table-name' = 'user_sync_staging',
                     'server-time-zone' = 'Africa/Lagos',
-                    'scan.read-changelog-as-append-only.enabled' = 'true',
+                    'scan.incremental.snapshot.chunk.key-column' = 'id',
                     'scan.incremental.snapshot.chunk.size' = '%s',
                     'scan.snapshot.fetch.size' = '%s'
                 )
