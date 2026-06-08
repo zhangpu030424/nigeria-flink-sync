@@ -2,8 +2,10 @@
 # 全量（fast 宽表）→ 自动监控 → 切换增量（user CDC + binlog）
 #
 # 用法:
-#   ./scripts/sync-user-auto.sh              # 全量完成后自动切增量
-#   ./scripts/sync-user-auto.sh --incr-only    # 仅启动增量（全量已做完）
+#   ./scripts/sync-user-auto.sh                 # 全量(含VT) → 增量(含VT)
+#   ./scripts/sync-user-auto.sh --no-vt         # 全量无VT → 增量无VT（测速用）
+#   ./scripts/sync-user-auto.sh --incr-only     # 仅增量
+#   ./scripts/sync-user-auto.sh --incr-only --no-vt
 #
 # 前置（源库一次）:
 #   sql/ddl/source_views_adjust.sql
@@ -13,7 +15,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 INCR_ONLY=0
-[[ "${1:-}" == "--incr-only" ]] && INCR_ONLY=1
+NO_VT=0
+for arg in "$@"; do
+  [[ "$arg" == "--incr-only" ]] && INCR_ONLY=1
+  [[ "$arg" == "--no-vt" ]] && NO_VT=1
+done
+
+FULL_SQL="sql/02_sync_user_fast.sql"
+INCR_SQL="sql/02_sync_user_incr.sql"
+if [[ "$NO_VT" -eq 1 ]]; then
+  FULL_SQL="sql/02_sync_user_fast_no_vt.sql"
+  INCR_SQL="sql/02_sync_user_incr_no_vt.sql"
+fi
 
 if [[ ! -f .env ]]; then
   echo "请先: cp .env.example .env"
@@ -68,8 +81,8 @@ start_incr() {
   if [[ "$CDC_STARTUP_MODE" == "latest-offset" ]]; then
     export CDC_STARTUP_TIMESTAMP_MILLIS="0"
   fi
-  log "启动增量 Job: mode=${CDC_STARTUP_MODE} ts=${CDC_STARTUP_TIMESTAMP_MILLIS}"
-  ./scripts/run-sql.sh sql/02_sync_user_incr.sql
+  log "启动增量 Job: ${INCR_SQL} mode=${CDC_STARTUP_MODE} ts=${CDC_STARTUP_TIMESTAMP_MILLIS}"
+  ./scripts/run-sql.sh "$INCR_SQL"
   log "增量 Job 已提交，长期运行。监控: ./scripts/monitor-sync.sh user 60"
 }
 
@@ -80,11 +93,16 @@ if [[ "$INCR_ONLY" -eq 1 ]]; then
 fi
 
 BULK_START_MS=$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo "$(($(date +%s)*1000))")
-log "========== 阶段 1/2：全量 fast（user_sync_staging）=========="
+log "========== 阶段 1/2：全量 fast（${FULL_SQL}）=========="
 log "全量起始时间戳(ms): ${BULK_START_MS}"
 
+if ! ./scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE"; then
+  log "✗ slot/parallelism 配置不合理，已中止。请修改 .env 后 docker compose up -d"
+  exit 1
+fi
+
 cancel_jobs
-./scripts/run-sql.sh sql/02_sync_user_fast.sql
+./scripts/run-sql.sh "$FULL_SQL"
 log "全量 Job 已提交，开始监控目标库条数..."
 
 prev_target=""
