@@ -3,11 +3,12 @@ package com.nigeria.flink.job;
 import com.nigeria.flink.udf.VtBatchRowProcessFunction;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Schema;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
-import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.types.Row;
 
 /**
@@ -30,8 +31,9 @@ public class UserSyncFastJob {
         tEnv.executeSql(sourceDdl(env));
         tEnv.executeSql(sinkDdl(env));
 
+        // CDC 源带 UPDATE/DELETE changelog，JDBC Sink 仅支持 INSERT；全量快照按 insert-only 处理
         Table prepared = tEnv.sqlQuery(transformSql());
-        DataStream<Row> stream = tEnv.toDataStream(prepared);
+        DataStream<Row> stream = tEnv.toChangelogStream(prepared, ChangelogMode.insertOnly());
         DataStream<Row> tokenized = stream.process(new VtBatchRowProcessFunction());
 
         Schema outSchema = Schema.newBuilder()
@@ -54,7 +56,8 @@ public class UserSyncFastJob {
                 .column("advertiser_id", DataTypes.STRING())
                 .build();
 
-        tEnv.fromDataStream(tokenized, outSchema).executeInsert("sink_user");
+        tEnv.fromChangelogStream(tokenized, outSchema, ChangelogMode.insertOnly())
+                .executeInsert("sink_user");
     }
 
     private static String sourceDdl(SyncEnv env) {
