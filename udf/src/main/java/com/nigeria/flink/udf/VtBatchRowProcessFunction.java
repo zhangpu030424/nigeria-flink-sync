@@ -1,6 +1,5 @@
 package com.nigeria.flink.udf;
 
-import org.apache.flink.api.common.functions.BoundedOneInput;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.types.Row;
@@ -13,10 +12,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * DataStream 攒批 VT：默认 10 万条/次 POST /v2t；尾批由 processing-time 定时器刷出。
+ * DataStream 攒批 VT：默认 10 万条/次 POST /v2t；不足一批时由 processing-time 定时器刷尾批。
  * mobile_plain 固定在第 5 列（index=4）。
  */
-public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> implements BoundedOneInput {
+public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> {
 
     private static final Logger LOG = LoggerFactory.getLogger(VtBatchRowProcessFunction.class);
     public static final int MOBILE_PLAIN_INDEX = 4;
@@ -26,7 +25,6 @@ public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> impleme
     private transient int batchSize;
     private transient long flushIntervalMs;
     private transient long pendingTimerTs;
-    private transient Collector<Row> pendingOut;
 
     @Override
     public void open(Configuration parameters) {
@@ -43,7 +41,6 @@ public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> impleme
 
     @Override
     public void processElement(Row value, Context ctx, Collector<Row> out) throws Exception {
-        pendingOut = out;
         buffer.add(value);
         if (buffer.size() == 1) {
             long fireAt = ctx.timerService().currentProcessingTime() + flushIntervalMs;
@@ -60,17 +57,6 @@ public class VtBatchRowProcessFunction extends ProcessFunction<Row, Row> impleme
         if (pendingTimerTs == timestamp && !buffer.isEmpty()) {
             LOG.info("VT batch timer flush, buffered={}", buffer.size());
             flushAndCollect(out);
-        }
-    }
-
-    @Override
-    public void endInput() {
-        if (buffer != null && !buffer.isEmpty() && pendingOut != null) {
-            LOG.info("VT batch endInput flush, buffered={}", buffer.size());
-            if (pendingTimerTs > 0) {
-                pendingTimerTs = -1L;
-            }
-            flushAndCollect(pendingOut);
         }
     }
 
