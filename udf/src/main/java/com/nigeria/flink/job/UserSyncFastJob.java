@@ -1,6 +1,8 @@
 package com.nigeria.flink.job;
 
 import com.nigeria.flink.udf.VtBatchRowProcessFunction;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.DataTypes;
@@ -36,7 +38,9 @@ public class UserSyncFastJob {
         Table prepared = tEnv.sqlQuery(transformSql());
         DataStream<Row> insertsOnly = tEnv.toChangelogStream(prepared)
                 .filter(row -> row.getKind() == RowKind.INSERT);
-        DataStream<Row> tokenized = insertsOnly.process(new VtBatchRowProcessFunction());
+        DataStream<Row> tokenized = insertsOnly
+                .process(new VtBatchRowProcessFunction())
+                .returns(sinkRowType());
 
         Schema outSchema = Schema.newBuilder()
                 .column("user_id", DataTypes.BIGINT())
@@ -60,6 +64,20 @@ public class UserSyncFastJob {
 
         tEnv.fromChangelogStream(tokenized, outSchema, ChangelogMode.insertOnly())
                 .executeInsert("sink_user");
+    }
+
+    private static TypeInformation<Row> sinkRowType() {
+        return Types.ROW_NAMED(
+                new String[]{
+                        "user_id", "app_id", "group_user_id", "info_user_id", "mobile",
+                        "closed_time", "reg_device_uuid", "reg_time", "test_flag",
+                        "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+                        "campaign_id", "ad_group_id", "advertiser_id"
+                },
+                Types.LONG, Types.INT, Types.LONG, Types.LONG, Types.STRING,
+                Types.LONG, Types.STRING, Types.LONG, Types.BYTE,
+                Types.STRING, Types.STRING, Types.STRING, Types.STRING, Types.STRING,
+                Types.STRING, Types.STRING, Types.STRING);
     }
 
     private static String sourceDdl(SyncEnv env) {
