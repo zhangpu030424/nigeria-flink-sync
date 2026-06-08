@@ -10,7 +10,7 @@
 | `app_id` | `CAST(user.app_code AS INT)` | 文档写 `appcod`，源表列为 `app_code` |
 | `group_user_id` | 同 `user_id` | |
 | `info_user_id` | 同 `user_id` | |
-| `mobile` | `user.mobile` | 规范化为 `+234...` 后调用 VT `/v2t` 得 token |
+| `mobile` | `user.mobile` | 规范化为 `+234...` 后调用 VT `/v2t` 得 token（全量 `02_sync_user_fast`、增量 `02_sync_user_incr` 均已接入） |
 | `closed_time` | `0` | 固定 |
 | `reg_device_uuid` | `user.device_id` | |
 | `reg_time` | `UNIX_TIMESTAMP(create_time)*1000` | 毫秒 |

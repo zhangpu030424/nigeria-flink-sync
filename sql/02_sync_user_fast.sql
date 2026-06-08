@@ -1,5 +1,5 @@
--- 全量高速：CDC 读 user_sync_staging（源库已预 JOIN adjust），无 LookupJoin、无 VT
--- 18 万级全量请用本脚本；目标 1～3 万条/分钟以上（视跨区网络）
+-- 全量高速：CDC 读 user_sync_staging（源库已预 JOIN adjust），无 LookupJoin，mobile 走 VT /v2t
+-- 18 万级全量；含 VT 后速率取决于 VT 服务，建议 FLINK_PARALLELISM=8～16
 --
 -- 前置（源库一次）:
 --   sql/ddl/source_views_adjust.sql
@@ -7,6 +7,8 @@
 --   sql/ddl/source_user_sync_staging.sql
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_fast.sql
+
+CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'false';
@@ -75,7 +77,15 @@ SELECT
     CAST(app_code AS INT),
     id + 100000000,
     id + 100000000,
-    mobile,
+    vt_tokenize(
+        CASE
+            WHEN mobile IS NULL OR TRIM(mobile) = '' THEN mobile
+            WHEN TRIM(mobile) LIKE '+%' THEN TRIM(mobile)
+            WHEN TRIM(mobile) LIKE '234%' THEN CONCAT('+', TRIM(mobile))
+            WHEN TRIM(mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(mobile), 2))
+            ELSE CONCAT('+234', TRIM(mobile))
+        END
+    ),
     CAST(0 AS BIGINT),
     COALESCE(device_id, ''),
     UNIX_TIMESTAMP(DATE_FORMAT(create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000,

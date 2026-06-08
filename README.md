@@ -40,13 +40,19 @@ cp .env.example .env
 
 chmod +x scripts/*.sh
 
-# 源库执行一次（adjust UTM 维表）
+# 源库执行一次（adjust + 宽表）
 mysql -h ... -u ... -p nigeria_backend < sql/ddl/source_views_adjust.sql
+mysql -h ... -u ... -p nigeria_backend < sql/ddl/source_materialize_user_adjust.sql
+mysql -h ... -u ... -p nigeria_backend < sql/ddl/source_user_sync_staging.sql
 
 ./scripts/up.sh
 
-# 3. 提交 user 同步 Job
-./scripts/run-sql.sh sql/02_sync_user_test.sql
+# 推荐：全量自动切增量（一条命令）
+./scripts/sync-user-auto.sh
+
+# 或手动分步：
+# ./scripts/run-sql.sh sql/02_sync_user_fast.sql      # 全量
+# ./scripts/run-sql.sh sql/02_sync_user_incr.sql      # 全量完成后增量
 ```
 
 详细步骤见 [docs/DEPLOY.md](docs/DEPLOY.md)。
