@@ -54,3 +54,26 @@ FROM adjust_callback_record r
                      WHERE idfv IS NOT NULL
                        AND idfv <> ''
                      GROUP BY idfv) t ON r.idfv = t.idfv AND r.id = t.max_id;
+
+-- 按 user.id 预关联最新 adjust（Flink 只需 1 次 LookupJoin，避免 3 链式 Join 卡 INITIALIZING）
+-- 规则同 getUtmByDeviceIds：gps_adid / idfa / idfv OR 匹配，create_time 最新
+CREATE OR REPLACE VIEW v_user_adjust_latest AS
+SELECT u.id AS user_id,
+       acr.network_name,
+       acr.tracker_name,
+       acr.campaign_tracker,
+       acr.campaign_name,
+       acr.creative_name,
+       acr.adgroup_tracker,
+       acr.creative_tracker,
+       acr.adgroup_name
+FROM `user` u
+         LEFT JOIN adjust_callback_record acr ON acr.id = (
+    SELECT r.id
+    FROM adjust_callback_record r
+    WHERE (u.gps_adid IS NOT NULL AND u.gps_adid <> '' AND r.gps_adid = u.gps_adid)
+       OR (u.idfa IS NOT NULL AND u.idfa <> '' AND r.idfa = u.idfa)
+       OR (u.idfv IS NOT NULL AND u.idfv <> '' AND r.idfv = u.idfv)
+    ORDER BY r.create_time DESC, r.id DESC
+    LIMIT 1
+);
