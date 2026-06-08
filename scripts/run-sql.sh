@@ -20,12 +20,14 @@ fi
 
 # shellcheck disable=SC1091
 set -a
-# 只加载 KEY=VALUE 行，避免中文注释无 # 导致 source 报错
+# 只加载 KEY=VALUE 行；已在环境中的变量不覆盖（便于切增量前 export FLINK_PARALLELISM=1）
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"
   line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [[ -z "$line" ]] && continue
   [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+  key="${line%%=*}"
+  [[ -n "${!key:-}" ]] && continue
   export "$line"
 done < .env
 set +a

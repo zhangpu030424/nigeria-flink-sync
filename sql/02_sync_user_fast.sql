@@ -1,12 +1,12 @@
--- 全量高速：CDC 读 user_sync_staging（源库已预 JOIN adjust），无 LookupJoin，mobile 走 VT /v2t
--- 18 万级全量；含 VT 后速率取决于 VT 服务，建议 FLINK_PARALLELISM=8～16
+-- 全量高速（逐条 VT，慢，仅调试用）
+-- ★ 正式全量请用批量 VT（10 万条/次）:
+--     ./scripts/run-user-fast-vt.sh
+-- 对比测速无 VT: ./scripts/run-sql.sh sql/02_sync_user_fast_no_vt.sql
 --
 -- 前置（源库一次）:
 --   sql/ddl/source_views_adjust.sql
 --   sql/ddl/source_materialize_user_adjust.sql
 --   sql/ddl/source_user_sync_staging.sql
---
--- 执行: ./scripts/run-sql.sh sql/02_sync_user_fast.sql
 
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 

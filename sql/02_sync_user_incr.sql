@@ -1,5 +1,5 @@
--- 增量：CDC user + adjust Lookup（adid）+ VT /v2t，从指定位点开始，不做全量快照
--- 全量完成后执行；配合 scripts/sync-user-auto.sh 自动切换
+-- 增量：CDC user + adjust Lookup（adid）+ 逐条 VT（变更量少）
+-- 全量请用 ./scripts/run-user-fast-vt.sh（批量 10 万条/次）
 --
 -- CDC_STARTUP_MODE（run-sql / sync-user-auto 注入）:
 --   timestamp        — 从 BULK_START_MS 起补 binlog（推荐，覆盖全量期间变更）

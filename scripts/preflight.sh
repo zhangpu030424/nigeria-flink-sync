@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 TM="${FLINK_TASKMANAGER_CONTAINER:-nigeria-flink-taskmanager}"
-VT_URL="${VT_BASE_URL:-http://101.47.23.241:9505}"
+VT_URL="${VT_BASE_URL:-http://101.47.27.225}"
 
 echo "========== 1. 容器状态 =========="
 docker ps --filter "name=nigeria-flink" --format "table {{.Names}}\t{{.Status}}\t{{.Image}}" || true
@@ -36,7 +36,7 @@ fi
 echo ""
 echo "========== 4. VT /v2t（TaskManager 容器内，与 UDF 同网络） =========="
 if docker ps --format '{{.Names}}' | grep -qx "$TM"; then
-  VT_ENV=$(docker exec "$TM" printenv VT_BASE_URL 2>/dev/null || echo "(未设置，UDF 用默认 101.47.23.241:9505)")
+  VT_ENV=$(docker exec "$TM" printenv VT_BASE_URL 2>/dev/null || echo "(未设置，UDF 用默认 http://101.47.27.225)")
   echo "  TM 环境变量 VT_BASE_URL=${VT_ENV}"
   if docker exec "$TM" curl -sf --connect-timeout 5 --max-time 15 -X POST \
     -H "Content-Type: application/json" \

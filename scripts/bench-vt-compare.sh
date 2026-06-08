@@ -109,7 +109,31 @@ log "日志: ${LOG_FILE}"
 }
 
 run_round "无VT" "sql/02_sync_user_fast_no_vt.sql"
-run_round "有VT" "sql/02_sync_user_fast.sql"
+log "有VT 轮使用批量 Job（10万条/次），非逐条 SQL"
+run_round_batch_vt() {
+  log "========== 有VT(批量) =========="
+  cancel_jobs
+  truncate_target
+  local start_cnt end_cnt t0 t1 delta elapsed rate_per_min rate_per_sec
+  start_cnt=$(count_target)
+  t0=$(date +%s)
+  ./scripts/run-user-fast-vt.sh
+  log "Job 已提交，等待 ${DURATION}s ..."
+  sleep "$DURATION"
+  end_cnt=$(count_target)
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  if [[ "$start_cnt" =~ ^[0-9]+$ && "$end_cnt" =~ ^[0-9]+$ ]]; then
+    delta=$((end_cnt - start_cnt))
+    rate_per_min=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $elapsed}")
+    rate_per_sec=$(awk "BEGIN {printf \"%.1f\", $delta / $elapsed}")
+    log "有VT(批量) 结果: +${delta} 条 / ${elapsed}s ≈ ${rate_per_min} 条/分钟 (${rate_per_sec} 条/秒)"
+    echo "有VT|${delta}|${elapsed}|${rate_per_min}|${rate_per_sec}" >> "$LOG_FILE.summary"
+  fi
+  cancel_jobs
+  sleep 5
+}
+run_round_batch_vt
 
 log ""
 log "========== 对比汇总 =========="

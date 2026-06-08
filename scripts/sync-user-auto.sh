@@ -76,11 +76,18 @@ cancel_jobs() {
 
 start_incr() {
   local bulk_start_ms="${1:-}"
+  local bulk_parallel="${FLINK_PARALLELISM:-8}"
+  local incr_parallel="${FLINK_PARALLELISM_INCR:-1}"
+
   export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-timestamp}"
   export CDC_STARTUP_TIMESTAMP_MILLIS="${bulk_start_ms:-$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || date +%s000)}"
   if [[ "$CDC_STARTUP_MODE" == "latest-offset" ]]; then
     export CDC_STARTUP_TIMESTAMP_MILLIS="0"
   fi
+
+  # 全量结束后：并行度降为 1，只跑一个增量 Job
+  export FLINK_PARALLELISM="${incr_parallel}"
+  log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}（仅 1 个增量 Job）"
   log "启动增量 Job: ${INCR_SQL} mode=${CDC_STARTUP_MODE} ts=${CDC_STARTUP_TIMESTAMP_MILLIS}"
   ./scripts/run-sql.sh "$INCR_SQL"
   log "增量 Job 已提交，长期运行。监控: ./scripts/monitor-sync.sh user 60"
@@ -102,7 +109,14 @@ if ! ./scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE"; then
 fi
 
 cancel_jobs
-./scripts/run-sql.sh "$FULL_SQL"
+BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+export FLINK_PARALLELISM="${BULK_PARALLEL}"
+log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}"
+if [[ "$NO_VT" -eq 1 ]]; then
+  ./scripts/run-sql.sh "$FULL_SQL"
+else
+  ./scripts/run-user-fast-vt.sh
+fi
 log "全量 Job 已提交，开始监控目标库条数..."
 
 prev_target=""
