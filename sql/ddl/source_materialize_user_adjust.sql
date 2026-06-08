@@ -1,16 +1,12 @@
--- 全量同步前在源库执行：把 v_user_adjust_latest 物化为表，避免 Lookup 每次跑 correlated subquery
--- 执行后 Flink dim 改为查 user_adjust_cache 表
---
+-- 全量同步前在源库执行：物化 v_adjust_latest_by_adid，Flink Lookup 按 adid 点查
 -- mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_materialize_user_adjust.sql
 
--- 依赖 v_user_adjust_latest（先执行 source_views_adjust.sql）
-DROP TABLE IF EXISTS user_adjust_cache;
+DROP TABLE IF EXISTS adjust_latest_by_adid;
 
-CREATE TABLE user_adjust_cache AS
-SELECT * FROM v_user_adjust_latest;
+CREATE TABLE adjust_latest_by_adid AS
+SELECT * FROM v_adjust_latest_by_adid;
 
-ALTER TABLE user_adjust_cache
-    ADD PRIMARY KEY (user_id);
+ALTER TABLE adjust_latest_by_adid
+    ADD PRIMARY KEY (adid);
 
--- 全量跑完后可定时刷新；增量阶段 UTM 变更不频繁时可接受
--- TRUNCATE user_adjust_cache; INSERT INTO user_adjust_cache SELECT * FROM v_user_adjust_latest;
+-- 刷新：TRUNCATE adjust_latest_by_adid; INSERT INTO adjust_latest_by_adid SELECT * FROM v_adjust_latest_by_adid;

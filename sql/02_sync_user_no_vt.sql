@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS src_user (
     app_code STRING,
     mobile STRING,
     device_id STRING,
+    adid STRING,
     gps_adid STRING,
     idfa STRING,
     idfv STRING,
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS src_user (
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_adjust (
-    user_id BIGINT,
+    adid STRING,
     network_name STRING,
     tracker_name STRING,
     campaign_tracker STRING,
@@ -42,11 +43,11 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     adgroup_tracker STRING,
     creative_tracker STRING,
     adgroup_name STRING,
-    PRIMARY KEY (user_id) NOT ENFORCED
+    PRIMARY KEY (adid) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'user_adjust_cache',
+    'table-name' = 'adjust_latest_by_adid',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
@@ -125,4 +126,4 @@ SELECT
     adj.adgroup_tracker AS advertiser_id
 FROM src_user AS u
 LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
-    ON u.id = adj.user_id;
+    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid;

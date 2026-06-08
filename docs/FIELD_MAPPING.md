@@ -25,13 +25,18 @@
 | `advertiser_id` | `adgroup_tracker` | |
 | `created_at` / `updated_at` | — | **不传**，由目标库 DEFAULT / ON UPDATE 自动生成 |
 
-### UTM 查表（§3.1.1）
+### UTM 查表
 
-与 `AdjustCallbackQueryServiceImpl#getUtmByDeviceIds` 一致：
+**关联条件（已确认）：** `adjust_callback_record.adid = user.adid`，取该 `adid` 最新一条回调。
 
-1. 从 `user` 取 `gps_adid`、`idfa`、`idfv`
-2. `adjust_callback_record`：`WHERE gps_adid = ? OR idfa = ? OR idfv = ?`，`ORDER BY create_time DESC LIMIT 1`
-3. 源库需先执行 `sql/ddl/source_views_adjust.sql` 建三视图，Flink JDBC Lookup 引用
+源库视图 `v_adjust_latest_by_adid`，物化表 `adjust_latest_by_adid`（Flink `dim_user_adjust` Lookup 按 `adid` Join）。
+
+```sql
+-- 源库逻辑等价于
+SELECT * FROM adjust_callback_record acr
+INNER JOIN user u ON acr.adid = u.adid
+-- 每 adid 取 MAX(id) 最新一条，见 sql/ddl/source_views_adjust.sql
+```
 
 **`mapUtmSource`：** 空/unattributed→NULL；organic；google；tiktok；facebook/instagram/messenger→facebook；kuai/kwai/kuaishou→kwai；否则原值小写。
 
