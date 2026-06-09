@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# 全量（fast 宽表）→ 自动监控 → 切换增量（user CDC + binlog）
+# 全量（预 VT 宽表 CDC）→ 自动监控 → 切换增量（user CDC + vt_token_cache Lookup）
 #
 # 用法:
-#   ./scripts/sync-user-auto.sh                 # 全量(含VT) → 增量(含VT)
-#   ./scripts/sync-user-auto.sh --no-vt         # 全量无VT → 增量无VT（测速用）
+#   ./scripts/sync-user-auto.sh                 # 全量 → 增量（均读 vt_token_cache，Flink 不调 /v2t）
+#   ./scripts/sync-user-auto.sh --no-vt         # 全量/增量无 VT（测速用，mobile 明文）
 #   ./scripts/sync-user-auto.sh --incr-only     # 仅增量
 #   ./scripts/sync-user-auto.sh --incr-only --no-vt
 #
 # 前置（源库一次）:
 #   sql/ddl/source_views_adjust.sql
 #   sql/ddl/source_materialize_user_adjust.sql
-#   sql/ddl/source_user_sync_staging.sql
+#   vt_token_cache 已 VT 完成
+#   sql/ddl/source_user_sync_staging.sql（含 mobile_token）
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -115,7 +116,7 @@ log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}"
 if [[ "$NO_VT" -eq 1 ]]; then
   ./scripts/run-sql.sh "$FULL_SQL"
 else
-  ./scripts/run-user-fast-vt.sh
+  ./scripts/run-user-fast.sh
 fi
 log "全量 Job 已提交，开始监控目标库条数..."
 

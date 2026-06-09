@@ -120,21 +120,29 @@ else
 fi
 
 echo ""
-echo "========== 8. TaskManager 最近日志（VT / JDBC / Job 状态） =========="
+echo "========== 8. 源库 vt_token_cache / 宽表 =========="
+if [[ -f .env ]] && command -v mysql >/dev/null 2>&1; then
+  MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+    -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" -e \
+    "SELECT vt_type, status, COUNT(*) AS cnt FROM vt_token_cache GROUP BY vt_type, status ORDER BY 1, 2;" 2>/dev/null || \
+    echo "  vt_token_cache 查询失败"
+  missing=$(MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+    -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" -N -e \
+    "SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND (mobile_token IS NULL OR mobile_token='');" 2>/dev/null || echo "ERR")
+  echo "  missing_token_cnt=${missing}（应为 0）"
+else
+  echo "  跳过（无 .env 或 mysql 客户端）"
+fi
+
+echo ""
+echo "========== 9. TaskManager 最近日志（JDBC / Job 状态） =========="
 if docker ps --format '{{.Names}}' | grep -qx "$TM"; then
-  if docker logs "$TM" 2>&1 | tail -200 | grep -q "VT /v2t batch done"; then
-    echo "  ✓ 发现 VT 批量成功日志:"
-    docker logs "$TM" 2>&1 | tail -200 | grep "VT /v2t batch done" | tail -5
-  else
-    echo "  ✗ 最近 200 行无 'VT /v2t batch done'（VT 未成功或 Job 未跑到攒批）"
-  fi
-  echo ""
-  docker logs "$TM" 2>&1 | tail -80 | grep -iE 'FAILED|ERROR|Exception|VT /v2t|SQLException|UnsupportedOperation' | tail -15 || \
+  docker logs "$TM" 2>&1 | tail -80 | grep -iE 'FAILED|ERROR|Exception|SQLException|UnsupportedOperation' | tail -15 || \
     echo "  最近 80 行无 ERROR（若全是 CANCELED → Job 已被取消，需重新提交）"
 fi
 
 echo ""
 echo "完成。"
-echo "  • Job 状态 CANCELED / 无 RUNNING → ./scripts/run-user-fast-vt.sh 重新提交"
-echo "  • TM 内 VT 不通 → 修复网络/VT_BASE_URL 后 docker compose up -d"
+echo "  • Job 状态 CANCELED / 无 RUNNING → ./scripts/run-user-fast.sh 重新提交"
+echo "  • missing_token_cnt>0 → 先 vt-preload，再重建 source_user_sync_staging.sql"
 echo "  • 先验证最小链路 → ./scripts/run-sql.sh sql/03_sync_user_minimal.sql"

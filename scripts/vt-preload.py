@@ -132,9 +132,15 @@ ORDER BY id
 LIMIT {limit}
 """
 
-# 写库策略：delete_insert=SELECT id 后 DELETE+INSERT（快）；upsert=ON DUPLICATE KEY UPDATE
+# 写库策略（均需先 SELECT id）:
+#   update_id=按主键批量 UPDATE（默认，仅需 UPDATE 权限，flink_cdc 可用）
+#   delete_insert=DELETE+INSERT（需 DELETE 权限）
+#   upsert=ON DUPLICATE KEY UPDATE（stream 无 id 时用）
+WRITE_UPDATE_ID = "update_id"
 WRITE_DELETE_INSERT = "delete_insert"
 WRITE_UPSERT = "upsert"
+WRITE_MODES = (WRITE_UPDATE_ID, WRITE_DELETE_INSERT, WRITE_UPSERT)
+DB_ID_CHUNK = 3000
 DB_DELETE_CHUNK = 5000
 
 
@@ -223,11 +229,14 @@ def _mysql_run(host: str, port: str, user: str, password: str, database: str, sq
     if proc.returncode != 0:
         err = proc.stderr.strip() or proc.stdout.strip() or "mysql exec failed"
         if "1142" in err:
-            err += (
-                "\n提示: vt-preload 需要 vt_token_cache 的 SELECT + INSERT + UPDATE 权限。"
+            hint = (
                 f"\n  GRANT SELECT, INSERT, UPDATE ON {database}.vt_token_cache TO '{user}'@'<IP>';"
-                "\n  见 sql/ddl/vt_token_cache_grants.sql"
             )
+            if "DELETE" in err:
+                hint += (
+                    "\n  delete_insert 模式还需 DELETE；或改用 VT_PRELOAD_WRITE_MODE=update_id（默认）"
+                )
+            err += "\n提示: vt-preload 权限不足。" + hint + "\n  见 sql/ddl/vt_token_cache_grants.sql"
         raise RuntimeError(err)
 
 
@@ -348,7 +357,7 @@ class AsyncUpsertWriter:
 
     def __init__(
         self, host: str, port: str, user: str, password: str, database: str,
-        vt_type: str, workers: int = 2, write_mode: str = WRITE_DELETE_INSERT,
+        vt_type: str, workers: int = 2, write_mode: str = WRITE_UPDATE_ID,
     ) -> None:
         self._db = (host, port, user, password, database)
         self.vt_type = vt_type
@@ -359,6 +368,8 @@ class AsyncUpsertWriter:
             for i in range(max(1, workers))
         ]
         self._started = False
+        self._errors: List[str] = []
+        self._err_lock = threading.Lock()
 
     def start(self) -> None:
         if self._started:
@@ -376,15 +387,20 @@ class AsyncUpsertWriter:
                 kind = item[0]
                 host, port, user, password, database = self._db
                 if kind == "ok":
-                    if item[1] == WRITE_DELETE_INSERT:
-                        delete_insert_success(host, port, user, password, database, self.vt_type, item[2])
+                    if item[1] in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
+                        fn = delete_insert_success if item[1] == WRITE_DELETE_INSERT else update_success_by_id
+                        fn(host, port, user, password, database, self.vt_type, item[2])
                     else:
                         upsert_success(host, port, user, password, database, self.vt_type, item[2])
                 elif kind == "fail":
-                    if item[1] == WRITE_DELETE_INSERT:
+                    if item[1] in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
                         mark_failed_by_ids(host, port, user, password, database, item[2], item[3])
                     else:
                         upsert_failed(host, port, user, password, database, self.vt_type, item[2], item[3])
+            except Exception as e:
+                with self._err_lock:
+                    self._errors.append(str(e))
+                log(f"[{self.vt_type}] 异步入库失败: {e}", err=True)
             finally:
                 self._q.task_done()
 
@@ -396,6 +412,10 @@ class AsyncUpsertWriter:
 
     def drain(self) -> None:
         self._q.join()
+        with self._err_lock:
+            if self._errors:
+                sample = "\n".join(self._errors[:3])
+                raise RuntimeError(f"异步入库失败 {len(self._errors)} 次，示例:\n{sample}")
 
     def stop(self) -> None:
         self.drain()
@@ -416,6 +436,41 @@ def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
         if len(parts) == 2:
             out.append((int(parts[0]), parts[1]))
     return out
+
+
+def update_success_by_id(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, rows: List[Tuple[int, str, str, Optional[str]]],
+) -> None:
+    """按主键 id 批量 UPDATE token（无需 DELETE，flink_cdc 仅需 UPDATE）。"""
+    if not rows:
+        return
+    for i in range(0, len(rows), DB_UPSERT_CHUNK):
+        chunk = rows[i:i + DB_UPSERT_CHUNK]
+        for j in range(0, len(chunk), DB_ID_CHUNK):
+            sub = chunk[j:j + DB_ID_CHUNK]
+            token_cases = " ".join(
+                f"WHEN {rid} THEN '{escape_sql(tok)}'" for rid, _raw, tok, _mask in sub
+            )
+            mask_parts = []
+            for rid, _raw, _tok, mask in sub:
+                if mask is None:
+                    mask_parts.append(f"WHEN {rid} THEN NULL")
+                else:
+                    mask_parts.append(f"WHEN {rid} THEN '{escape_sql(mask)}'")
+            mask_cases = " ".join(mask_parts)
+            id_list = ",".join(str(rid) for rid, *_ in sub)
+            sql = f"""
+UPDATE vt_token_cache SET
+  status = {STATUS_OK},
+  last_error = NULL,
+  retry_count = 0,
+  token = CASE id {token_cases} END,
+  masking = CASE id {mask_cases} END
+WHERE id IN ({id_list});
+"""
+            with _db_write_lock:
+                mysql_exec(host, port, user, password, database, sql)
 
 
 def delete_insert_success(
@@ -529,6 +584,34 @@ def fetch_fast_batch(
     return rows
 
 
+def count_token_stats(
+    host: str, port: str, user: str, password: str, database: str, vt_type: str,
+) -> Dict[int, int]:
+    sql = f"""
+SELECT status, COUNT(*) FROM vt_token_cache
+WHERE vt_type='{escape_sql(vt_type)}' GROUP BY status ORDER BY status;
+"""
+    rows = mysql_query(host, port, user, password, database, sql)
+    stats: Dict[int, int] = {}
+    for row in rows:
+        parts = row.split("\t", 1)
+        if len(parts) == 2:
+            stats[int(parts[0])] = int(parts[1])
+    return stats
+
+
+def count_ok_with_token(
+    host: str, port: str, user: str, password: str, database: str, vt_type: str,
+) -> int:
+    sql = f"""
+SELECT COUNT(*) FROM vt_token_cache
+WHERE vt_type='{escape_sql(vt_type)}' AND status={STATUS_OK}
+  AND token IS NOT NULL AND token <> '';
+"""
+    rows = mysql_query(host, port, user, password, database, sql)
+    return int(rows[0]) if rows else 0
+
+
 def count_fast_pending(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, retry_failed: bool,
@@ -616,7 +699,7 @@ def process_stream_chunk(
     host: str, port: str, user: str, password: str, database: str,
     dry_run: bool, progress: ProgressTracker,
     writer: Optional[AsyncUpsertWriter] = None,
-    write_mode: str = WRITE_DELETE_INSERT,
+    write_mode: str = WRITE_UPDATE_ID,
 ) -> Tuple[int, int, bool]:
     size = len(chunk)
     ids = [c[0] for c in chunk]
@@ -632,14 +715,16 @@ def process_stream_chunk(
         t0 = time.time()
         try:
             tokens, maskings, http_sec, parse_sec = call_v2t(base_url, values, timeout_sec)
-            if write_mode == WRITE_DELETE_INSERT:
+            if write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
                 ok_rows = [
                     (ids[i], values[i], tokens[i], maskings[i]) for i in range(size)
                 ]
                 if writer is not None:
                     writer.enqueue_ok(write_mode, ok_rows)
-                else:
+                elif write_mode == WRITE_DELETE_INSERT:
                     delete_insert_success(host, port, user, password, database, vt_type, ok_rows)
+                else:
+                    update_success_by_id(host, port, user, password, database, vt_type, ok_rows)
             else:
                 ok_rows = [(values[i], tokens[i], maskings[i]) for i in range(size)]
                 if writer is not None:
@@ -649,7 +734,9 @@ def process_stream_chunk(
             snap = progress.add(ok=size)
             rate = snap["rate"]
             flag = "✓" if rate >= TARGET_RATE_PER_MIN * 0.8 else "△"
-            wlabel = "DEL+INS" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
+            wlabel = {"update_id": "UPD-id", "delete_insert": "DEL+INS", "upsert": "UPSERT"}.get(
+                write_mode, write_mode,
+            )
             log(
                 f"{prefix} | VT {http_sec:.1f}s 解析{parse_sec:.3f}s "
                 f"{'入队' if writer else wlabel} | {time.time() - t0:.1f}s | "
@@ -662,7 +749,7 @@ def process_stream_chunk(
             if attempt < max_retries:
                 time.sleep(0.5 * attempt)
 
-    if write_mode == WRITE_DELETE_INSERT:
+    if write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
         fail_payload = ids
         if writer is not None:
             writer.enqueue_fail(write_mode, fail_payload, last_err)
@@ -693,7 +780,9 @@ def _run_vt_rounds(
     if async_write and not dry_run:
         writer = AsyncUpsertWriter(host, port, user, password, database, vt_type, write_workers, write_mode)
         writer.start()
-        wlabel = "DELETE+INSERT" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
+        wlabel = {"update_id": "UPDATE-by-id", "delete_insert": "DELETE+INSERT", "upsert": "UPSERT"}.get(
+            write_mode, write_mode,
+        )
         log(f"[{vt_type}] 异步入库 {write_workers} 线程 | {wlabel}（VT 与写库流水线）")
 
     round_no, exit_code = 0, 0
@@ -738,17 +827,29 @@ def _run_vt_rounds(
                     hb.join(timeout=1)
             if writer is not None:
                 writer.drain()
+            ok_tokens = count_ok_with_token(host, port, user, password, database, vt_type)
             round_rate = len(batch) / max(time.time() - round_t0, 0.001) * 60
             log(
                 f"[{vt_type}] 第{round_no}轮 {time.time() - round_t0:.1f}s "
-                f"本轮≈{round_rate:.0f}/min | {progress.summary()}"
+                f"本轮≈{round_rate:.0f}/min | DB已有token={ok_tokens} | {progress.summary()}"
             )
             if chunk_failed:
                 exit_code = 2
     finally:
         if writer is not None:
             writer.stop()
-    log(f"[{vt_type}] {mode_label} 结束 | {progress.summary()}")
+    stats = count_token_stats(host, port, user, password, database, vt_type)
+    ok_tokens = count_ok_with_token(host, port, user, password, database, vt_type)
+    log(f"[{vt_type}] {mode_label} 结束 | 库内 status 分布: {stats} | 有效token={ok_tokens}")
+    if progress.ok > 0 and ok_tokens == 0:
+        log(
+            f"[{vt_type}] 严重: VT 报告成功 {progress.ok} 条但库内 token=0！"
+            " 若曾用 delete_insert 可能已删未插。请执行 sql/ddl/vt_seed_mobile.sql 后改用 update_id 重跑。",
+            err=True,
+        )
+        exit_code = 2
+    else:
+        log(f"[{vt_type}] {progress.summary()}")
     return exit_code
 
 
@@ -948,7 +1049,7 @@ def main() -> int:
     database = os.environ.get("SOURCE_MYSQL_DATABASE", "nigeria_backend")
     base_url = os.environ.get("VT_BASE_URL", "http://101.47.27.225")
     mode = args.mode or os.environ.get("VT_PRELOAD_MODE", "fast")
-    # Flink UserSyncFastJob 实际 keyBy(0) 单路攒批 VT；20 路×5万易打满 VT。默认 4 路×5万≈20万/分钟
+    # 默认 4 路×5万/请求 ≈20万/分钟；勿盲目 20 路打满 VT 服务
     workers = args.workers or int(os.environ.get("VT_PRELOAD_WORKERS", "4"))
     http_batch = args.http_batch_size or int(os.environ.get("VT_PRELOAD_HTTP_BATCH", "50000"))
     round_batch = args.batch_size or int(os.environ.get("VT_PRELOAD_BATCH_SIZE", "0"))
@@ -959,9 +1060,18 @@ def main() -> int:
     heartbeat_sec = int(os.environ.get("VT_PRELOAD_HEARTBEAT_SEC", str(DEFAULT_HEARTBEAT_SEC)))
     write_workers = int(os.environ.get("VT_PRELOAD_WRITE_WORKERS", "2"))
     async_write = os.environ.get("VT_PRELOAD_ASYNC_WRITE", "1").strip() not in ("0", "false", "no")
-    write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_DELETE_INSERT)
-    if write_mode not in (WRITE_DELETE_INSERT, WRITE_UPSERT):
-        write_mode = WRITE_DELETE_INSERT
+    write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_UPDATE_ID)
+    if write_mode not in WRITE_MODES:
+        write_mode = WRITE_UPDATE_ID
+    # delete_insert 先删后插，异步入库失败会导致数据丢失；强制同步写或改 update_id
+    if write_mode == WRITE_DELETE_INSERT:
+        log(
+            "警告: delete_insert 已弃用（无 DELETE 权限时删成功插失败会丢数据）。"
+            " 自动切换为 update_id。",
+            err=True,
+        )
+        write_mode = WRITE_UPDATE_ID
+        async_write = True
 
     if not all([host, user, password, database]):
         print("缺少 SOURCE_MYSQL_* 配置", file=sys.stderr)
@@ -991,7 +1101,9 @@ def main() -> int:
         f"每轮={round_batch} | http={http_batch} | url={base_url}"
     )
     if mode == "fast":
-        wlabel = "SELECT+DELETE+INSERT" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
+        wlabel = {"update_id": "SELECT+UPDATE-by-id", "delete_insert": "SELECT+DELETE+INSERT"}.get(
+            write_mode, "UPSERT",
+        )
         log(
             f"fast: SELECT status=0 → {workers}路VT×{http_batch} → 异步{wlabel} | "
             f"目标 {TARGET_RATE_PER_MIN}/min"

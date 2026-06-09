@@ -1,14 +1,7 @@
--- 全量高速（逐条 VT，慢，仅调试用）
--- ★ 正式全量请用批量 VT（10 万条/次）:
---     ./scripts/run-user-fast-vt.sh
--- 对比测速无 VT: ./scripts/run-sql.sh sql/02_sync_user_fast_no_vt.sql
+-- 全量高速（预 VT）：CDC user_sync_staging.mobile_token → 目标 user.mobile
+-- 前置: vt_token_cache 已灌满 + source_user_sync_staging.sql 已重建
 --
--- 前置（源库一次）:
---   sql/ddl/source_views_adjust.sql
---   sql/ddl/source_materialize_user_adjust.sql
---   sql/ddl/source_user_sync_staging.sql
-
-CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+-- 执行: ./scripts/run-user-fast.sh
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'false';
@@ -27,6 +20,8 @@ CREATE TABLE IF NOT EXISTS src_user_staging (
     adgroup_tracker STRING,
     creative_tracker STRING,
     adgroup_name STRING,
+    mobile_norm STRING,
+    mobile_token STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
@@ -77,15 +72,7 @@ SELECT
     CAST(app_code AS INT),
     id + 100000000,
     id + 100000000,
-    vt_tokenize(
-        CASE
-            WHEN mobile IS NULL OR TRIM(mobile) = '' THEN mobile
-            WHEN TRIM(mobile) LIKE '+%' THEN TRIM(mobile)
-            WHEN TRIM(mobile) LIKE '234%' THEN CONCAT('+', TRIM(mobile))
-            WHEN TRIM(mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(mobile), 2))
-            ELSE CONCAT('+234', TRIM(mobile))
-        END
-    ),
+    mobile_token,
     CAST(0 AS BIGINT),
     COALESCE(device_id, ''),
     UNIX_TIMESTAMP(DATE_FORMAT(create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000,
@@ -119,4 +106,5 @@ SELECT
     creative_tracker,
     campaign_tracker,
     adgroup_tracker
-FROM src_user_staging;
+FROM src_user_staging
+WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> '';

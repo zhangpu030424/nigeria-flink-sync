@@ -1,13 +1,13 @@
--- 增量：CDC user + adjust Lookup（adid）+ 逐条 VT（变更量少）
--- 全量请用 ./scripts/run-user-fast-vt.sh（批量 10 万条/次）
+-- 增量（预 VT）：CDC user + adjust Lookup + vt_token_cache Lookup → 目标 user
+-- 全量请用 ./scripts/run-user-fast.sh
+--
+-- 新手机号需先 cron：vt_seed_mobile.sql → vt-preload.sh →（可选）vt_refresh_staging_mobile_token.sql
 --
 -- CDC_STARTUP_MODE（run-sql / sync-user-auto 注入）:
 --   timestamp        — 从 BULK_START_MS 起补 binlog（推荐，覆盖全量期间变更）
 --   latest-offset    — 仅从提交 Job 时刻起（会漏全量窗口内变更）
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_incr.sql
-
-CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -61,6 +61,22 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     'lookup.cache.ttl' = '2h'
 );
 
+CREATE TABLE IF NOT EXISTS dim_vt_mobile (
+    vt_type STRING,
+    raw_value STRING,
+    token STRING,
+    status INT,
+    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'vt_token_cache',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.ttl' = '2h'
+);
+
 CREATE TABLE IF NOT EXISTS sink_user (
     user_id BIGINT,
     app_id INT,
@@ -97,15 +113,7 @@ SELECT
     CAST(u.app_code AS INT),
     u.id + 100000000,
     u.id + 100000000,
-    vt_tokenize(
-        CASE
-            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN u.mobile
-            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-            ELSE CONCAT('+234', TRIM(u.mobile))
-        END
-    ),
+    vt.token,
     CAST(0 AS BIGINT),
     COALESCE(u.device_id, ''),
     UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000,
@@ -141,4 +149,15 @@ SELECT
     adj.adgroup_tracker
 FROM src_user AS u
 LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
-    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid;
+    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
+LEFT JOIN dim_vt_mobile FOR SYSTEM_TIME AS OF u.proc_time AS vt
+    ON vt.vt_type = 'mobile'
+    AND vt.status = 1
+    AND vt.raw_value = CASE
+        WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
+        WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+        WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+        WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+        ELSE CONCAT('+234', TRIM(u.mobile))
+    END
+WHERE vt.token IS NOT NULL AND TRIM(vt.token) <> '';

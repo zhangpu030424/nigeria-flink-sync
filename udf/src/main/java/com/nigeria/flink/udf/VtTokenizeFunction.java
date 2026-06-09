@@ -9,7 +9,7 @@ import java.util.List;
 
 /**
  * 逐条调用 VT POST /v2t（每次请求体仅 1 个 mobile）。
- * 全量同步请用批量 Job：{@code ./scripts/run-user-fast-vt.sh}（默认 1 万条/次）。
+ * 生产同步请用预 VT 方案：{@code vt-preload.sh} + {@code ./scripts/run-user-fast.sh}。
  * 环境变量 VT_BASE_URL（TaskManager 容器内需可访问）。
  */
 public class VtTokenizeFunction extends ScalarFunction {

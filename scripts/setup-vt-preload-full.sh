@@ -49,7 +49,7 @@ echo ">> [3/5] fast 模式批量 /v2t（默认 4 workers × 5万/请求）"
   --http-batch-size "${VT_PRELOAD_HTTP_BATCH:-50000}"
 
 echo ">> [4/5] 重建 user_sync_staging（含 mobile_token）"
-run_sql_file sql/ddl/source_user_sync_staging_vt.sql
+run_sql_file sql/ddl/source_user_sync_staging.sql
 
 echo ">> [5/5] 检查 missing_token"
 MISSING=$(MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT}" \
@@ -63,7 +63,7 @@ fi
 if [[ "$RUN_FLINK" -eq 1 ]]; then
   echo ">> 提交 Flink 预 VT Job"
   ./scripts/cancel-all-jobs.sh || true
-  ./scripts/run-user-fast-pre-vt.sh
+  ./scripts/run-user-fast.sh
 fi
 
 echo ""

@@ -1,5 +1,5 @@
 -- 全量高速（无 VT）：CDC user_sync_staging → 目标库，mobile 明文直传
--- 用于测速 / 对比 VT 瓶颈；正式环境再换 02_sync_user_fast.sql
+-- 用于测速（mobile 明文）；正式环境用 02_sync_user_fast.sql（预 VT 宽表）
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_fast_no_vt.sql
 -- 自动全量+增量: ./scripts/sync-user-auto.sh --no-vt

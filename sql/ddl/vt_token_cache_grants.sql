@@ -6,8 +6,10 @@ USE nigeria_backend;
 
 -- 先建表（root）: mysql ... < sql/ddl/vt_token_cache.sql
 
+-- 默认 write_mode=update_id 只需 SELECT + UPDATE（INSERT 供 stream/失败行）
 GRANT SELECT, INSERT, UPDATE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'101.47.31.184';
--- GRANT SELECT, INSERT, UPDATE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'%';
+-- 仅 delete_insert 模式额外需要:
+-- GRANT DELETE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'101.47.31.184';
 
 -- stream 模式还需读源表（CDC 用户通常已有 SELECT）
 GRANT SELECT ON nigeria_backend.`user` TO 'flink_cdc'@'101.47.31.184';

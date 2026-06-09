@@ -10,7 +10,7 @@
 | `app_id` | `CAST(user.app_code AS INT)` | 文档写 `appcod`，源表列为 `app_code` |
 | `group_user_id` | 同 `user_id` | |
 | `info_user_id` | 同 `user_id` | |
-| `mobile` | `user.mobile` | 规范化为 `+234...` 后调用 VT `/v2t` 得 token（全量 `02_sync_user_fast`、增量 `02_sync_user_incr` 均已接入） |
+| `mobile` | `vt_token_cache.token` | 全量读宽表 `mobile_token`；增量 Lookup `vt_token_cache`（Flink 不调 `/v2t`） |
 | `closed_time` | `0` | 固定 |
 | `reg_device_uuid` | `user.device_id` | |
 | `reg_time` | `UNIX_TIMESTAMP(create_time)*1000` | 毫秒 |
@@ -42,7 +42,9 @@ INNER JOIN user u ON acr.adid = u.adid
 
 实现：`sql/02_sync_user_test.sql` + Java `AdjustCallbackUtmAssembler#mapUtmSource` 同逻辑。
 
-### mobile VT
+### mobile VT（预加载）
 
-1. SQL 内规范化：`8123456788` → `+2348123456788`
-2. UDF `vt_tokenize()` POST `${VT_BASE_URL}/v2t`，见 `udf/VtTokenizeFunction.java`
+1. 脚本 `vt-preload.sh` 批量 `/v2t` 写入 `vt_token_cache`
+2. 宽表 `source_user_sync_staging.sql` JOIN 得 `mobile_token`
+3. Flink `02_sync_user_fast.sql` / `02_sync_user_incr.sql` 直接读 token
+4. 调试 UDF `vt_tokenize()` 仅用于 `02_sync_user_test.sql`

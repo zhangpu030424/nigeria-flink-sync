@@ -1,12 +1,8 @@
--- 从 user 表抽取 DISTINCT 规范化 mobile，写入 vt_token_cache（仅新增，不覆盖已有 token）
--- 规范化规则与 MobileNormalizer / source_user_sync_staging.sql 一致
---
--- mysql -h <host> -u ... -p nigeria_backend < sql/ddl/vt_seed_mobile.sql
+-- delete_insert 失败导致数据丢失后：从 user 重新灌 mobile 待 VT 明文（INSERT IGNORE）
+-- mysql -h <host> -u root -p nigeria_backend < sql/ddl/vt_reseed_mobile_pending.sql
 
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'mobile' AS vt_type,
-       norm.mobile_norm AS raw_value,
-       0 AS status
+SELECT 'mobile', norm.mobile_norm, 0
 FROM (
     SELECT DISTINCT
         CASE
@@ -18,11 +14,7 @@ FROM (
         END AS mobile_norm
     FROM `user` u
 ) norm
-WHERE norm.mobile_norm IS NOT NULL
-  AND norm.mobile_norm <> '';
+WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 
--- 查看待处理数量
 SELECT status, COUNT(*) AS cnt
-FROM vt_token_cache
-WHERE vt_type = 'mobile'
-GROUP BY status;
+FROM vt_token_cache WHERE vt_type = 'mobile' GROUP BY status;
