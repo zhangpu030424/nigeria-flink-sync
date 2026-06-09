@@ -199,8 +199,27 @@ fi
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+SLOTS="${FLINK_TASK_SLOTS:-16}"
+INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
+SLOT_BUFFER="${SYNC_SLOT_BUFFER:-2}"
+
+if [[ "$KEEP_OTHER" -eq 1 ]]; then
+  running_n=0
+  while read -r _jid; do
+    [[ -z "$_jid" ]] && continue
+    running_n=$((running_n + 1))
+  done < <(list_running_job_ids)
+  reserved=$((running_n * INCR_PAR + SLOT_BUFFER))
+  max_bulk=$((SLOTS - reserved))
+  (( max_bulk < 1 )) && max_bulk=1
+  if (( BULK_PARALLEL > max_bulk )); then
+    log "WARN: 全量并行 ${BULK_PARALLEL} → ${max_bulk}（slots=${SLOTS}，已保留 ${reserved} 给 ${running_n} 个存量增量 Job）"
+    BULK_PARALLEL=$max_bulk
+  fi
+fi
+
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
-log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}"
+log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（slots=${SLOTS}）"
 
 submit_bulk
 BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")

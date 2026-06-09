@@ -4,6 +4,7 @@
 -- CDC_STARTUP_MODE（run-sql / sync-job-auto 注入）:
 --   timestamp        — 从 BULK_START_MS 起补 binlog（推荐）
 --   latest-offset    — 仅从提交时刻起（会漏全量窗口内变更）
+-- incremental.snapshot + schema_only：先加载表结构再追 binlog，避免 schema isn't known
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_incr.sql
 
@@ -35,7 +36,8 @@ CREATE TABLE IF NOT EXISTS src_user (
     'server-time-zone' = 'Africa/Lagos',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'false',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );

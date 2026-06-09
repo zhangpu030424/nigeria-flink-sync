@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS src_personal (
     'server-time-zone' = 'Africa/Lagos',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'false'
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only'
 );
 
 CREATE TABLE IF NOT EXISTS dim_vt_id_number (
