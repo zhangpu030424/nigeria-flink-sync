@@ -133,8 +133,8 @@ DROP TABLE IF EXISTS user_product_sync_staging;
 CREATE TABLE user_product_sync_staging AS
 SELECT t.user_id,
        t.product_id,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS credit_amount_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS unpaid_amount_minor
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS unpaid_amount_minor
 FROM (
          SELECT o.user_id,
                 o.product_id,
@@ -152,73 +152,126 @@ ALTER TABLE user_product_sync_staging ADD PRIMARY KEY (user_id, product_id);
 DROP TABLE IF EXISTS application_sync_staging;
 
 CREATE TABLE application_sync_staging AS
-SELECT o.id,
-       o.order_no AS application_no,
-       o.order_no AS sn,
-       o.user_id,
-       o.app_code,
-       ac.id AS app_id_num,
-       u.device_id AS device_uuid,
-       di.session_uuid AS session_id,
-       vt_m.token AS mobile_token,
-       vt_id.token AS id_number_token,
-       vt_g.token AS gaid_idfa_token,
-       ub.bank_code,
-       ub.bank_holder AS bank_account_name,
-       vt_ba.token AS bank_account_token,
-       o.product_id,
-       o.period_days,
-       o.period_count,
-       o.re_loan,
-       o.amount_max,
-       o.received,
-       o.repayment,
-       o.amt_due,
-       o.order_time,
-       o.disburse_time,
-       o.settled_time,
-       o.last_repayment_time,
-       o.approval_result,
-       o.disburse_status,
-       o.risk_order_status,
-       o.settled_status,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS credit_limit_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS loan_amount_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS principal_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS total_amount_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS disbursed_amount_minor,
+SELECT base.id,
+       base.application_no,
+       base.sn,
+       base.user_id,
+       base.app_code,
+       base.app_id_num,
+       base.device_uuid,
+       base.session_id,
+       base.mobile_token,
+       base.id_number_token,
+       base.gaid_idfa_token,
+       base.bank_code,
+       base.bank_account_name,
+       base.bank_account_token,
+       base.product_id,
+       base.period_days,
+       base.period_count,
+       base.re_loan,
+       base.amount_max,
+       base.received,
+       base.repayment,
+       base.amt_due,
+       base.order_time,
+       base.disburse_time,
+       base.settled_time,
+       base.last_repayment_time,
+       base.approval_result,
+       base.disburse_status,
+       base.risk_order_status,
+       base.settled_status,
+       base.credit_limit_minor,
+       base.loan_amount_minor,
+       base.principal_minor,
+       base.total_amount_minor,
+       base.disbursed_amount_minor,
        CASE
-           WHEN o.settled_status = 1 AND o.risk_order_status = 50 THEN 27
-           WHEN o.settled_status = 1 AND o.risk_order_status = 40 THEN 25
-           WHEN o.settled_status = 1 AND o.risk_order_status = 20 THEN 29
-           WHEN o.settled_status = 1 AND o.risk_order_status = 30 THEN 27
-           WHEN o.risk_order_status = 11 OR o.order_status = 1 THEN 23
-           WHEN o.risk_order_status = 10 THEN 20
-           WHEN o.disburse_status = 1 OR o.risk_order_status = 6 THEN 13
-           WHEN o.disburse_status IN (3, 4) OR o.risk_order_status = 8 THEN 15
-           WHEN o.approval_result = 2 OR o.risk_order_status = 4 THEN 5
-           WHEN o.approval_result = 0 OR o.risk_order_status = 2 THEN 3
-           WHEN o.approval_result = 1 AND o.disburse_status = 0 THEN 11
+           WHEN base.settled_status = 1 AND base.eff_risk IN (50, 30) THEN 27
+           WHEN base.settled_status = 1 AND base.eff_risk = 40 THEN 25
+           WHEN base.settled_status = 1 AND base.eff_risk = 20 THEN 29
+           WHEN base.eff_risk = 11 OR base.order_status = 6 THEN 23
+           WHEN base.eff_risk = 10 THEN 20
+           WHEN base.disburse_status = 1 OR base.eff_risk = 6 THEN 13
+           WHEN base.disburse_status IN (3, 4) OR base.eff_risk = 8 THEN 15
+           WHEN base.approval_result = 2 OR base.eff_risk = 4 THEN 5
+           WHEN base.approval_result = 0 OR base.eff_risk = 2 THEN 3
+           WHEN base.approval_result = 1 AND base.disburse_status = 0 THEN 11
            ELSE 1
            END AS risk_status,
-       JSON_OBJECT(
+       base.repayment_plan_json
+FROM (
+         SELECT o.id,
+                o.order_no AS application_no,
+                o.order_no AS sn,
+                o.user_id,
+                o.app_code,
+                o.order_status,
+                ac.id AS app_id_num,
+                u.device_id AS device_uuid,
+                di.session_uuid AS session_id,
+                vt_m.token AS mobile_token,
+                vt_id.token AS id_number_token,
+                vt_g.token AS gaid_idfa_token,
+                ub.bank_code,
+                ub.bank_holder AS bank_account_name,
+                vt_ba.token AS bank_account_token,
+                o.product_id,
+                o.period_days,
+                o.period_count,
+                o.re_loan,
+                o.amount_max,
+                o.received,
+                o.repayment,
+                o.amt_due,
+                o.order_time,
+                o.disburse_time,
+                o.settled_time,
+                o.last_repayment_time,
+                o.approval_result,
+                o.disburse_status,
+                o.risk_order_status,
+                o.settled_status,
+                CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_limit_minor,
+                CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS loan_amount_minor,
+                CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
+                CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS total_amount_minor,
+                CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS disbursed_amount_minor,
+                COALESCE(o.risk_order_status, CASE
+                    WHEN o.settled_status = 1 AND COALESCE(inst_agg.has_overdue_inst, 0) = 1 THEN 30
+                    WHEN o.settled_status = 1 THEN 50
+                    WHEN o.disburse_status = 2 THEN 10
+                    WHEN o.disburse_status IN (3, 4) THEN 8
+                    WHEN o.approval_result IS NULL OR o.approval_result = 0 THEN 2
+                    WHEN o.approval_result = 2 THEN 4
+                    WHEN COALESCE(inst_agg.has_overdue_inst, 0) = 1 OR o.order_status = 6 THEN 11
+                    ELSE NULL
+                    END) AS eff_risk,
+                JSON_OBJECT(
                'roll_sequence', 0,
                'period', 1,
-               'principal', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
-               'disbursed_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'principal', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
+               'disbursed_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
                'interest', 0,
-               'admin_fee', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'admin_fee', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
                'service_fee', 0,
                'tax_fee', 0,
                'reduction_amount', 0,
-               'total_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'total_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
                'term', COALESCE(o.period_days, 7),
                'start_date', DATE_FORMAT(o.order_time, '%Y-%m-%d'),
                'due_date', DATE_FORMAT(o.last_repayment_time, '%Y-%m-%d'),
                'roll_allowed', 0
        ) AS repayment_plan_json
-FROM user_order o
+         FROM user_order o
          INNER JOIN `user` u ON u.id = o.user_id
+         LEFT JOIN (
+    SELECT user_order_id,
+           MAX(CASE WHEN is_overdue = 1 THEN 1 ELSE 0 END) AS has_overdue_inst
+    FROM user_order_installment
+    GROUP BY user_order_id
+) inst_agg ON inst_agg.user_order_id = o.id
          LEFT JOIN app_config ac ON ac.app_code = o.app_code
          LEFT JOIN (
     SELECT user_id, bvn
@@ -271,7 +324,8 @@ FROM user_order o
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 'bank_account' AND vt_ba.status = 1
                        AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
-WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
+         WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
+     ) base;
 
 ALTER TABLE application_sync_staging ADD PRIMARY KEY (id);
 
@@ -282,27 +336,38 @@ CREATE TABLE loan_sync_staging AS
 SELECT i.id,
        i.installment_order_no AS loan_no,
        o.order_no AS application_no,
-       CAST(1 AS UNSIGNED) AS period,
+       CAST(COALESCE(i.current_period, 1) AS UNSIGNED) AS period,
        CAST(0 AS UNSIGNED) AS roll_sequence,
-       DATE(o.disburse_time) AS start_date,
+       COALESCE(DATE(o.disburse_time), DATE(o.order_time), DATE(i.create_time)) AS start_date,
        DATE(i.repayment_time) AS due_date,
        DATE(i.repayment_time) AS due_date_final,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS principal_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.interests), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS interest_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.poundage_fees), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS admin_fee_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.interests), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS interest_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.poundage_fees), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS admin_fee_minor,
        CAST(0 AS SIGNED) AS roll_fee_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS penalty_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS penalty_amount_minor,
        CAST(0 AS SIGNED) AS reduction_amount_minor,
        CAST(COALESCE(ROUND((CAST(NULLIF(TRIM(i.amt_due), '') AS DECIMAL(20, 2))
-           + CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2))) * 100, 0), 0) AS SIGNED) AS total_amount_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS paid_amount_minor,
+           + CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2))), 0), 0) AS SIGNED) AS total_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS paid_amount_minor,
        CAST(0 AS SIGNED) AS roll_paid_amount_minor,
        DATE(o.settled_time) AS paid_off_date,
        CASE
+           WHEN o.settled_status = 1 AND o.risk_order_status = 20
+               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
+                   >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 29
+           WHEN o.settled_status = 1 AND o.risk_order_status = 40
+               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
+                   >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 25
+           WHEN o.approval_result = 2 AND COALESCE(o.disburse_status, 0) <> 2 THEN 9
+           WHEN i.repayment_time IS NOT NULL
+               AND DATE(i.repayment_time) > CURDATE()
+               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
+                   < CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 8
+           WHEN CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
+               >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 27
            WHEN i.is_overdue = 1 THEN 23
-           WHEN i.status = 2 AND CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2))
-               >= CAST(NULLIF(TRIM(i.repayment), '') AS DECIMAL(20, 2)) THEN 27
-           WHEN i.status = 2 THEN 24
+           WHEN CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) > 0 THEN 24
            ELSE 20
            END AS risk_status
 FROM user_order_installment i

@@ -47,8 +47,8 @@ SELECT
     product_id,
     '{"repayment_method":1,"interest_start":"next_day","term":7,"periods":1,"periods_days":[7],"param_tpl":{"aha":0.5,"interest_rate":0,"penalty_rate":0.05,"post_paid_rate":0,"reduction_rate":0,"roll_allowed":0,"roll_due_method":1,"rollover_rate":0,"service_fee_rate":0,"tax_fee_rate":0,"upfront_rate":0.35,"value_date":0}}',
     CAST(1 AS TINYINT),
-    CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS BIGINT),
-    CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS BIGINT),
+    CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+    CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
     CAST(0 AS BIGINT),
     CAST(0 AS BIGINT)
 FROM src_user_order_product
