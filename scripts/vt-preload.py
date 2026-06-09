@@ -2,15 +2,16 @@
 """
 VT 字典预加载：批量 /v2t 写入 vt_token_cache。
 
-默认 stream 模式（快）：
-  源表查未 VT 明文 → 多线程 /v2t → INSERT UPSERT（无预灌、无认领 UPDATE）
+默认 fast 模式（对齐 Flink 吞吐）：
+  读 vt_token_cache status=0（走索引，秒级）→ 并行 /v2t → UPSERT
+  需先 init_all 灌入 status=0，或 cache 里已有待处理数据
 
-legacy cache 模式（--mode cache）：
-  读 vt_token_cache status=0 → 认领 → VT → 更新
+mode=stream：源表 NOT EXISTS 反查（极慢，仅无预灌时用）
+mode=cache：旧认领 UPDATE 模式
 
 用法:
-  ./scripts/vt-preload.sh --workers 20 --http-batch-size 50000
-  ./scripts/vt-preload.sh --mode cache --retry-failed
+  ./scripts/vt-preload.sh --workers 4 --http-batch-size 50000
+  ./scripts/vt-preload.sh --mode stream   # 无 init 时慢路径
 """
 from __future__ import annotations
 
@@ -117,13 +118,15 @@ def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
     clause = f"LIMIT {int(limit)}" if limit is not None else ""
     return SOURCE_QUERIES[vt_type].format(not_vt=not_vt, limit_clause=clause)
 
-CACHE_RETRY_SQL = """
+CACHE_PENDING_SQL = """
 SELECT raw_value FROM vt_token_cache
-WHERE vt_type = '{vt_type}' AND status = {fail}
+WHERE vt_type = '{vt_type}' AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
 ORDER BY id
 LIMIT {limit}
 """
+
+CACHE_RETRY_SQL = CACHE_PENDING_SQL
 
 
 def log(msg: str, *, err: bool = False) -> None:
@@ -337,6 +340,36 @@ ON DUPLICATE KEY UPDATE
         mysql_exec(host, port, user, password, database, sql)
 
 
+def fetch_fast_batch(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, limit: int, retry_failed: bool,
+) -> List[str]:
+    """从 vt_token_cache 读 status=0，走 idx_status，与 Flink 攒批路径同类（无全表反查）。"""
+    status = STATUS_FAIL if retry_failed else STATUS_PENDING
+    sql = CACHE_PENDING_SQL.format(
+        vt_type=escape_sql(vt_type), status=status, limit=int(limit),
+    )
+    log(f"[{vt_type}] fast: 读 cache status={status} LIMIT {limit} ...")
+    t0 = time.time()
+    rows = mysql_query(host, port, user, password, database, sql)
+    log(f"[{vt_type}] SELECT {time.time() - t0:.2f}s，{len(rows)} 条")
+    return rows
+
+
+def count_fast_pending(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, retry_failed: bool,
+) -> int:
+    status = STATUS_FAIL if retry_failed else STATUS_PENDING
+    sql = f"""
+SELECT COUNT(*) FROM vt_token_cache
+WHERE vt_type='{escape_sql(vt_type)}' AND status={status}
+  AND raw_value IS NOT NULL AND raw_value <> '';
+"""
+    rows = mysql_query(host, port, user, password, database, sql)
+    return int(rows[0]) if rows else 0
+
+
 def fetch_stream_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, limit: int, retry_failed: bool,
@@ -344,11 +377,9 @@ def fetch_stream_batch(
     if vt_type not in SOURCE_QUERIES:
         return []
     if retry_failed:
-        sql = CACHE_RETRY_SQL.format(vt_type=escape_sql(vt_type), fail=STATUS_FAIL, limit=int(limit))
-        log(f"[{vt_type}] 重试失败记录 SELECT ...")
-    else:
-        sql = _source_sql(vt_type, _not_vt_clause(vt_type), int(limit))
-        log(f"[{vt_type}] 源表反查未 VT 明文 SELECT LIMIT {limit} ...")
+        return fetch_fast_batch(host, port, user, password, database, vt_type, limit, True)
+    sql = _source_sql(vt_type, _not_vt_clause(vt_type), int(limit))
+    log(f"[{vt_type}] stream慢路径: 源表 NOT EXISTS 反查 LIMIT {limit}（大表可能数分钟）...")
     t0 = time.time()
     rows = mysql_query(host, port, user, password, database, sql)
     log(f"[{vt_type}] SELECT 完成 {time.time() - t0:.1f}s，取得 {len(rows)} 条")
@@ -448,44 +479,32 @@ def process_stream_chunk(
     return 0, size, True
 
 
-def process_vt_type_stream(
-    vt_type: str, host: str, port: str, user: str, password: str, database: str,
+def _run_vt_rounds(
+    vt_type: str, mode_label: str,
+    host: str, port: str, user: str, password: str, database: str,
     base_url: str, round_batch: int, http_batch_size: int, workers: int,
     timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
-    dry_run: bool, heartbeat_sec: int, skip_count: bool,
+    dry_run: bool, heartbeat_sec: int, progress: ProgressTracker,
+    fetch_fn,
 ) -> int:
-    if vt_type not in SOURCE_QUERIES:
-        log(f"[{vt_type}] 无源表配置，跳过")
-        return 0
-
-    log(f"===== stream | {vt_type} | workers={workers} 每轮={round_batch} http={http_batch_size} =====")
-    initial = 0 if skip_count else count_stream_pending(
-        host, port, user, password, database, vt_type, retry_failed,
-    )
-    progress = ProgressTracker(vt_type, initial)
+    log(f"===== {mode_label} | {vt_type} | workers={workers} 每轮={round_batch} http={http_batch_size} =====")
     round_no, exit_code = 0, 0
-
     while True:
         if max_rounds > 0 and round_no >= max_rounds:
             break
         round_no += 1
-        batch = fetch_stream_batch(
-            host, port, user, password, database, vt_type, round_batch, retry_failed,
-        )
+        batch = fetch_fn(host, port, user, password, database, vt_type, round_batch, retry_failed)
         if not batch:
             log(f"[{vt_type}] 无更多待 VT 数据")
             break
-
         chunks = chunk_items(batch, http_batch_size)
-        log(f"[{vt_type}] 第{round_no}轮 | {len(batch)}条 → {len(chunks)}个HTTP任务 | {progress.summary()}")
-
+        log(f"[{vt_type}] 第{round_no}轮 | {len(batch)}条 → {len(chunks)}个HTTP | {progress.summary()}")
         monitor = RoundMonitor(vt_type, round_no, len(chunks))
         stop_hb = threading.Event()
         hb = None
         if heartbeat_sec > 0 and not dry_run:
             hb = threading.Thread(target=heartbeat_loop, args=(stop_hb, monitor, progress, heartbeat_sec), daemon=True)
             hb.start()
-
         round_t0 = time.time()
         chunk_failed = False
         try:
@@ -506,13 +525,52 @@ def process_vt_type_stream(
             stop_hb.set()
             if hb:
                 hb.join(timeout=1)
-
         log(f"[{vt_type}] 第{round_no}轮结束 {time.time() - round_t0:.1f}s | {progress.summary()}")
         if chunk_failed:
             exit_code = 2
-
-    log(f"[{vt_type}] stream 结束 | {progress.summary()}")
+    log(f"[{vt_type}] {mode_label} 结束 | {progress.summary()}")
     return exit_code
+
+
+def process_vt_type_fast(
+    vt_type: str, host: str, port: str, user: str, password: str, database: str,
+    base_url: str, round_batch: int, http_batch_size: int, workers: int,
+    timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
+    dry_run: bool, heartbeat_sec: int, skip_count: bool,
+) -> int:
+    initial = 0 if skip_count else count_fast_pending(
+        host, port, user, password, database, vt_type, retry_failed,
+    )
+    if initial == 0 and not skip_count and not retry_failed:
+        log(f"[{vt_type}] cache 无 status=0。请先: mysql ... < sql/ddl/vt_token_cache_init_all.sql")
+        log(f"[{vt_type}] 或改用 --mode stream（慢）从源表反查")
+        return 0
+    progress = ProgressTracker(vt_type, initial)
+    return _run_vt_rounds(
+        vt_type, "fast", host, port, user, password, database, base_url,
+        round_batch, http_batch_size, workers, timeout_sec, max_retries,
+        max_rounds, retry_failed, dry_run, heartbeat_sec, progress, fetch_fast_batch,
+    )
+
+
+def process_vt_type_stream(
+    vt_type: str, host: str, port: str, user: str, password: str, database: str,
+    base_url: str, round_batch: int, http_batch_size: int, workers: int,
+    timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
+    dry_run: bool, heartbeat_sec: int, skip_count: bool,
+) -> int:
+    if vt_type not in SOURCE_QUERIES:
+        log(f"[{vt_type}] 无源表配置，跳过")
+        return 0
+    initial = 0 if skip_count else count_stream_pending(
+        host, port, user, password, database, vt_type, retry_failed,
+    )
+    progress = ProgressTracker(vt_type, initial)
+    return _run_vt_rounds(
+        vt_type, "stream", host, port, user, password, database, base_url,
+        round_batch, http_batch_size, workers, timeout_sec, max_retries,
+        max_rounds, retry_failed, dry_run, heartbeat_sec, progress, fetch_stream_batch,
+    )
 
 
 # ---------- legacy cache 模式（保留兼容）----------
@@ -647,8 +705,8 @@ SELECT COUNT(*) FROM vt_token_cache WHERE vt_type='{escape_sql(vt_type)}' AND {s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="VT 预加载 /v2t")
-    parser.add_argument("--mode", choices=["stream", "cache"], default=None,
-                        help="stream=源表直查+UPSERT(默认,快); cache=旧认领模式")
+    parser.add_argument("--mode", choices=["fast", "stream", "cache"], default=None,
+                        help="fast=读cache status=0(默认,对齐Flink); stream=源表反查(慢); cache=认领")
     parser.add_argument("--batch-size", type=int, default=None, help="每轮拉取条数")
     parser.add_argument("--http-batch-size", type=int, default=None, help="单次 /v2t 条数")
     parser.add_argument("--workers", type=int, default=None)
@@ -669,10 +727,13 @@ def main() -> int:
     password = os.environ.get("SOURCE_MYSQL_PASSWORD", "")
     database = os.environ.get("SOURCE_MYSQL_DATABASE", "nigeria_backend")
     base_url = os.environ.get("VT_BASE_URL", "http://101.47.27.225")
-    mode = args.mode or os.environ.get("VT_PRELOAD_MODE", "stream")
-    workers = args.workers or int(os.environ.get("VT_PRELOAD_WORKERS", "20"))
-    round_batch = args.batch_size or int(os.environ.get("VT_PRELOAD_BATCH_SIZE", "1000000"))
+    mode = args.mode or os.environ.get("VT_PRELOAD_MODE", "fast")
+    # Flink UserSyncFastJob 实际 keyBy(0) 单路攒批 VT；20 路×5万易打满 VT。默认 4 路×5万≈20万/分钟
+    workers = args.workers or int(os.environ.get("VT_PRELOAD_WORKERS", "4"))
     http_batch = args.http_batch_size or int(os.environ.get("VT_PRELOAD_HTTP_BATCH", "50000"))
+    round_batch = args.batch_size or int(os.environ.get("VT_PRELOAD_BATCH_SIZE", "0"))
+    if round_batch <= 0:
+        round_batch = workers * http_batch
     timeout_sec = int(os.environ.get("VT_BATCH_TIMEOUT_SEC", "300"))
     max_retries = int(os.environ.get("VT_BATCH_MAX_RETRIES", "3"))
     heartbeat_sec = int(os.environ.get("VT_PRELOAD_HEARTBEAT_SEC", str(DEFAULT_HEARTBEAT_SEC)))
@@ -699,11 +760,14 @@ def main() -> int:
         f"VT 预加载 mode={mode} | types={vt_types} | workers={workers} | "
         f"每轮={round_batch} | http={http_batch} | url={base_url}"
     )
-    if mode == "stream":
-        log("stream: 无需 init_all 预灌；源表反查 → VT → UPSERT 一次写入")
+    if mode == "fast":
+        log("fast: 读 vt_token_cache status=0 → VT → UPSERT（需 init_all 预灌；路径接近 Flink 攒批）")
+    elif mode == "stream":
+        log("stream慢路径: 源表 NOT EXISTS 反查，大表慎用")
 
+    proc_map = {"fast": process_vt_type_fast, "stream": process_vt_type_stream, "cache": process_vt_type_cache}
+    proc = proc_map[mode]
     exit_code = 0
-    proc = process_vt_type_stream if mode == "stream" else process_vt_type_cache
     for vt_type in vt_types:
         kw: Dict[str, Union[int, bool, str]] = dict(
             vt_type=vt_type, host=host, port=port, user=user, password=password,
@@ -712,10 +776,10 @@ def main() -> int:
             retry_failed=args.retry_failed, dry_run=args.dry_run,
             heartbeat_sec=heartbeat_sec,
         )
-        if mode == "stream":
-            kw.update(round_batch=round_batch, http_batch_size=http_batch, workers=workers, skip_count=args.skip_count)
-        else:
+        if mode == "cache":
             kw.update(claim_batch=round_batch, http_batch=http_batch, workers=workers)
+        else:
+            kw.update(round_batch=round_batch, http_batch_size=http_batch, workers=workers, skip_count=args.skip_count)
         code = proc(**kw)  # type: ignore[arg-type]
         if code != 0:
             exit_code = code
