@@ -38,13 +38,13 @@ FROM `user` u
          LEFT JOIN vt_token_cache vt
                    ON vt.vt_type = 'mobile'
                        AND vt.status = 1
-                       AND vt.raw_value = CASE
+                       AND vt.raw_value COLLATE utf8mb4_bin = (CASE
                            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
                            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
                            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
                            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
                            ELSE CONCAT('+234', TRIM(u.mobile))
-                       END;
+                       END) COLLATE utf8mb4_bin;
 
 ALTER TABLE user_sync_staging
     ADD PRIMARY KEY (id);

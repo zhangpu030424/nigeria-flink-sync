@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS vt_token_cache (
     id           BIGINT       NOT NULL AUTO_INCREMENT,
     vt_type      ENUM('mobile','gaid_idfa','bank_account','id_number','id2') NOT NULL,
-    raw_value    VARCHAR(128) NOT NULL COMMENT '规范化后的明文，与 Flink/SQL 规范化规则一致',
+    raw_value    VARCHAR(128) NOT NULL COLLATE utf8mb4_bin COMMENT '规范化明文，bin 比较避免与源表排序规则冲突',
     token        VARCHAR(128) NULL COMMENT '/v2t 返回 token',
     masking      VARCHAR(128) NULL COMMENT '/v2t 返回 masking（可选）',
     status       TINYINT      NOT NULL DEFAULT 0 COMMENT '0待VT 1成功 2失败',

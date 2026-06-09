@@ -36,11 +36,14 @@ _print_lock = threading.Lock()
 DB_INSERT_CHUNK = 2000
 DEFAULT_HEARTBEAT_SEC = 30
 
-# 源表反查：仅取「尚未 VT 成功」的 DISTINCT 明文（与 init_all.sql 规则一致）
+# 源表与 vt_token_cache 排序规则可能不同（0900_ai_ci vs unicode_ci），比较时统一 COLLATE
+COLLATE_CMP = "utf8mb4_bin"
+
 SOURCE_NOT_VT = """
 AND NOT EXISTS (
   SELECT 1 FROM vt_token_cache vt
-  WHERE vt.vt_type = '{vt_type}' AND vt.raw_value = src.raw_value
+  WHERE vt.vt_type = '{vt_type}'
+    AND vt.raw_value COLLATE {collate} = src.raw_value COLLATE {collate}
     AND vt.status = {ok} AND vt.token IS NOT NULL AND vt.token <> ''
 )
 """
@@ -102,6 +105,12 @@ WHERE 1=1
 {limit_clause}
 """,
 }
+
+
+def _not_vt_clause(vt_type: str, ok: int = STATUS_OK) -> str:
+    return SOURCE_NOT_VT.format(
+        vt_type=escape_sql(vt_type), ok=ok, collate=COLLATE_CMP,
+    )
 
 
 def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
@@ -338,8 +347,7 @@ def fetch_stream_batch(
         sql = CACHE_RETRY_SQL.format(vt_type=escape_sql(vt_type), fail=STATUS_FAIL, limit=int(limit))
         log(f"[{vt_type}] 重试失败记录 SELECT ...")
     else:
-        not_vt = SOURCE_NOT_VT.format(vt_type=escape_sql(vt_type), ok=STATUS_OK)
-        sql = _source_sql(vt_type, not_vt, int(limit))
+        sql = _source_sql(vt_type, _not_vt_clause(vt_type), int(limit))
         log(f"[{vt_type}] 源表反查未 VT 明文 SELECT LIMIT {limit} ...")
     t0 = time.time()
     rows = mysql_query(host, port, user, password, database, sql)
@@ -361,8 +369,7 @@ WHERE vt_type='{escape_sql(vt_type)}' AND status={STATUS_FAIL}
 """
         rows = mysql_query(host, port, user, password, database, sql)
         return int(rows[0]) if rows else 0
-    not_vt = SOURCE_NOT_VT.format(vt_type=escape_sql(vt_type), ok=STATUS_OK)
-    inner = _source_sql(vt_type, not_vt, None)
+    inner = _source_sql(vt_type, _not_vt_clause(vt_type), None)
     sql = f"SELECT COUNT(*) FROM ({inner}) _cnt"
     log(f"[{vt_type}] 统计待 VT 总量（可能需 1~3 分钟）...")
     t0 = time.time()
