@@ -219,25 +219,23 @@ def escape_sql(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "''")
 
 
-def ensure_table(host: str, port: str, user: str, password: str, database: str) -> None:
-    sql = """
-CREATE TABLE IF NOT EXISTS vt_token_cache (
-    id BIGINT NOT NULL AUTO_INCREMENT,
-    vt_type ENUM('mobile','gaid_idfa','bank_account','id_number','id2') NOT NULL,
-    raw_value VARCHAR(128) NOT NULL,
-    token VARCHAR(128) NULL,
-    masking VARCHAR(128) NULL,
-    status TINYINT NOT NULL DEFAULT 0,
-    retry_count INT NOT NULL DEFAULT 0,
-    last_error VARCHAR(512) NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_type_raw (vt_type, raw_value),
-    KEY idx_status (status, vt_type)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-"""
-    mysql_exec(host, port, user, password, database, sql)
+def check_table_ready(host: str, port: str, user: str, password: str, database: str) -> None:
+    """flink_cdc 通常无 CREATE 权限，仅检查表是否已由 DBA 建好。"""
+    try:
+        mysql_query(host, port, user, password, database, "SELECT 1 FROM vt_token_cache LIMIT 0;")
+        log("vt_token_cache 表就绪")
+    except RuntimeError as e:
+        err = str(e)
+        if "1146" in err or "doesn't exist" in err.lower():
+            raise RuntimeError(
+                "vt_token_cache 表不存在。请 DBA 执行:\n"
+                "  mysql -h <host> -u root -p nigeria_backend < sql/ddl/vt_token_cache.sql"
+            ) from e
+        if "1142" in err and "SELECT" in err:
+            raise RuntimeError(
+                "flink_cdc 无 vt_token_cache SELECT 权限。请 DBA 执行 sql/ddl/vt_token_cache_grants.sql"
+            ) from e
+        raise
 
 
 def parse_tokens(body: str, expected: int) -> Tuple[List[str], List[Optional[str]]]:
@@ -684,8 +682,7 @@ def main() -> int:
         log("已重置 status=9 → 0")
         return 0
 
-    log(f"建表检查 vt_token_cache ...")
-    ensure_table(host, port, user, password, database)
+    check_table_ready(host, port, user, password, database)
 
     if mode == "cache":
         log("cache 模式: 重置 status=9 ...")
