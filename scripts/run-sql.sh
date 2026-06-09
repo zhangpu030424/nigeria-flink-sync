@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 读取 .env 替换占位符，在 JobManager 容器内执行 Flink SQL 文件
-# 用法: ./scripts/run-sql.sh sql/02_sync_user_test.sql
+# 用法: bash scripts/run-sql.sh sql/02_sync_user_test.sql
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
