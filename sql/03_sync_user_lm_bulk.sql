@@ -2,6 +2,7 @@
 -- 执行: bash scripts/run-user-lm-bulk.sh
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'table.exec.resource.default-parallelism' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'false';
 SET 'execution.runtime-mode' = 'batch';
 

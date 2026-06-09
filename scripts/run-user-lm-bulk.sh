@@ -182,12 +182,47 @@ log "目标: ${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}"
 log "模式: 无 VT，mobile 明文直传"
 log "提交: sql/03_sync_user_lm_bulk.sql"
 
-export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+SLOTS="${FLINK_TASK_SLOTS:-16}"
+INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
+SLOT_BUFFER="${SYNC_SLOT_BUFFER:-2}"
+BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+
+running_n=0
+while read -r _jid; do
+  [[ -z "$_jid" ]] && continue
+  running_n=$((running_n + 1))
+done < <(list_running_job_ids)
+
+reserved=$((running_n * INCR_PAR + SLOT_BUFFER))
+max_bulk=$((SLOTS - reserved))
+(( max_bulk < 1 )) && max_bulk=1
+if (( BULK_PARALLEL > max_bulk )); then
+  log "WARN: FLINK_PARALLELISM_BULK=${BULK_PARALLEL} → ${max_bulk}（slots=${SLOTS}，存量Job=${running_n}×incr${INCR_PAR}，保留${reserved}）"
+  BULK_PARALLEL=$max_bulk
+fi
+
+export FLINK_PARALLELISM="${BULK_PARALLEL}"
+log "并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（BULK 目标=${FLINK_PARALLELISM_BULK:-?} slots=${SLOTS} 存量Job=${running_n}）"
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   log "ERR: 容器 ${JM} 未运行，请先 docker compose up -d"
   exit 1
 fi
+
+bash scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE" || true
+FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
+curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/taskmanagers" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    total=free=0
+    for tm in d.get('taskmanagers',[]):
+        total+=tm.get('slotsNumber',0)
+        free+=tm.get('freeSlots',0)
+    print(f'[slots] TM合计={total} 空闲={free}（若total≠.env FLINK_TASK_SLOTS 请 force-recreate taskmanager）')
+except Exception as e:
+    print('[slots] 无法读取 TaskManagers:', e)
+" | tee -a "$LOG_FILE" || true
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 log "提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
