@@ -46,7 +46,7 @@ INSERT INTO sink_user_product
 SELECT
     user_id + 100000000,
     product_id,
-    CAST('PROD-002-D7' AS STRING),
+    '{"repayment_method":1,"interest_start":"next_day","term":7,"periods":1,"periods_days":[7],"param_tpl":{"aha":0.5,"interest_rate":0,"penalty_rate":0.05,"post_paid_rate":0,"reduction_rate":0,"roll_allowed":0,"roll_due_method":1,"rollover_rate":0,"service_fee_rate":0,"tax_fee_rate":0,"upfront_rate":0.35,"value_date":0}}',
     CAST(1 AS TINYINT),
     credit_amount_minor,
     unpaid_amount_minor,
