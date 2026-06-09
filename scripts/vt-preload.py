@@ -32,6 +32,9 @@ STATUS_PROCESSING = 9
 _print_lock = threading.Lock()
 _db_lock = threading.Lock()
 
+# 单次 mysql 写入条数上限，避免 `mysql -e` 参数过长 (Argument list too long)
+DB_WRITE_CHUNK = 300
+
 
 def log(msg: str, *, err: bool = False) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -108,16 +111,36 @@ def mysql_query(
     return [ln for ln in proc.stdout.splitlines() if ln.strip()]
 
 
+def _mysql_run(
+    host: str, port: str, user: str, password: str, database: str,
+    sql: str, *, via_stdin: bool,
+) -> None:
+    env = os.environ.copy()
+    env["MYSQL_PWD"] = password
+    cmd = ["mysql", "-h", host, "-P", port, "-u", user, database]
+    if via_stdin:
+        proc = subprocess.run(cmd, input=sql, env=env, capture_output=True, text=True)
+    else:
+        proc = subprocess.run([*cmd, "-e", sql], env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or proc.stdout.strip() or "mysql exec failed"
+        if "1142" in err and "UPDATE" in err:
+            err += (
+                "\n提示: vt-preload 需要 vt_token_cache 的 UPDATE 权限。"
+                "\n  GRANT SELECT, UPDATE ON nigeria_backend.vt_token_cache TO '"
+                f"{user}'@'<脚本机器IP>'; FLUSH PRIVILEGES;"
+                "\n  见 sql/ddl/vt_token_cache_grants.sql"
+            )
+        raise RuntimeError(err)
+
+
 def mysql_exec(
     host: str, port: str, user: str, password: str, database: str, sql: str,
 ) -> None:
     with _db_lock:
-        env = os.environ.copy()
-        env["MYSQL_PWD"] = password
-        cmd = ["mysql", "-h", host, "-P", port, "-u", user, database, "-e", sql]
-        proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "mysql exec failed")
+        # 超长 SQL 走 stdin，避免 Argument list too long
+        via_stdin = len(sql) > 32000
+        _mysql_run(host, port, user, password, database, sql, via_stdin=via_stdin)
 
 
 def escape_sql(s: str) -> str:
@@ -169,10 +192,20 @@ def status_clause(retry_failed: bool) -> str:
     return f"status IN ({STATUS_PENDING},{STATUS_FAIL})" if retry_failed else f"status = {STATUS_PENDING}"
 
 
+def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
+    result: List[Tuple[int, str]] = []
+    for row in rows:
+        parts = row.split("\t", 1)
+        if len(parts) == 2:
+            result.append((int(parts[0]), parts[1]))
+    return result
+
+
 def fetch_pending_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, batch_size: int, retry_failed: bool,
 ) -> List[Tuple[int, str]]:
+    """dry-run 用：只读不认领。"""
     sql = f"""
 SELECT id, raw_value
 FROM vt_token_cache
@@ -182,23 +215,34 @@ WHERE vt_type = '{escape_sql(vt_type)}'
 ORDER BY id
 LIMIT {int(batch_size)};
 """
-    rows = mysql_query(host, port, user, password, database, sql)
-    result: List[Tuple[int, str]] = []
-    for row in rows:
-        parts = row.split("\t", 1)
-        if len(parts) == 2:
-            result.append((int(parts[0]), parts[1]))
-    return result
+    return parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
 
 
-def mark_processing(
-    host: str, port: str, user: str, password: str, database: str, ids: List[int],
-) -> None:
-    if not ids:
-        return
-    id_list = ",".join(str(i) for i in ids)
-    sql = f"UPDATE vt_token_cache SET status={STATUS_PROCESSING} WHERE id IN ({id_list});"
-    mysql_exec(host, port, user, password, database, sql)
+def claim_and_fetch_batch(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, batch_size: int, retry_failed: bool,
+) -> List[Tuple[int, str]]:
+    """原子认领：UPDATE ... LIMIT，再 SELECT status=9，避免百万 id IN (...) 撑爆命令行。"""
+    vt = escape_sql(vt_type)
+    limit = int(batch_size)
+    claim_sql = f"""
+UPDATE vt_token_cache
+SET status = {STATUS_PROCESSING}
+WHERE vt_type = '{vt}'
+  AND {status_clause(retry_failed)}
+  AND raw_value IS NOT NULL AND raw_value <> ''
+ORDER BY id
+LIMIT {limit};
+"""
+    mysql_exec(host, port, user, password, database, claim_sql)
+    fetch_sql = f"""
+SELECT id, raw_value
+FROM vt_token_cache
+WHERE vt_type = '{vt}' AND status = {STATUS_PROCESSING}
+ORDER BY id
+LIMIT {limit};
+"""
+    return parse_id_raw_rows(mysql_query(host, port, user, password, database, fetch_sql))
 
 
 def mark_success(
@@ -207,15 +251,26 @@ def mark_success(
 ) -> None:
     if not updates:
         return
-    parts = []
-    for row_id, token, masking in updates:
-        mask_sql = "NULL" if masking is None else f"'{escape_sql(masking)}'"
-        parts.append(
-            f"UPDATE vt_token_cache SET status={STATUS_OK}, token='{escape_sql(token)}', "
-            f"masking={mask_sql}, last_error=NULL "
-            f"WHERE id={row_id};"
+    for i in range(0, len(updates), DB_WRITE_CHUNK):
+        chunk = updates[i:i + DB_WRITE_CHUNK]
+        token_cases = " ".join(
+            f"WHEN {row_id} THEN '{escape_sql(token)}'" for row_id, token, _ in chunk
         )
-    mysql_exec(host, port, user, password, database, "".join(parts))
+        mask_parts = []
+        for row_id, _, masking in chunk:
+            if masking is None:
+                mask_parts.append(f"WHEN {row_id} THEN NULL")
+            else:
+                mask_parts.append(f"WHEN {row_id} THEN '{escape_sql(masking)}'")
+        mask_cases = " ".join(mask_parts)
+        id_list = ",".join(str(row_id) for row_id, _, _ in chunk)
+        sql = (
+            f"UPDATE vt_token_cache SET status={STATUS_OK}, last_error=NULL, "
+            f"token = CASE id {token_cases} END, "
+            f"masking = CASE id {mask_cases} END "
+            f"WHERE id IN ({id_list});"
+        )
+        mysql_exec(host, port, user, password, database, sql)
 
 
 def mark_failed(
@@ -225,12 +280,14 @@ def mark_failed(
     if not ids:
         return
     err = escape_sql(error[:500])
-    id_list = ",".join(str(i) for i in ids)
-    sql = (
-        f"UPDATE vt_token_cache SET status={STATUS_FAIL}, retry_count=retry_count+1, "
-        f"last_error='{err}' WHERE id IN ({id_list});"
-    )
-    mysql_exec(host, port, user, password, database, sql)
+    for i in range(0, len(ids), DB_WRITE_CHUNK):
+        chunk = ids[i:i + DB_WRITE_CHUNK]
+        id_list = ",".join(str(row_id) for row_id in chunk)
+        sql = (
+            f"UPDATE vt_token_cache SET status={STATUS_FAIL}, retry_count=retry_count+1, "
+            f"last_error='{err}' WHERE id IN ({id_list});"
+        )
+        mysql_exec(host, port, user, password, database, sql)
 
 
 def reset_processing(
@@ -407,20 +464,22 @@ def process_vt_type(
             log(f"[{vt_type}] 全部处理完成。")
             break
 
-        pending = fetch_pending_batch(
-            host, port, user, password, database,
-            vt_type, claim_batch_size, retry_failed,
-        )
+        round_no += 1
+        t_claim = time.time()
+        if dry_run:
+            pending = fetch_pending_batch(
+                host, port, user, password, database,
+                vt_type, claim_batch_size, retry_failed,
+            )
+        else:
+            pending = claim_and_fetch_batch(
+                host, port, user, password, database,
+                vt_type, claim_batch_size, retry_failed,
+            )
+        claim_db_sec = time.time() - t_claim
         if not pending:
             log(f"[{vt_type}] 无待处理记录。")
             break
-
-        round_no += 1
-        ids = [p[0] for p in pending]
-        t_claim = time.time()
-        if not dry_run:
-            mark_processing(host, port, user, password, database, ids)
-        claim_db_sec = time.time() - t_claim
 
         chunks = chunk_list(pending, http_batch_size)
         log(

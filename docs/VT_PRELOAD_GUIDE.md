@@ -30,6 +30,17 @@ cp .env.example .env   # 填好 SOURCE_* / TARGET_* / VT_BASE_URL
 
 确认本机或服务器有 `mysql` 客户端、`python3`。
 
+**权限**：`.env` 里 `SOURCE_MYSQL_USER`（常见 `flink_cdc`）除 CDC 的 `SELECT` 外，还需对 `vt_token_cache` 有 **`UPDATE`**。  
+若报错 `ERROR 1142 UPDATE command denied`，用 DBA 在源库执行（把 IP 换成跑脚本的机器，如 `101.47.31.184`）：
+
+```sql
+USE nigeria_backend;
+GRANT SELECT, UPDATE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'101.47.31.184';
+FLUSH PRIVILEGES;
+```
+
+或参考 `sql/ddl/vt_token_cache_grants.sql`。建表/灌数若也用 `flink_cdc`，另加 `INSERT`。
+
 ---
 
 ## 第 1 步：源库建字典表
