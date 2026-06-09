@@ -125,17 +125,17 @@ FROM (
             )
         ) AS mobile_token,
         u.closed_time,
-        COALESCE(u.reg_device_uuid, ''),
+        COALESCE(u.reg_device_uuid, '') AS reg_device_uuid,
         u.reg_time,
-        CAST(u.test_flag AS TINYINT),
+        CAST(u.test_flag AS TINYINT) AS test_flag,
         u.utm_source,
         u.utm_medium,
         u.utm_campaign,
         u.utm_content,
         u.utm_term,
-        CAST(u.campaign_id AS STRING),
-        CAST(u.ad_group_id AS STRING),
-        CAST(u.advertiser_id AS STRING)
+        CAST(u.campaign_id AS STRING) AS campaign_id,
+        CAST(u.ad_group_id AS STRING) AS ad_group_id,
+        CAST(u.advertiser_id AS STRING) AS advertiser_id
     FROM src_lm_user AS u
     LEFT JOIN dim_vt_mobile FOR SYSTEM_TIME AS OF u.proc_time AS vt
         ON vt.vt_type = 'mobile'
