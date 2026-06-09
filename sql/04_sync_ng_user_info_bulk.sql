@@ -5,7 +5,6 @@
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
-SET 'table.exec.resource.default-parallelism' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
     id BIGINT, `appId` INT, mobile STRING, `deviceId` BIGINT,

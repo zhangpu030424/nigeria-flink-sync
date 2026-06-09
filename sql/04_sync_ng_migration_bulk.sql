@@ -6,7 +6,6 @@
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
-SET 'table.exec.resource.default-parallelism' = '${FLINK_PARALLELISM}';
 
 -- ===================== 连接参数（按需修改） =====================
 -- 源库 market

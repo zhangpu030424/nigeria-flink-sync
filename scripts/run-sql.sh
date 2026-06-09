@@ -50,7 +50,7 @@ REMOTE="/tmp/nigeria-flink-run.sql"
 
 echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
-grep -E "^SET 'parallelism|^SET 'table.exec.resource" "$PREPARED" 2>/dev/null | head -3 || true
+grep -E "^SET 'parallelism" "$PREPARED" 2>/dev/null | head -2 || true
 docker cp "$PREPARED" "${CONTAINER}:${REMOTE}"
 docker exec "$CONTAINER" ./bin/sql-client.sh -f "$REMOTE"
 rm -f "$PREPARED"
