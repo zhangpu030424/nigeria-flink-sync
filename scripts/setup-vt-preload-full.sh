@@ -43,11 +43,11 @@ run_sql_file sql/ddl/source_materialize_user_adjust.sql || true
 echo ">> [2/5] 创建 vt_token_cache 并灌入全类型去重明文（mobile/gaid_idfa/bank_account/id_number）"
 run_sql_file sql/ddl/vt_token_cache_init_all.sql
 
-echo ">> [3/5] 脚本批量 /v2t（多线程，默认 4 workers）"
+echo ">> [3/5] 脚本批量 /v2t（多线程，默认 8 workers × 5万/请求）"
 ./scripts/vt-preload.sh --vt-type all \
-  --workers "${VT_PRELOAD_WORKERS:-4}" \
-  --batch-size "${VT_PRELOAD_BATCH_SIZE:-10000}" \
-  --http-batch-size "${VT_PRELOAD_HTTP_BATCH:-2000}"
+  --workers "${VT_PRELOAD_WORKERS:-8}" \
+  --batch-size "${VT_PRELOAD_BATCH_SIZE:-100000}" \
+  --http-batch-size "${VT_PRELOAD_HTTP_BATCH:-50000}"
 
 echo ">> [4/5] 重建 user_sync_staging（含 mobile_token）"
 run_sql_file sql/ddl/source_user_sync_staging_vt.sql

@@ -5,7 +5,7 @@
 
 用法:
   ./scripts/vt-preload.sh
-  ./scripts/vt-preload.sh --workers 8 --batch-size 8000 --http-batch-size 2000
+  ./scripts/vt-preload.sh --workers 20 --batch-size 1000000 --http-batch-size 50000
   ./scripts/vt-preload.sh --vt-type gaid_idfa --retry-failed
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # status=9 表示本脚本已认领、VT 进行中（崩溃后可 --reset-processing 重置为 0）
 STATUS_PENDING = 0
@@ -33,9 +33,50 @@ _print_lock = threading.Lock()
 _db_lock = threading.Lock()
 
 
-def log(msg: str) -> None:
+def log(msg: str, *, err: bool = False) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
     with _print_lock:
-        print(msg, flush=True)
+        stream = sys.stderr if err else sys.stdout
+        print(f"[{ts}] {msg}", file=stream, flush=True)
+
+
+class ProgressTracker:
+    """线程安全进度计数：已处理 / 剩余 / 吞吐。"""
+
+    def __init__(self, vt_type: str, initial_pending: int) -> None:
+        self.vt_type = vt_type
+        self.initial_pending = initial_pending
+        self.ok = 0
+        self.fail = 0
+        self.start_time = time.time()
+        self._lock = threading.Lock()
+
+    def add(self, ok: int = 0, fail: int = 0) -> Dict[str, float]:
+        with self._lock:
+            self.ok += ok
+            self.fail += fail
+            done = self.ok + self.fail
+            remain = max(0, self.initial_pending - done)
+            pct = (done / self.initial_pending * 100.0) if self.initial_pending else 100.0
+            elapsed = max(time.time() - self.start_time, 0.001)
+            rate_per_min = self.ok / elapsed * 60.0
+            return {
+                "done": done,
+                "remain": remain,
+                "pct": pct,
+                "ok": self.ok,
+                "fail": self.fail,
+                "rate": rate_per_min,
+                "elapsed": elapsed,
+            }
+
+    def summary(self) -> str:
+        s = self.add(0, 0)
+        return (
+            f"进度 {s['done']}/{self.initial_pending} ({s['pct']:.1f}%) "
+            f"剩余 {s['remain']} | 成功 {s['ok']} 失败 {s['fail']} | "
+            f"约 {s['rate']:.0f} 条/min | 已运行 {s['elapsed']:.0f}s"
+        )
 
 
 def load_dotenv(path: str) -> None:
@@ -99,7 +140,10 @@ def parse_tokens(body: str, expected: int) -> Tuple[List[str], List[Optional[str
     return tokens, mask_list[:expected]
 
 
-def call_v2t(base_url: str, values: List[str], timeout_sec: int) -> Tuple[List[str], List[Optional[str]]]:
+def call_v2t(
+    base_url: str, values: List[str], timeout_sec: int,
+) -> Tuple[List[str], List[Optional[str]], float, float]:
+    """返回 (tokens, maskings, http_sec, parse_sec)。"""
     url = base_url.rstrip("/") + "/v2t"
     payload = json.dumps(values, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -108,11 +152,17 @@ def call_v2t(base_url: str, values: List[str], timeout_sec: int) -> Tuple[List[s
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    t_http = time.time()
     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
         body = resp.read().decode("utf-8", errors="replace")
         if resp.status != 200:
             raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
-    return parse_tokens(body, len(values))
+    http_sec = time.time() - t_http
+
+    t_parse = time.time()
+    tokens, maskings = parse_tokens(body, len(values))
+    parse_sec = time.time() - t_parse
+    return tokens, maskings, http_sec, parse_sec
 
 
 def status_clause(retry_failed: bool) -> str:
@@ -191,17 +241,37 @@ def reset_processing(
     mysql_exec(host, port, user, password, database, sql)
 
 
+def count_pending(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, retry_failed: bool,
+) -> int:
+    sql = f"""
+SELECT COUNT(*) FROM vt_token_cache
+WHERE vt_type='{escape_sql(vt_type)}'
+  AND {status_clause(retry_failed)}
+  AND raw_value IS NOT NULL AND raw_value <> '';
+"""
+    rows = mysql_query(host, port, user, password, database, sql)
+    return int(rows[0]) if rows else 0
+
+
 def count_by_status(
     host: str, port: str, user: str, password: str, database: str, vt_type: str,
-) -> None:
+) -> Dict[int, int]:
     sql = f"""
 SELECT status, COUNT(*) FROM vt_token_cache
 WHERE vt_type='{escape_sql(vt_type)}' GROUP BY status ORDER BY status;
 """
     rows = mysql_query(host, port, user, password, database, sql)
-    log(f"  [{vt_type}] 状态统计:")
+    stats: Dict[int, int] = {}
+    log(f"[{vt_type}] 状态统计:")
     for row in rows:
-        log(f"    {row}")
+        parts = row.split("\t", 1)
+        if len(parts) == 2:
+            stats[int(parts[0])] = int(parts[1])
+            label = {0: "待处理", 1: "已完成", 2: "失败", 9: "进行中"}.get(int(parts[0]), "其他")
+            log(f"  status={parts[0]} ({label}): {parts[1]}")
+    return stats
 
 
 def chunk_list(items: List[Tuple[int, str]], chunk_size: int) -> List[List[Tuple[int, str]]]:
@@ -214,6 +284,8 @@ def process_http_chunk(
     chunk: List[Tuple[int, str]],
     worker_id: int,
     round_no: int,
+    chunk_no: int,
+    chunk_total: int,
     vt_type: str,
     base_url: str,
     timeout_sec: int,
@@ -224,34 +296,68 @@ def process_http_chunk(
     password: str,
     database: str,
     dry_run: bool,
+    progress: ProgressTracker,
 ) -> Tuple[int, int, bool]:
     """返回 (成功条数, 失败条数, 是否整 chunk 失败)"""
     ids = [c[0] for c in chunk]
     values = [c[1] for c in chunk]
-    label = f"[{vt_type}] round={round_no} worker={worker_id} size={len(values)} id={ids[0]}..{ids[-1]}"
+    size = len(values)
+    prefix = (
+        f"[{vt_type}] 第{round_no}轮 worker={worker_id} "
+        f"任务{chunk_no}/{chunk_total} 本批{size}条 id={ids[0]}..{ids[-1]}"
+    )
 
     if dry_run:
-        log(f"  {label} [dry-run]")
-        return len(values), 0, False
+        snap = progress.add(ok=size)
+        log(
+            f"{prefix} | [dry-run] | "
+            f"进度 {snap['done']}/{progress.initial_pending} ({snap['pct']:.1f}%) "
+            f"剩余 {snap['remain']}"
+        )
+        return size, 0, False
 
     last_err = "unknown"
     for attempt in range(1, max_retries + 1):
-        t0 = time.time()
+        t_total = time.time()
         try:
-            tokens, maskings = call_v2t(base_url, values, timeout_sec)
+            tokens, maskings, http_sec, parse_sec = call_v2t(base_url, values, timeout_sec)
             updates = [(ids[i], tokens[i], maskings[i]) for i in range(len(ids))]
+
+            t_db = time.time()
             mark_success(host, port, user, password, database, updates)
-            cost = time.time() - t0
-            log(f"  {label} OK {cost:.1f}s")
-            return len(values), 0, False
+            db_sec = time.time() - t_db
+
+            total_sec = time.time() - t_total
+            snap = progress.add(ok=size)
+            log(
+                f"{prefix} | VT接口 {http_sec:.2f}s | 解析 {parse_sec:.3f}s | "
+                f"入库 {db_sec:.2f}s | 合计 {total_sec:.2f}s | "
+                f"进度 {snap['done']}/{progress.initial_pending} ({snap['pct']:.1f}%) "
+                f"剩余 {snap['remain']} | 成功 {snap['ok']} 失败 {snap['fail']} | "
+                f"约 {snap['rate']:.0f} 条/min"
+            )
+            return size, 0, False
         except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
             last_err = str(e)
-            log(f"  {label} 失败 {attempt}/{max_retries}: {last_err}")
+            elapsed = time.time() - t_total
+            log(
+                f"{prefix} | 第{attempt}/{max_retries}次失败 耗时 {elapsed:.2f}s | {last_err}",
+                err=True,
+            )
             if attempt < max_retries:
                 time.sleep(0.5 * attempt)
 
+    t_db = time.time()
     mark_failed(host, port, user, password, database, ids, last_err)
-    return 0, len(values), True
+    db_sec = time.time() - t_db
+    snap = progress.add(fail=size)
+    log(
+        f"{prefix} | 入库(失败标记) {db_sec:.2f}s | "
+        f"进度 {snap['done']}/{progress.initial_pending} ({snap['pct']:.1f}%) "
+        f"剩余 {snap['remain']} | 成功 {snap['ok']} 失败 {snap['fail']}",
+        err=True,
+    )
+    return 0, size, True
 
 
 def process_vt_type(
@@ -271,16 +377,34 @@ def process_vt_type(
     retry_failed: bool,
     dry_run: bool,
 ) -> int:
-    log(f"\n===== vt_type={vt_type} workers={workers} claim={claim_batch_size} http={http_batch_size} =====")
+    log(
+        f"===== 开始 vt_type={vt_type} | workers={workers} "
+        f"认领批次={claim_batch_size} HTTP批次={http_batch_size} ====="
+    )
     count_by_status(host, port, user, password, database, vt_type)
+    initial_pending = count_pending(
+        host, port, user, password, database, vt_type, retry_failed,
+    )
+    if initial_pending == 0:
+        log(f"[{vt_type}] 无待处理记录，跳过。")
+        return 0
+
+    log(f"[{vt_type}] 本次待处理共 {initial_pending} 条")
+    progress = ProgressTracker(vt_type, initial_pending)
 
     round_no = 0
-    total_ok = 0
-    total_fail = 0
     exit_code = 0
 
     while True:
         if max_rounds > 0 and round_no >= max_rounds:
+            log(f"[{vt_type}] 已达 max_rounds={max_rounds}，停止。")
+            break
+
+        db_remain = count_pending(
+            host, port, user, password, database, vt_type, retry_failed,
+        )
+        if db_remain == 0:
+            log(f"[{vt_type}] 全部处理完成。")
             break
 
         pending = fetch_pending_batch(
@@ -293,42 +417,51 @@ def process_vt_type(
 
         round_no += 1
         ids = [p[0] for p in pending]
+        t_claim = time.time()
         if not dry_run:
             mark_processing(host, port, user, password, database, ids)
+        claim_db_sec = time.time() - t_claim
 
         chunks = chunk_list(pending, http_batch_size)
-        log(f"[{vt_type}] 第 {round_no} 轮: 认领 {len(pending)} 条 → {len(chunks)} 个 HTTP 任务 (workers={workers})")
+        log(
+            f"[{vt_type}] 第 {round_no} 轮开始 | 认领 {len(pending)} 条 "
+            f"(DB剩余 {db_remain}) | 拆成 {len(chunks)} 个 HTTP 任务 | "
+            f"认领入库 {claim_db_sec:.2f}s | {progress.summary()}"
+        )
 
-        round_ok = 0
-        round_fail = 0
+        round_t0 = time.time()
         chunk_failed = False
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
                     process_http_chunk,
-                    chunk, idx + 1, round_no, vt_type,
-                    base_url, timeout_sec, max_retries,
-                    host, port, user, password, database, dry_run,
+                    chunk, idx + 1, round_no, idx + 1, len(chunks),
+                    vt_type, base_url, timeout_sec, max_retries,
+                    host, port, user, password, database, dry_run, progress,
                 ): idx
                 for idx, chunk in enumerate(chunks)
             }
             for fut in as_completed(futures):
-                ok, fail, hard_fail = fut.result()
-                round_ok += ok
-                round_fail += fail
+                _ok, _fail, hard_fail = fut.result()
                 if hard_fail:
                     chunk_failed = True
 
-        total_ok += round_ok
-        total_fail += round_fail
-        log(f"[{vt_type}] 第 {round_no} 轮完成: ok={round_ok} fail={round_fail} 累计 ok={total_ok}")
+        round_sec = time.time() - round_t0
+        db_remain_after = count_pending(
+            host, port, user, password, database, vt_type, retry_failed,
+        )
+        log(
+            f"[{vt_type}] 第 {round_no} 轮结束 | 耗时 {round_sec:.1f}s | "
+            f"DB剩余 {db_remain_after} | {progress.summary()}"
+        )
 
         if chunk_failed:
-            log(f"[{vt_type}] 本轮有 chunk 失败，可用 --retry-failed 重试", file=sys.stderr)
+            log(f"[{vt_type}] 本轮有 chunk 失败，可用 --retry-failed 重试", err=True)
             exit_code = 2
 
     count_by_status(host, port, user, password, database, vt_type)
+    log(f"[{vt_type}] 结束 | {progress.summary()}")
     return exit_code
 
 
@@ -360,11 +493,12 @@ def main() -> int:
     database = os.environ.get("SOURCE_MYSQL_DATABASE", "nigeria_backend")
     base_url = os.environ.get("VT_BASE_URL", "http://101.47.27.225")
 
-    workers = args.workers or int(os.environ.get("VT_PRELOAD_WORKERS", "4"))
-    claim_batch = args.batch_size or int(os.environ.get("VT_PRELOAD_BATCH_SIZE", "10000"))
+    workers = args.workers or int(os.environ.get("VT_PRELOAD_WORKERS", "8"))
+    claim_batch = args.batch_size or int(os.environ.get("VT_PRELOAD_BATCH_SIZE", "100000"))
     http_batch = args.http_batch_size or int(os.environ.get("VT_PRELOAD_HTTP_BATCH", "0"))
     if http_batch <= 0:
-        http_batch = max(500, claim_batch // max(workers, 1))
+        # 未配置时：优先单次 5 万（压测可扛），否则按认领数/workers 均分
+        http_batch = min(50000, max(500, claim_batch // max(workers, 1)))
     timeout_sec = int(os.environ.get("VT_BATCH_TIMEOUT_SEC", "300"))
     max_retries = int(os.environ.get("VT_BATCH_MAX_RETRIES", "3"))
 

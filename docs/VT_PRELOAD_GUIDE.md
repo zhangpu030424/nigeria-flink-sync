@@ -57,14 +57,14 @@ mysql -h $SOURCE_MYSQL_HOST -u $SOURCE_MYSQL_USER -p $SOURCE_MYSQL_DATABASE \
 ```bash
 chmod +x scripts/vt-preload.sh scripts/vt-preload.py
 
-# 默认：4 线程，每轮认领 10000，单次 HTTP 2000
+# 默认：8 线程，每轮认领 10 万，单次 HTTP 5 万（VT 20 核压测可扛）
 ./scripts/vt-preload.sh
 
-# 调参示例（8 线程 × 2000/请求 ≈ 每轮 16000 条并行 VT）
-./scripts/vt-preload.sh --workers 8 --batch-size 16000 --http-batch-size 2000
+# 拉满 20 核：20 路并行，每路 5 万/请求，每轮最多 100 万
+./scripts/vt-preload.sh --workers 20 --batch-size 1000000 --http-batch-size 50000
 
-# 可选：更小单次 HTTP 避免 504
-VT_PRELOAD_HTTP_BATCH=1500 ./scripts/vt-preload.sh --workers 4
+# 保守模式（若出现 504 再降）
+VT_PRELOAD_HTTP_BATCH=10000 VT_PRELOAD_WORKERS=4 ./scripts/vt-preload.sh
 
 # 失败重试
 ./scripts/vt-preload.sh --retry-failed
@@ -73,8 +73,11 @@ VT_PRELOAD_HTTP_BATCH=1500 ./scripts/vt-preload.sh --workers 4
 ./scripts/vt-preload.sh --reset-processing
 ```
 
-**加速**：优先调 `--workers` / `VT_PRELOAD_WORKERS`（单进程多线程，推荐 4~8）。  
-若仍不够，可按 `vt_type` 拆多终端（如 `--vt-type gaid_idfa`），避免同类型重复认领。
+**加速**（按压测结果）：
+- 单次 `/v2t` 可到 **5 万条**（20 核 VT 服务验证通过）
+- `--workers` 与 VT 核数对齐，如 **20 workers × 5万/请求**
+- `claim_batch` = `workers × http_batch_size`（如 20×50000=1000000）
+- 若仍不够，按 `vt_type` 拆多终端（`--vt-type gaid_idfa`），避免同类型重复认领
 
 成功标志：`status=1` 覆盖全部，`status=2` 为 0 或可忽略。
 
