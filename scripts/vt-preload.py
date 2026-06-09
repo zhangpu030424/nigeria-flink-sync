@@ -2,9 +2,9 @@
 """
 VT 字典预加载：批量 /v2t 写入 vt_token_cache。
 
-默认 fast 模式（对齐 Flink 吞吐）：
-  读 vt_token_cache status=0（走索引，秒级）→ 并行 /v2t → UPSERT
-  需先 init_all 灌入 status=0，或 cache 里已有待处理数据
+默认 fast 模式（目标 20万/分钟）：
+  认领 status=0 → 4路×5万 并行 /v2t（HTTP长连接）→ 异步入库 UPSERT
+  需 init_all 预灌；勿用 stream 源表反查（极慢）
 
 mode=stream：源表 NOT EXISTS 反查（极慢，仅无预灌时用）
 mode=cache：旧认领 UPDATE 模式
@@ -16,17 +16,20 @@ mode=cache：旧认领 UPDATE 模式
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 STATUS_PENDING = 0
 STATUS_OK = 1
@@ -34,8 +37,11 @@ STATUS_FAIL = 2
 STATUS_PROCESSING = 9
 
 _print_lock = threading.Lock()
-DB_INSERT_CHUNK = 2000
+_db_write_lock = threading.Lock()
+# 单次 UPSERT 行数（过大则按此拆分）；50k 一批对齐 Flink /v2t
+DB_UPSERT_CHUNK = 50000
 DEFAULT_HEARTBEAT_SEC = 30
+TARGET_RATE_PER_MIN = 200_000
 
 # 源表与 vt_token_cache 排序规则可能不同（0900_ai_ci vs unicode_ci），比较时统一 COLLATE
 COLLATE_CMP = "utf8mb4_bin"
@@ -118,15 +124,18 @@ def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
     clause = f"LIMIT {int(limit)}" if limit is not None else ""
     return SOURCE_QUERIES[vt_type].format(not_vt=not_vt, limit_clause=clause)
 
-CACHE_PENDING_SQL = """
-SELECT raw_value FROM vt_token_cache
+CACHE_PENDING_ID_SQL = """
+SELECT id, raw_value FROM vt_token_cache
 WHERE vt_type = '{vt_type}' AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
 ORDER BY id
 LIMIT {limit}
 """
 
-CACHE_RETRY_SQL = CACHE_PENDING_SQL
+# 写库策略：delete_insert=SELECT id 后 DELETE+INSERT（快）；upsert=ON DUPLICATE KEY UPDATE
+WRITE_DELETE_INSERT = "delete_insert"
+WRITE_UPSERT = "upsert"
+DB_DELETE_CHUNK = 5000
 
 
 def log(msg: str, *, err: bool = False) -> None:
@@ -266,23 +275,192 @@ def parse_tokens(body: str, expected: int) -> Tuple[List[str], List[Optional[str
     return tokens, mask_list[:expected]
 
 
+class V2tHttpClient:
+    """线程内复用 HTTP 连接，对齐 Flink VtBatchClient 长连接行为。"""
+
+    def __init__(self, base_url: str, timeout_sec: int) -> None:
+        self.base_url = base_url.rstrip("/")
+        parsed = urllib.parse.urlparse(self.base_url)
+        self._host = parsed.hostname or "localhost"
+        self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        self._https = parsed.scheme == "https"
+        self._timeout = timeout_sec
+        self._conn: Optional[http.client.HTTPConnection] = None
+
+    def _connection(self) -> http.client.HTTPConnection:
+        if self._conn is not None:
+            return self._conn
+        if self._https:
+            import ssl  # noqa: PLC0415
+            ctx = ssl.create_default_context()
+            self._conn = http.client.HTTPSConnection(
+                self._host, self._port, timeout=self._timeout, context=ctx,
+            )
+        else:
+            self._conn = http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
+        return self._conn
+
+    def call_v2t(self, values: List[str]) -> Tuple[List[str], List[Optional[str]], float, float]:
+        path = urllib.parse.urlparse(self.base_url).path.rstrip("/") + "/v2t"
+        payload = json.dumps(values, ensure_ascii=False).encode("utf-8")
+        t_http = time.time()
+        last_err: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                conn = self._connection()
+                conn.request("POST", path, body=payload, headers={"Content-Type": "application/json"})
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8", errors="replace")
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
+                http_sec = time.time() - t_http
+                t_parse = time.time()
+                tokens, maskings = parse_tokens(body, len(values))
+                return tokens, maskings, http_sec, time.time() - t_parse
+            except (http.client.HTTPException, OSError, RuntimeError) as e:
+                last_err = e
+                try:
+                    if self._conn:
+                        self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+        raise RuntimeError(str(last_err))
+
+
+_vt_tls = threading.local()
+
+
 def call_v2t(base_url: str, values: List[str], timeout_sec: int) -> Tuple[List[str], List[Optional[str]], float, float]:
-    url = base_url.rstrip("/") + "/v2t"
-    payload = json.dumps(values, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    t_http = time.time()
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
-    http_sec = time.time() - t_http
-    t_parse = time.time()
-    tokens, maskings = parse_tokens(body, len(values))
-    return tokens, maskings, http_sec, time.time() - t_parse
+    if not hasattr(_vt_tls, "clients"):
+        _vt_tls.clients = {}
+    client = _vt_tls.clients.get(base_url)
+    if client is None:
+        client = V2tHttpClient(base_url, timeout_sec)
+        _vt_tls.clients[base_url] = client
+    return client.call_v2t(values)
+
+
+class AsyncUpsertWriter:
+    """VT 与入库流水线：HTTP 返回后立即入队，后台线程写 MySQL。"""
+
+    _STOP = object()
+
+    def __init__(
+        self, host: str, port: str, user: str, password: str, database: str,
+        vt_type: str, workers: int = 2, write_mode: str = WRITE_DELETE_INSERT,
+    ) -> None:
+        self._db = (host, port, user, password, database)
+        self.vt_type = vt_type
+        self.write_mode = write_mode
+        self._q: queue.Queue[Any] = queue.Queue(maxsize=32)
+        self._threads = [
+            threading.Thread(target=self._loop, name=f"upsert-{i}", daemon=True)
+            for i in range(max(1, workers))
+        ]
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        for t in self._threads:
+            t.start()
+        self._started = True
+
+    def _loop(self) -> None:
+        while True:
+            item = self._q.get()
+            try:
+                if item is self._STOP:
+                    break
+                kind = item[0]
+                host, port, user, password, database = self._db
+                if kind == "ok":
+                    if item[1] == WRITE_DELETE_INSERT:
+                        delete_insert_success(host, port, user, password, database, self.vt_type, item[2])
+                    else:
+                        upsert_success(host, port, user, password, database, self.vt_type, item[2])
+                elif kind == "fail":
+                    if item[1] == WRITE_DELETE_INSERT:
+                        mark_failed_by_ids(host, port, user, password, database, item[2], item[3])
+                    else:
+                        upsert_failed(host, port, user, password, database, self.vt_type, item[2], item[3])
+            finally:
+                self._q.task_done()
+
+    def enqueue_ok(self, write_mode: str, rows: Any) -> None:
+        self._q.put(("ok", write_mode, rows))
+
+    def enqueue_fail(self, write_mode: str, payload: Any, err: str) -> None:
+        self._q.put(("fail", write_mode, payload, err))
+
+    def drain(self) -> None:
+        self._q.join()
+
+    def stop(self) -> None:
+        self.drain()
+        for _ in self._threads:
+            self._q.put(self._STOP)
+        for t in self._threads:
+            t.join(timeout=30)
 
 
 def _sql_lit(s: Optional[str]) -> str:
     return "NULL" if s is None else f"'{escape_sql(s)}'"
+
+
+def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
+    out: List[Tuple[int, str]] = []
+    for row in rows:
+        parts = row.split("\t", 1)
+        if len(parts) == 2:
+            out.append((int(parts[0]), parts[1]))
+    return out
+
+
+def delete_insert_success(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, rows: List[Tuple[int, str, str, Optional[str]]],
+) -> None:
+    """DELETE 旧 status=0 行 + INSERT 新 token 行，比 UPDATE/UPSERT 更轻。"""
+    if not rows:
+        return
+    vt = escape_sql(vt_type)
+    for i in range(0, len(rows), DB_UPSERT_CHUNK):
+        chunk = rows[i:i + DB_UPSERT_CHUNK]
+        stmts: List[str] = []
+        for j in range(0, len(chunk), DB_DELETE_CHUNK):
+            sub = chunk[j:j + DB_DELETE_CHUNK]
+            ids = ",".join(str(r[0]) for r in sub)
+            stmts.append(f"DELETE FROM vt_token_cache WHERE id IN ({ids});")
+        values = ",\n".join(
+            f"('{vt}', '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
+            for _id, raw, tok, mask in chunk
+        )
+        stmts.append(f"""
+INSERT INTO vt_token_cache (vt_type, raw_value, token, masking, status)
+VALUES {values};
+""")
+        with _db_write_lock:
+            mysql_exec(host, port, user, password, database, "\n".join(stmts))
+
+
+def mark_failed_by_ids(
+    host: str, port: str, user: str, password: str, database: str,
+    ids: List[int], error: str,
+) -> None:
+    if not ids:
+        return
+    err = escape_sql(error[:500])
+    for i in range(0, len(ids), DB_DELETE_CHUNK):
+        chunk = ids[i:i + DB_DELETE_CHUNK]
+        id_list = ",".join(str(x) for x in chunk)
+        sql = (
+            f"UPDATE vt_token_cache SET status={STATUS_FAIL}, retry_count=retry_count+1, "
+            f"last_error='{err}' WHERE id IN ({id_list});"
+        )
+        with _db_write_lock:
+            mysql_exec(host, port, user, password, database, sql)
 
 
 def upsert_success(
@@ -292,15 +470,13 @@ def upsert_success(
     if not rows:
         return
     vt = escape_sql(vt_type)
-    stmts: List[str] = []
-    batches = 0
-    for i in range(0, len(rows), DB_INSERT_CHUNK):
-        chunk = rows[i:i + DB_INSERT_CHUNK]
+    for i in range(0, len(rows), DB_UPSERT_CHUNK):
+        chunk = rows[i:i + DB_UPSERT_CHUNK]
         values = ",\n".join(
             f"('{vt}', '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
             for raw, tok, mask in chunk
         )
-        stmts.append(f"""
+        sql = f"""
 INSERT INTO vt_token_cache (vt_type, raw_value, token, masking, status)
 VALUES {values}
 ON DUPLICATE KEY UPDATE
@@ -309,11 +485,9 @@ ON DUPLICATE KEY UPDATE
   status = {STATUS_OK},
   last_error = NULL,
   retry_count = 0;
-""")
-        batches += 1
-    if log_prefix:
-        log(f"{log_prefix} | UPSERT 入库 {len(rows)} 条 ({batches} 批)")
-    mysql_exec(host, port, user, password, database, "\n".join(stmts))
+"""
+        with _db_write_lock:
+            mysql_exec(host, port, user, password, database, sql)
 
 
 def upsert_failed(
@@ -323,8 +497,8 @@ def upsert_failed(
     if not raw_values:
         return
     vt, err = escape_sql(vt_type), escape_sql(error[:500])
-    for i in range(0, len(raw_values), DB_INSERT_CHUNK):
-        chunk = raw_values[i:i + DB_INSERT_CHUNK]
+    for i in range(0, len(raw_values), DB_UPSERT_CHUNK):
+        chunk = raw_values[i:i + DB_UPSERT_CHUNK]
         values = ",\n".join(
             f"('{vt}', '{escape_sql(raw)}', {STATUS_FAIL}, 1, '{err}')"
             for raw in chunk
@@ -343,15 +517,14 @@ ON DUPLICATE KEY UPDATE
 def fetch_fast_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, limit: int, retry_failed: bool,
-) -> List[str]:
-    """从 vt_token_cache 读 status=0，走 idx_status，与 Flink 攒批路径同类（无全表反查）。"""
+) -> List[Tuple[int, str]]:
+    """只 SELECT id+raw_value（无认领 UPDATE），VT 后 DELETE+INSERT。"""
+    vt, lim = escape_sql(vt_type), int(limit)
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
-    sql = CACHE_PENDING_SQL.format(
-        vt_type=escape_sql(vt_type), status=status, limit=int(limit),
-    )
-    log(f"[{vt_type}] fast: 读 cache status={status} LIMIT {limit} ...")
+    sql = CACHE_PENDING_ID_SQL.format(vt_type=vt, status=status, limit=lim)
+    log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ...")
     t0 = time.time()
-    rows = mysql_query(host, port, user, password, database, sql)
+    rows = parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
     log(f"[{vt_type}] SELECT {time.time() - t0:.2f}s，{len(rows)} 条")
     return rows
 
@@ -373,7 +546,7 @@ WHERE vt_type='{escape_sql(vt_type)}' AND status={status}
 def fetch_stream_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, limit: int, retry_failed: bool,
-) -> List[str]:
+) -> List[Tuple[int, str]]:
     if vt_type not in SOURCE_QUERIES:
         return []
     if retry_failed:
@@ -381,9 +554,9 @@ def fetch_stream_batch(
     sql = _source_sql(vt_type, _not_vt_clause(vt_type), int(limit))
     log(f"[{vt_type}] stream慢路径: 源表 NOT EXISTS 反查 LIMIT {limit}（大表可能数分钟）...")
     t0 = time.time()
-    rows = mysql_query(host, port, user, password, database, sql)
-    log(f"[{vt_type}] SELECT 完成 {time.time() - t0:.1f}s，取得 {len(rows)} 条")
-    return rows
+    raws = mysql_query(host, port, user, password, database, sql)
+    log(f"[{vt_type}] SELECT 完成 {time.time() - t0:.1f}s，取得 {len(raws)} 条")
+    return [(0, r) for r in raws]
 
 
 def count_stream_pending(
@@ -438,44 +611,69 @@ def heartbeat_loop(stop: threading.Event, monitor: RoundMonitor, progress: Progr
 
 
 def process_stream_chunk(
-    chunk: List[str], worker_id: int, round_no: int, chunk_no: int, chunk_total: int,
+    chunk: List[Tuple[int, str]], worker_id: int, round_no: int, chunk_no: int, chunk_total: int,
     vt_type: str, base_url: str, timeout_sec: int, max_retries: int,
     host: str, port: str, user: str, password: str, database: str,
     dry_run: bool, progress: ProgressTracker,
+    writer: Optional[AsyncUpsertWriter] = None,
+    write_mode: str = WRITE_DELETE_INSERT,
 ) -> Tuple[int, int, bool]:
     size = len(chunk)
-    prefix = f"[{vt_type}] 第{round_no}轮 w={worker_id} {chunk_no}/{chunk_total} 本批{size}条"
+    ids = [c[0] for c in chunk]
+    values = [c[1] for c in chunk]
+    prefix = f"[{vt_type}] r{round_no} w{worker_id} {chunk_no}/{chunk_total} n={size}"
     if dry_run:
-        snap = progress.add(ok=size)
-        log(f"{prefix} | [dry-run] | {progress.summary()}")
+        progress.add(ok=size)
+        log(f"{prefix} | dry-run | {progress.summary()}")
         return size, 0, False
 
-    log(f"{prefix} → VT 请求开始")
     last_err = "unknown"
     for attempt in range(1, max_retries + 1):
         t0 = time.time()
         try:
-            tokens, maskings, http_sec, parse_sec = call_v2t(base_url, chunk, timeout_sec)
-            rows = [(chunk[i], tokens[i], maskings[i]) for i in range(size)]
-            t_db = time.time()
-            upsert_success(host, port, user, password, database, vt_type, rows, log_prefix=prefix)
-            db_sec = time.time() - t_db
+            tokens, maskings, http_sec, parse_sec = call_v2t(base_url, values, timeout_sec)
+            if write_mode == WRITE_DELETE_INSERT:
+                ok_rows = [
+                    (ids[i], values[i], tokens[i], maskings[i]) for i in range(size)
+                ]
+                if writer is not None:
+                    writer.enqueue_ok(write_mode, ok_rows)
+                else:
+                    delete_insert_success(host, port, user, password, database, vt_type, ok_rows)
+            else:
+                ok_rows = [(values[i], tokens[i], maskings[i]) for i in range(size)]
+                if writer is not None:
+                    writer.enqueue_ok(write_mode, ok_rows)
+                else:
+                    upsert_success(host, port, user, password, database, vt_type, ok_rows)
             snap = progress.add(ok=size)
+            rate = snap["rate"]
+            flag = "✓" if rate >= TARGET_RATE_PER_MIN * 0.8 else "△"
+            wlabel = "DEL+INS" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
             log(
-                f"{prefix} | VT {http_sec:.1f}s | 解析 {parse_sec:.3f}s | UPSERT {db_sec:.1f}s | "
-                f"合计 {time.time() - t0:.1f}s | {progress.summary()}"
+                f"{prefix} | VT {http_sec:.1f}s 解析{parse_sec:.3f}s "
+                f"{'入队' if writer else wlabel} | {time.time() - t0:.1f}s | "
+                f"{flag} {rate:.0f}/min 目标{TARGET_RATE_PER_MIN} | {progress.summary()}"
             )
             return size, 0, False
-        except (urllib.error.URLError, RuntimeError, TimeoutError) as e:
+        except (urllib.error.URLError, RuntimeError, TimeoutError, http.client.HTTPException, OSError) as e:
             last_err = str(e)
-            log(f"{prefix} | 失败 {attempt}/{max_retries} {time.time() - t0:.1f}s | {last_err}", err=True)
+            log(f"{prefix} | 失败 {attempt}/{max_retries} | {last_err}", err=True)
             if attempt < max_retries:
                 time.sleep(0.5 * attempt)
 
-    t_db = time.time()
-    upsert_failed(host, port, user, password, database, vt_type, chunk, last_err)
-    snap = progress.add(fail=size)
-    log(f"{prefix} | 失败入库 {time.time() - t_db:.1f}s | {progress.summary()}", err=True)
+    if write_mode == WRITE_DELETE_INSERT:
+        fail_payload = ids
+        if writer is not None:
+            writer.enqueue_fail(write_mode, fail_payload, last_err)
+        else:
+            mark_failed_by_ids(host, port, user, password, database, ids, last_err)
+    else:
+        if writer is not None:
+            writer.enqueue_fail(write_mode, values, last_err)
+        else:
+            upsert_failed(host, port, user, password, database, vt_type, values, last_err)
+    progress.add(fail=size)
     return 0, size, True
 
 
@@ -485,49 +683,71 @@ def _run_vt_rounds(
     base_url: str, round_batch: int, http_batch_size: int, workers: int,
     timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
     dry_run: bool, heartbeat_sec: int, progress: ProgressTracker,
-    fetch_fn,
+    fetch_fn, write_workers: int, async_write: bool, write_mode: str,
 ) -> int:
-    log(f"===== {mode_label} | {vt_type} | workers={workers} 每轮={round_batch} http={http_batch_size} =====")
+    log(
+        f"===== {mode_label} | {vt_type} | VT并发={workers} "
+        f"每轮={round_batch} 批={http_batch_size} 目标={TARGET_RATE_PER_MIN}/min ====="
+    )
+    writer: Optional[AsyncUpsertWriter] = None
+    if async_write and not dry_run:
+        writer = AsyncUpsertWriter(host, port, user, password, database, vt_type, write_workers, write_mode)
+        writer.start()
+        wlabel = "DELETE+INSERT" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
+        log(f"[{vt_type}] 异步入库 {write_workers} 线程 | {wlabel}（VT 与写库流水线）")
+
     round_no, exit_code = 0, 0
-    while True:
-        if max_rounds > 0 and round_no >= max_rounds:
-            break
-        round_no += 1
-        batch = fetch_fn(host, port, user, password, database, vt_type, round_batch, retry_failed)
-        if not batch:
-            log(f"[{vt_type}] 无更多待 VT 数据")
-            break
-        chunks = chunk_items(batch, http_batch_size)
-        log(f"[{vt_type}] 第{round_no}轮 | {len(batch)}条 → {len(chunks)}个HTTP | {progress.summary()}")
-        monitor = RoundMonitor(vt_type, round_no, len(chunks))
-        stop_hb = threading.Event()
-        hb = None
-        if heartbeat_sec > 0 and not dry_run:
-            hb = threading.Thread(target=heartbeat_loop, args=(stop_hb, monitor, progress, heartbeat_sec), daemon=True)
-            hb.start()
-        round_t0 = time.time()
-        chunk_failed = False
-        try:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futs = {
-                    pool.submit(
-                        process_stream_chunk, ch, i + 1, round_no, i + 1, len(chunks),
-                        vt_type, base_url, timeout_sec, max_retries,
-                        host, port, user, password, database, dry_run, progress,
+    try:
+        while True:
+            if max_rounds > 0 and round_no >= max_rounds:
+                break
+            round_no += 1
+            batch = fetch_fn(host, port, user, password, database, vt_type, round_batch, retry_failed)
+            if not batch:
+                log(f"[{vt_type}] 无更多待 VT 数据")
+                break
+            chunks = chunk_items(batch, http_batch_size)
+            log(f"[{vt_type}] 第{round_no}轮 | {len(batch)}条 → {len(chunks)}路VT | {progress.summary()}")
+            monitor = RoundMonitor(vt_type, round_no, len(chunks))
+            stop_hb = threading.Event()
+            hb = None
+            if heartbeat_sec > 0 and not dry_run:
+                hb = threading.Thread(
+                    target=heartbeat_loop, args=(stop_hb, monitor, progress, heartbeat_sec), daemon=True,
+                )
+                hb.start()
+            round_t0 = time.time()
+            chunk_failed = False
+            try:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futs = {
+                        pool.submit(
+                            process_stream_chunk, ch, i + 1, round_no, i + 1, len(chunks),
+                            vt_type, base_url, timeout_sec, max_retries,
+                        host, port, user, password, database, dry_run, progress, writer, write_mode,
                     ): i for i, ch in enumerate(chunks)
-                }
-                for fut in as_completed(futs):
-                    _, _, hard = fut.result()
-                    monitor.chunk_done()
-                    if hard:
-                        chunk_failed = True
-        finally:
-            stop_hb.set()
-            if hb:
-                hb.join(timeout=1)
-        log(f"[{vt_type}] 第{round_no}轮结束 {time.time() - round_t0:.1f}s | {progress.summary()}")
-        if chunk_failed:
-            exit_code = 2
+                    }
+                    for fut in as_completed(futs):
+                        _, _, hard = fut.result()
+                        monitor.chunk_done()
+                        if hard:
+                            chunk_failed = True
+            finally:
+                stop_hb.set()
+                if hb:
+                    hb.join(timeout=1)
+            if writer is not None:
+                writer.drain()
+            round_rate = len(batch) / max(time.time() - round_t0, 0.001) * 60
+            log(
+                f"[{vt_type}] 第{round_no}轮 {time.time() - round_t0:.1f}s "
+                f"本轮≈{round_rate:.0f}/min | {progress.summary()}"
+            )
+            if chunk_failed:
+                exit_code = 2
+    finally:
+        if writer is not None:
+            writer.stop()
     log(f"[{vt_type}] {mode_label} 结束 | {progress.summary()}")
     return exit_code
 
@@ -537,6 +757,7 @@ def process_vt_type_fast(
     base_url: str, round_batch: int, http_batch_size: int, workers: int,
     timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
     dry_run: bool, heartbeat_sec: int, skip_count: bool,
+    write_workers: int, async_write: bool, write_mode: str,
 ) -> int:
     initial = 0 if skip_count else count_fast_pending(
         host, port, user, password, database, vt_type, retry_failed,
@@ -550,6 +771,7 @@ def process_vt_type_fast(
         vt_type, "fast", host, port, user, password, database, base_url,
         round_batch, http_batch_size, workers, timeout_sec, max_retries,
         max_rounds, retry_failed, dry_run, heartbeat_sec, progress, fetch_fast_batch,
+        write_workers, async_write, write_mode,
     )
 
 
@@ -558,6 +780,7 @@ def process_vt_type_stream(
     base_url: str, round_batch: int, http_batch_size: int, workers: int,
     timeout_sec: int, max_retries: int, max_rounds: int, retry_failed: bool,
     dry_run: bool, heartbeat_sec: int, skip_count: bool,
+    write_workers: int, async_write: bool, write_mode: str,
 ) -> int:
     if vt_type not in SOURCE_QUERIES:
         log(f"[{vt_type}] 无源表配置，跳过")
@@ -570,6 +793,7 @@ def process_vt_type_stream(
         vt_type, "stream", host, port, user, password, database, base_url,
         round_batch, http_batch_size, workers, timeout_sec, max_retries,
         max_rounds, retry_failed, dry_run, heartbeat_sec, progress, fetch_stream_batch,
+        write_workers, async_write, WRITE_UPSERT,
     )
 
 
@@ -577,10 +801,6 @@ def process_vt_type_stream(
 
 def status_clause(retry_failed: bool) -> str:
     return f"status IN ({STATUS_PENDING},{STATUS_FAIL})" if retry_failed else f"status = {STATUS_PENDING}"
-
-
-def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
-    return [(int(p[0]), p[1]) for r in rows if len((p := r.split("\t", 1))) == 2]
 
 
 def claim_and_fetch_batch(
@@ -737,6 +957,11 @@ def main() -> int:
     timeout_sec = int(os.environ.get("VT_BATCH_TIMEOUT_SEC", "300"))
     max_retries = int(os.environ.get("VT_BATCH_MAX_RETRIES", "3"))
     heartbeat_sec = int(os.environ.get("VT_PRELOAD_HEARTBEAT_SEC", str(DEFAULT_HEARTBEAT_SEC)))
+    write_workers = int(os.environ.get("VT_PRELOAD_WRITE_WORKERS", "2"))
+    async_write = os.environ.get("VT_PRELOAD_ASYNC_WRITE", "1").strip() not in ("0", "false", "no")
+    write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_DELETE_INSERT)
+    if write_mode not in (WRITE_DELETE_INSERT, WRITE_UPSERT):
+        write_mode = WRITE_DELETE_INSERT
 
     if not all([host, user, password, database]):
         print("缺少 SOURCE_MYSQL_* 配置", file=sys.stderr)
@@ -752,6 +977,11 @@ def main() -> int:
 
     check_table_ready(host, port, user, password, database)
 
+    if mode in ("fast", "stream"):
+        log("重置中断认领 status=9 → 0 ...")
+        reset_processing(host, port, user, password, database,
+                         None if args.vt_type == "all" else args.vt_type)
+
     if mode == "cache":
         log("cache 模式: 重置 status=9 ...")
         reset_processing(host, port, user, password, database, None if args.vt_type == "all" else args.vt_type)
@@ -761,7 +991,11 @@ def main() -> int:
         f"每轮={round_batch} | http={http_batch} | url={base_url}"
     )
     if mode == "fast":
-        log("fast: 读 vt_token_cache status=0 → VT → UPSERT（需 init_all 预灌；路径接近 Flink 攒批）")
+        wlabel = "SELECT+DELETE+INSERT" if write_mode == WRITE_DELETE_INSERT else "UPSERT"
+        log(
+            f"fast: SELECT status=0 → {workers}路VT×{http_batch} → 异步{wlabel} | "
+            f"目标 {TARGET_RATE_PER_MIN}/min"
+        )
     elif mode == "stream":
         log("stream慢路径: 源表 NOT EXISTS 反查，大表慎用")
 
@@ -779,7 +1013,12 @@ def main() -> int:
         if mode == "cache":
             kw.update(claim_batch=round_batch, http_batch=http_batch, workers=workers)
         else:
-            kw.update(round_batch=round_batch, http_batch_size=http_batch, workers=workers, skip_count=args.skip_count)
+            wm = WRITE_UPSERT if mode == "stream" else write_mode
+            kw.update(
+                round_batch=round_batch, http_batch_size=http_batch, workers=workers,
+                skip_count=args.skip_count, write_workers=write_workers,
+                async_write=async_write, write_mode=wm,
+            )
         code = proc(**kw)  # type: ignore[arg-type]
         if code != 0:
             exit_code = code
