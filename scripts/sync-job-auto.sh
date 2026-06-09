@@ -112,7 +112,8 @@ mysql_count() {
 }
 
 list_running_job_ids() {
-  docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u
+  # 无 RUNNING Job 时 grep 退出码=1；set -euo pipefail 下会误杀脚本
+  docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true
 }
 
 cancel_all_jobs() {

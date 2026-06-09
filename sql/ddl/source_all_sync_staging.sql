@@ -148,6 +148,7 @@ WHERE t.rn = 1;
 ALTER TABLE user_product_sync_staging ADD PRIMARY KEY (user_id, product_id);
 
 -- ---------- 5. application_sync_staging ----------
+-- device_ids / user_bank_info 可能一对多，子查询去重保证每单 o.id 一行
 DROP TABLE IF EXISTS application_sync_staging;
 
 CREATE TABLE application_sync_staging AS
@@ -219,10 +220,37 @@ SELECT o.id,
 FROM user_order o
          INNER JOIN `user` u ON u.id = o.user_id
          LEFT JOIN app_config ac ON ac.app_code = o.app_code
-         LEFT JOIN user_personal_info p ON p.user_id = o.user_id
-         LEFT JOIN user_bank_info ub
-                   ON ub.user_id = o.user_id AND ub.is_default = 1 AND ub.deleted = 0
-         LEFT JOIN device_ids di ON di.device_uuid = u.device_id
+         LEFT JOIN (
+    SELECT user_id, bvn
+    FROM (
+             SELECT user_id, bvn,
+                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+             FROM user_personal_info
+             WHERE bvn IS NOT NULL AND TRIM(bvn) <> ''
+         ) t
+    WHERE rn = 1
+) p ON p.user_id = o.user_id
+         LEFT JOIN (
+    SELECT user_id, bank_code, bank_holder, bank_account
+    FROM (
+             SELECT user_id, bank_code, bank_holder, bank_account,
+                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+             FROM user_bank_info
+             WHERE deleted = 0 AND is_default = 1
+               AND bank_account IS NOT NULL AND TRIM(bank_account) <> ''
+         ) t
+    WHERE rn = 1
+) ub ON ub.user_id = o.user_id
+         LEFT JOIN (
+    SELECT device_uuid, session_uuid, aaid
+    FROM (
+             SELECT device_uuid, session_uuid, aaid,
+                    ROW_NUMBER() OVER (PARTITION BY device_uuid ORDER BY id DESC) AS rn
+             FROM device_ids
+             WHERE device_uuid IS NOT NULL AND TRIM(device_uuid) <> ''
+         ) t
+    WHERE rn = 1
+) di ON di.device_uuid = u.device_id
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
                        AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
