@@ -52,6 +52,25 @@ mysql -h $SOURCE_MYSQL_HOST -u$SOURCE_MYSQL_USER -p $SOURCE_MYSQL_DATABASE \
 
 ---
 
+## 推荐：stream 模式（默认，无需第 2 步预灌）
+
+```bash
+# 仅需建表（脚本也会自动 CREATE IF NOT EXISTS）
+mysql ... < sql/ddl/vt_token_cache.sql
+
+# 直接跑：源表反查未 VT 明文 → 20 路并行 /v2t → UPSERT
+./scripts/vt-preload.sh --workers 20 --http-batch-size 50000 --skip-count
+
+# 权限：vt_token_cache 需 SELECT+INSERT+UPDATE，源表需 SELECT
+# 见 sql/ddl/vt_token_cache_grants.sql
+```
+
+**比旧方案快在哪**：省去 init 百万 INSERT、认领 UPDATE status=9、成功后再 UPDATE，每条数据只写 1 次。
+
+---
+
+## 旧方案：cache 模式 + 预灌（第 2 步）
+
 ## 第 2 步：灌入待 VT 的 mobile（去重）
 
 ```bash
