@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS dim_vt_bank_account (
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
+    id BIGINT,
     group_user_id BIGINT,
     bank_code STRING,
     bank_account_number STRING,
@@ -71,12 +72,14 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
+    e.id,
     e.group_user_id,
     e.bank_code,
     e.bank_account_number,
     e.is_default
 FROM (
     SELECT
+        b.id + 100000000 AS id,
         b.user_id + 100000000 AS group_user_id,
         COALESCE(b.bank_code, '') AS bank_code,
         COALESCE(

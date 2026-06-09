@@ -1,5 +1,5 @@
 -- 全量：CDC user_bankcard_sync_staging → 目标 user_bankcard
--- 映射: group_user_id=user_id+1亿, bank_account_number=VT token, id/created_at/updated_at 不传
+-- 映射: id=user_bank_info.id+1亿, group_user_id=user_id+1亿, bank_account_number=VT token
 -- 前置: source_user_bankcard_sync_staging.sql + vt-preload bank_account 完成
 --
 -- 执行: ./scripts/run-user-bankcard-fast.sh
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS src_bankcard_staging (
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
+    id BIGINT,
     group_user_id BIGINT,
     bank_code STRING,
     bank_account_number STRING,
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
+    id + 100000000,
     user_id + 100000000,
     COALESCE(bank_code, ''),
     bank_account_token,
