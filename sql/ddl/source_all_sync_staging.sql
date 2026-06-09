@@ -1,0 +1,317 @@
+-- =============================================================================
+-- 一步重建全部宽表（VT 已预加载 vt_token_cache status=1 后执行）
+-- mysql -h <host> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sql
+--
+-- 前置（若未做过）:
+--   sql/ddl/source_views_adjust.sql
+--   sql/ddl/source_materialize_user_adjust.sql
+-- =============================================================================
+
+-- ---------- 1. user_sync_staging ----------
+DROP TABLE IF EXISTS user_sync_staging;
+
+CREATE TABLE user_sync_staging AS
+SELECT u.id,
+       u.app_code,
+       u.mobile,
+       u.device_id,
+       u.adid,
+       u.create_time,
+       u.update_time,
+       a.network_name,
+       a.tracker_name,
+       a.campaign_tracker,
+       a.campaign_name,
+       a.creative_name,
+       a.adgroup_tracker,
+       a.creative_tracker,
+       a.adgroup_name,
+       CASE
+           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+           ELSE CONCAT('+234', TRIM(u.mobile))
+       END AS mobile_norm,
+       vt_m.token AS mobile_token
+FROM `user` u
+         LEFT JOIN adjust_latest_by_adid a
+                   ON u.adid IS NOT NULL AND u.adid <> '' AND a.adid = u.adid
+         LEFT JOIN vt_token_cache vt_m
+                   ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
+                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                           ELSE CONCAT('+234', TRIM(u.mobile))
+                       END) COLLATE utf8mb4_bin;
+
+ALTER TABLE user_sync_staging ADD PRIMARY KEY (id);
+
+-- ---------- 2. user_bankcard_sync_staging ----------
+DROP TABLE IF EXISTS user_bankcard_sync_staging;
+
+CREATE TABLE user_bankcard_sync_staging AS
+SELECT b.id,
+       b.user_id,
+       b.bank_code,
+       TRIM(b.bank_account) AS bank_account_raw,
+       vt_b.token AS bank_account_token,
+       b.is_default
+FROM user_bank_info b
+         LEFT JOIN vt_token_cache vt_b
+                   ON vt_b.vt_type = 'bank_account' AND vt_b.status = 1
+                       AND vt_b.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin
+WHERE b.deleted = 0
+  AND b.bank_account IS NOT NULL AND TRIM(b.bank_account) <> '';
+
+ALTER TABLE user_bankcard_sync_staging ADD PRIMARY KEY (id);
+
+-- ---------- 3. user_info_sync_staging ----------
+DROP TABLE IF EXISTS user_info_sync_staging;
+
+CREATE TABLE user_info_sync_staging AS
+SELECT p.user_id,
+       vt_id.token AS id_number_token,
+       TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
+       JSON_OBJECT(
+               'birthday', IFNULL(DATE_FORMAT(p.date_of_birth, '%Y-%m-%d'), CAST(NULL AS JSON)),
+               'gender', p.gender,
+               'education', p.education_level,
+               'marital', p.marriage,
+               'children_num', p.number_of_children,
+               'company', wr.company_name,
+               'job_type', wr.work_type,
+               'profession', wr.occupation,
+               'salary', wr.monthly_income,
+               'credit_limit', cc.credit_limit,
+               'registration_time', UNIX_TIMESTAMP(u.create_time),
+               'salary_monthly', 1,
+               'loan_purpose', CAST(NULL AS JSON),
+               'email', CAST(NULL AS JSON),
+               'ocr', CAST(NULL AS JSON),
+               'survey', CAST(NULL AS JSON),
+               'address', JSON_OBJECT(
+                       'province', p.living_address_state,
+                       'city', p.living_address_city,
+                       'district', CAST(NULL AS JSON),
+                       'village', CAST(NULL AS JSON),
+                       'detail', TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
+                                             COALESCE(p.living_address_second_line, '')))
+                          ),
+               'app', JSON_OBJECT(
+                       'app_id', u.app_code,
+                       'name', ac.app_name,
+                       'version', ac.version
+                      ),
+               'full_name', TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, '')))
+       ) AS info_json
+FROM user_personal_info p
+         INNER JOIN `user` u ON u.id = p.user_id
+         LEFT JOIN user_work_related wr ON wr.user_id = p.user_id
+         LEFT JOIN app_config ac ON ac.app_code = u.app_code
+         LEFT JOIN vt_token_cache vt_id
+                   ON vt_id.vt_type = 'id_number' AND vt_id.status = 1
+                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+         LEFT JOIN (
+    SELECT user_id, credit_limit
+    FROM (
+             SELECT user_id, credit_limit,
+                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY create_time DESC) AS rn
+             FROM risk_user_credit_callback
+         ) t
+    WHERE rn = 1
+) cc ON cc.user_id = p.user_id
+WHERE p.bvn IS NOT NULL AND TRIM(p.bvn) <> '';
+
+ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
+
+-- ---------- 4. user_product_sync_staging（按映射 v3：user_order 取最新 product）----------
+DROP TABLE IF EXISTS user_product_sync_staging;
+
+CREATE TABLE user_product_sync_staging AS
+SELECT t.user_id,
+       t.product_id,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS credit_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS unpaid_amount_minor
+FROM (
+         SELECT o.user_id,
+                o.product_id,
+                o.amount_max,
+                ROW_NUMBER() OVER (PARTITION BY o.user_id, o.product_id ORDER BY o.order_time DESC) AS rn
+         FROM user_order o
+         WHERE o.product_id IS NOT NULL AND TRIM(o.product_id) <> ''
+     ) t
+WHERE t.rn = 1;
+
+ALTER TABLE user_product_sync_staging ADD PRIMARY KEY (user_id, product_id);
+
+-- ---------- 5. application_sync_staging ----------
+DROP TABLE IF EXISTS application_sync_staging;
+
+CREATE TABLE application_sync_staging AS
+SELECT o.id,
+       o.order_no AS application_no,
+       o.order_no AS sn,
+       o.user_id,
+       o.app_code,
+       ac.id AS app_id_num,
+       u.device_id AS device_uuid,
+       di.session_uuid AS session_id,
+       vt_m.token AS mobile_token,
+       vt_id.token AS id_number_token,
+       vt_g.token AS gaid_idfa_token,
+       ub.bank_code,
+       ub.bank_holder AS bank_account_name,
+       vt_ba.token AS bank_account_token,
+       o.product_id,
+       o.period_days,
+       o.period_count,
+       o.re_loan,
+       o.amount_max,
+       o.received,
+       o.repayment,
+       o.amt_due,
+       o.order_time,
+       o.disburse_time,
+       o.settled_time,
+       o.last_repayment_time,
+       o.approval_result,
+       o.disburse_status,
+       o.risk_order_status,
+       o.settled_status,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS credit_limit_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS loan_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS principal_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS total_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS disbursed_amount_minor,
+       CASE
+           WHEN o.settled_status = 1 AND o.risk_order_status = 50 THEN 27
+           WHEN o.settled_status = 1 AND o.risk_order_status = 40 THEN 25
+           WHEN o.settled_status = 1 AND o.risk_order_status = 20 THEN 29
+           WHEN o.settled_status = 1 AND o.risk_order_status = 30 THEN 27
+           WHEN o.risk_order_status = 11 OR o.order_status = 1 THEN 23
+           WHEN o.risk_order_status = 10 THEN 20
+           WHEN o.disburse_status = 1 OR o.risk_order_status = 6 THEN 13
+           WHEN o.disburse_status IN (3, 4) OR o.risk_order_status = 8 THEN 15
+           WHEN o.approval_result = 2 OR o.risk_order_status = 4 THEN 5
+           WHEN o.approval_result = 0 OR o.risk_order_status = 2 THEN 3
+           WHEN o.approval_result = 1 AND o.disburse_status = 0 THEN 11
+           ELSE 1
+           END AS risk_status,
+       JSON_OBJECT(
+               'roll_sequence', 0,
+               'period', 1,
+               'principal', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'disbursed_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'interest', 0,
+               'admin_fee', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'service_fee', 0,
+               'tax_fee', 0,
+               'reduction_amount', 0,
+               'total_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED),
+               'term', COALESCE(o.period_days, 7),
+               'start_date', DATE_FORMAT(o.order_time, '%Y-%m-%d'),
+               'due_date', DATE_FORMAT(o.last_repayment_time, '%Y-%m-%d'),
+               'roll_allowed', 0
+       ) AS repayment_plan_json
+FROM user_order o
+         INNER JOIN `user` u ON u.id = o.user_id
+         LEFT JOIN app_config ac ON ac.app_code = o.app_code
+         LEFT JOIN user_personal_info p ON p.user_id = o.user_id
+         LEFT JOIN user_bank_info ub
+                   ON ub.user_id = o.user_id AND ub.is_default = 1 AND ub.deleted = 0
+         LEFT JOIN device_ids di ON di.device_uuid = u.device_id
+         LEFT JOIN vt_token_cache vt_m
+                   ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
+                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                           ELSE CONCAT('+234', TRIM(u.mobile))
+                       END) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_id
+                   ON vt_id.vt_type = 'id_number' AND vt_id.status = 1
+                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_g
+                   ON vt_g.vt_type = 'gaid_idfa' AND vt_g.status = 1
+                       AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''),
+                                                                              NULLIF(TRIM(u.idfa), ''),
+                                                                              NULLIF(TRIM(di.aaid), ''))) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_ba
+                   ON vt_ba.vt_type = 'bank_account' AND vt_ba.status = 1
+                       AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
+WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
+
+ALTER TABLE application_sync_staging ADD PRIMARY KEY (id);
+
+-- ---------- 6. loan_sync_staging ----------
+DROP TABLE IF EXISTS loan_sync_staging;
+
+CREATE TABLE loan_sync_staging AS
+SELECT i.id,
+       i.installment_order_no AS loan_no,
+       o.order_no AS application_no,
+       CAST(1 AS UNSIGNED) AS period,
+       CAST(0 AS UNSIGNED) AS roll_sequence,
+       DATE(o.disburse_time) AS start_date,
+       DATE(i.repayment_time) AS due_date,
+       DATE(i.repayment_time) AS due_date_final,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.received), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS principal_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.interests), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS interest_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.poundage_fees), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS admin_fee_minor,
+       CAST(0 AS SIGNED) AS roll_fee_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS penalty_amount_minor,
+       CAST(0 AS SIGNED) AS reduction_amount_minor,
+       CAST(COALESCE(ROUND((CAST(NULLIF(TRIM(i.amt_due), '') AS DECIMAL(20, 2))
+           + CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2))) * 100, 0), 0) AS SIGNED) AS total_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2)) * 100, 0), 0) AS SIGNED) AS paid_amount_minor,
+       CAST(0 AS SIGNED) AS roll_paid_amount_minor,
+       DATE(o.settled_time) AS paid_off_date,
+       CASE
+           WHEN i.is_overdue = 1 THEN 23
+           WHEN i.status = 2 AND CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2))
+               >= CAST(NULLIF(TRIM(i.repayment), '') AS DECIMAL(20, 2)) THEN 27
+           WHEN i.status = 2 THEN 24
+           ELSE 20
+           END AS risk_status
+FROM user_order_installment i
+         INNER JOIN user_order o ON o.id = i.user_order_id
+WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> '';
+
+ALTER TABLE loan_sync_staging ADD PRIMARY KEY (id);
+
+-- ---------- 校验 ----------
+SELECT 'user' AS tbl, COUNT(*) AS missing_token
+FROM user_sync_staging
+WHERE mobile_norm IS NOT NULL AND (mobile_token IS NULL OR mobile_token = '')
+UNION ALL
+SELECT 'user_bankcard', COUNT(*)
+FROM user_bankcard_sync_staging
+WHERE bank_account_raw IS NOT NULL AND (bank_account_token IS NULL OR bank_account_token = '')
+UNION ALL
+SELECT 'user_info', COUNT(*)
+FROM user_info_sync_staging
+WHERE id_number_token IS NULL OR id_number_token = ''
+UNION ALL
+SELECT 'application_mobile', COUNT(*)
+FROM application_sync_staging
+WHERE mobile_token IS NULL OR mobile_token = ''
+UNION ALL
+SELECT 'application_id_number', COUNT(*)
+FROM application_sync_staging
+WHERE id_number_token IS NULL OR id_number_token = ''
+UNION ALL
+SELECT 'application_bank', COUNT(*)
+FROM application_sync_staging
+WHERE bank_account_token IS NULL OR bank_account_token = '';
+
+SELECT 'staging_row_counts' AS label,
+       (SELECT COUNT(*) FROM user_sync_staging) AS user_cnt,
+       (SELECT COUNT(*) FROM user_bankcard_sync_staging) AS bankcard_cnt,
+       (SELECT COUNT(*) FROM user_info_sync_staging) AS user_info_cnt,
+       (SELECT COUNT(*) FROM user_product_sync_staging) AS user_product_cnt,
+       (SELECT COUNT(*) FROM application_sync_staging) AS application_cnt,
+       (SELECT COUNT(*) FROM loan_sync_staging) AS loan_cnt;

@@ -1,13 +1,13 @@
--- 增量（预 VT）：CDC user + adjust Lookup + vt_token_cache Lookup → 目标 user
--- 全量请用 ./scripts/run-user-fast.sh
+-- 增量（预 VT + 兜底）：Lookup vt_token_cache → miss 时 UDF 调 /v2t
+-- 全量: ./scripts/run-user-fast.sh
 --
--- 新手机号需先 cron：vt_seed_mobile.sql → vt-preload.sh →（可选）vt_refresh_staging_mobile_token.sql
---
--- CDC_STARTUP_MODE（run-sql / sync-user-auto 注入）:
---   timestamp        — 从 BULK_START_MS 起补 binlog（推荐，覆盖全量期间变更）
---   latest-offset    — 仅从提交 Job 时刻起（会漏全量窗口内变更）
+-- CDC_STARTUP_MODE（run-sql / sync-job-auto 注入）:
+--   timestamp        — 从 BULK_START_MS 起补 binlog（推荐）
+--   latest-offset    — 仅从提交时刻起（会漏全量窗口内变更）
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_incr.sql
+
+CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -109,55 +109,86 @@ CREATE TABLE IF NOT EXISTS sink_user (
 
 INSERT INTO sink_user
 SELECT
-    u.id + 100000000,
-    CAST(u.app_code AS INT),
-    u.id + 100000000,
-    u.id + 100000000,
-    vt.token,
-    CAST(0 AS BIGINT),
-    COALESCE(u.device_id, ''),
-    UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000,
-    CAST(0 AS TINYINT),
-    CASE
-        WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL
-            OR TRIM(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) = ''
-            THEN CAST(NULL AS STRING)
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%unattributed%'
-            THEN CAST(NULL AS STRING)
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%organic%'
-            THEN 'organic'
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%google%'
-            THEN 'google'
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%tiktok%'
-            THEN 'tiktok'
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%facebook%'
-            OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%instagram%'
-            OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%messenger%'
-            THEN 'facebook'
-        WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kuai%'
-            OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kwai%'
-            OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kuaishou%'
-            THEN 'kwai'
-        ELSE LOWER(TRIM(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))))
-    END,
-    adj.campaign_tracker,
-    adj.campaign_name,
-    adj.creative_name,
-    adj.adgroup_tracker,
-    adj.creative_tracker,
-    adj.campaign_tracker,
-    adj.adgroup_tracker
-FROM src_user AS u
-LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
-    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
-LEFT JOIN dim_vt_mobile FOR SYSTEM_TIME AS OF u.proc_time AS vt
-    ON vt.vt_type = 'mobile'
-    AND vt.status = 1
-    AND vt.raw_value = CASE
-        WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-        WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-        WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-        WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-        ELSE CONCAT('+234', TRIM(u.mobile))
-    END
-WHERE vt.token IS NOT NULL AND TRIM(vt.token) <> '';
+    e.user_id,
+    e.app_id,
+    e.group_user_id,
+    e.info_user_id,
+    e.mobile_token,
+    e.closed_time,
+    e.reg_device_uuid,
+    e.reg_time,
+    e.test_flag,
+    e.utm_source,
+    e.utm_medium,
+    e.utm_campaign,
+    e.utm_content,
+    e.utm_term,
+    e.campaign_id,
+    e.ad_group_id,
+    e.advertiser_id
+FROM (
+    SELECT
+        u.id + 100000000 AS user_id,
+        CAST(u.app_code AS INT) AS app_id,
+        u.id + 100000000 AS group_user_id,
+        u.id + 100000000 AS info_user_id,
+        COALESCE(
+            NULLIF(TRIM(vt.token), ''),
+            vt_tokenize(
+                CASE
+                    WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
+                    WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                    WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                    WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                    ELSE CONCAT('+234', TRIM(u.mobile))
+                END
+            )
+        ) AS mobile_token,
+        CAST(0 AS BIGINT) AS closed_time,
+        COALESCE(u.device_id, '') AS reg_device_uuid,
+        UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000 AS reg_time,
+        CAST(0 AS TINYINT) AS test_flag,
+        CASE
+            WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL
+                OR TRIM(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) = ''
+                THEN CAST(NULL AS STRING)
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%unattributed%'
+                THEN CAST(NULL AS STRING)
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%organic%'
+                THEN 'organic'
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%google%'
+                THEN 'google'
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%tiktok%'
+                THEN 'tiktok'
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%facebook%'
+                OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%instagram%'
+                OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%messenger%'
+                THEN 'facebook'
+            WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kuai%'
+                OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kwai%'
+                OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kuaishou%'
+                THEN 'kwai'
+            ELSE LOWER(TRIM(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))))
+        END AS utm_source,
+        adj.campaign_tracker AS utm_medium,
+        adj.campaign_name AS utm_campaign,
+        adj.creative_name AS utm_content,
+        adj.adgroup_tracker AS utm_term,
+        adj.campaign_tracker AS campaign_id,
+        adj.adgroup_tracker AS ad_group_id,
+        adj.campaign_tracker AS advertiser_id
+    FROM src_user AS u
+    LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
+        ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
+    LEFT JOIN dim_vt_mobile FOR SYSTEM_TIME AS OF u.proc_time AS vt
+        ON vt.vt_type = 'mobile'
+        AND vt.status = 1
+        AND vt.raw_value = CASE
+            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
+            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+            ELSE CONCAT('+234', TRIM(u.mobile))
+        END
+) AS e
+WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> '';
