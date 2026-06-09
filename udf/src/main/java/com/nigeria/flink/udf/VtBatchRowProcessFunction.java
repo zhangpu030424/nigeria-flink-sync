@@ -13,7 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * DataStream 攒批 VT：默认 10 万条/次 POST /v2t；不足一批时由 processing-time 定时器刷尾批。
+ * DataStream 攒批 VT：默认 1 万条/次 POST /v2t；不足一批时由 processing-time 定时器刷尾批。
  * 须配合 keyBy 使用（KeyedProcessFunction 才支持定时器）。
  * mobile_plain 固定在第 5 列（index=4）。
  */
@@ -33,7 +33,7 @@ public class VtBatchRowProcessFunction extends KeyedProcessFunction<Integer, Row
         String baseUrl = System.getenv().getOrDefault("VT_BASE_URL", "http://101.47.27.225");
         int maxRetries = parseIntEnv("VT_BATCH_MAX_RETRIES", 3);
         int timeoutSec = parseIntEnv("VT_BATCH_TIMEOUT_SEC", 300);
-        batchSize = parseIntEnv("VT_BATCH_SIZE", 100_000);
+        batchSize = parseIntEnv("VT_BATCH_SIZE", 10_000);
         flushIntervalMs = parseLongEnv("VT_BATCH_FLUSH_MS", 5_000L);
         client = new VtBatchClient(baseUrl, maxRetries, Duration.ofSeconds(timeoutSec));
         buffer = new ArrayList<>(Math.min(batchSize, 4096));

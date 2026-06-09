@@ -99,18 +99,42 @@ fi
 
 echo ""
 echo "========== 7. 目标库 user 条数 =========="
-if [[ -f .env ]] && command -v mysql >/dev/null 2>&1; then
+query_target_count() {
   MYSQL_PWD="${TARGET_MYSQL_PASSWORD}" mysql -h "${TARGET_MYSQL_HOST}" -P "${TARGET_MYSQL_PORT:-3306}" \
-    -u "${TARGET_MYSQL_USER}" "${TARGET_MYSQL_DATABASE}" -e "SELECT COUNT(*) AS user_cnt FROM \`user\`;" 2>&1 || \
-    echo "  目标库查询失败，检查 .env 与网络"
+    -u "${TARGET_MYSQL_USER}" "${TARGET_MYSQL_DATABASE}" \
+    -e "SELECT COUNT(*) AS user_cnt FROM \`user\`;" 2>&1
+}
+if [[ -f .env ]]; then
+  if command -v mysql >/dev/null 2>&1; then
+    query_target_count || echo "  目标库查询失败，检查 .env 与网络"
+  else
+    echo "  本机无 mysql 客户端，改用 docker 查询..."
+    docker run --rm mysql:8.0 mysql \
+      -h "${TARGET_MYSQL_HOST}" -P "${TARGET_MYSQL_PORT:-3306}" \
+      -u "${TARGET_MYSQL_USER}" -p"${TARGET_MYSQL_PASSWORD}" "${TARGET_MYSQL_DATABASE}" \
+      -e "SELECT COUNT(*) AS user_cnt FROM \`user\`;" 2>&1 || \
+      echo "  docker mysql 查询失败，检查 .env、安全组与目标库连通"
+  fi
+else
+  echo "  无 .env，跳过"
 fi
 
 echo ""
-echo "========== 8. TaskManager 最近错误（VT / JDBC） =========="
+echo "========== 8. TaskManager 最近日志（VT / JDBC / Job 状态） =========="
 if docker ps --format '{{.Names}}' | grep -qx "$TM"; then
-  docker logs "$TM" 2>&1 | tail -30 | grep -iE 'VT|v2t|VtTokenize|SQLException|sink|ERROR|Exception' || \
-    echo "  最近 30 行无 VT/JDBC 相关 ERROR（可看全量: docker logs $TM | tail -200）"
+  if docker logs "$TM" 2>&1 | tail -200 | grep -q "VT /v2t batch done"; then
+    echo "  ✓ 发现 VT 批量成功日志:"
+    docker logs "$TM" 2>&1 | tail -200 | grep "VT /v2t batch done" | tail -5
+  else
+    echo "  ✗ 最近 200 行无 'VT /v2t batch done'（VT 未成功或 Job 未跑到攒批）"
+  fi
+  echo ""
+  docker logs "$TM" 2>&1 | tail -80 | grep -iE 'FAILED|ERROR|Exception|VT /v2t|SQLException|UnsupportedOperation' | tail -15 || \
+    echo "  最近 80 行无 ERROR（若全是 CANCELED → Job 已被取消，需重新提交）"
 fi
 
 echo ""
-echo "完成。若 TM 内 VT 不通 → 修复网络后 rebuild；若 Job 未 RUNNING → ./scripts/run-sql.sh sql/02_sync_user_test.sql"
+echo "完成。"
+echo "  • Job 状态 CANCELED / 无 RUNNING → ./scripts/run-user-fast-vt.sh 重新提交"
+echo "  • TM 内 VT 不通 → 修复网络/VT_BASE_URL 后 docker compose up -d"
+echo "  • 先验证最小链路 → ./scripts/run-sql.sh sql/03_sync_user_minimal.sql"

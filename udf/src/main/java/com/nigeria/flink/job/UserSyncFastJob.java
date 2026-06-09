@@ -15,7 +15,7 @@ import org.apache.flink.types.Row;
 import org.apache.flink.types.RowKind;
 
 /**
- * 全量 user 同步（宽表 CDC + 批量 VT 10 万条/次 + JDBC Sink）。
+ * 全量 user 同步（宽表 CDC + 批量 VT 1 万条/次 + JDBC Sink）。
  * 提交: ./scripts/run-user-fast-vt.sh
  */
 public class UserSyncFastJob {
