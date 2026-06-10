@@ -119,46 +119,149 @@ ensure_flink_views() {
     log "VIEW 元数据已存在: ${REQUIRED_VIEWS[*]}"
     return 0
   fi
-  if [[ ! -f sql/ddl/lm_user_info_flink_views.sql ]]; then
-    log "ERR: 缺少 sql/ddl/lm_user_info_flink_views.sql"
+  local view_ddl="sql/ddl/lm_user_info_flink_views.sql"
+  local stg_cnt
+  stg_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.tables
+     WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}'
+       AND table_name='flink_stg_mkt_user';")
+  if [[ "$stg_cnt" == "1" && -f sql/ddl/lm_user_info_flink_views_staging.sql ]]; then
+    view_ddl="sql/ddl/lm_user_info_flink_views_staging.sql"
+    log "检测到 flink_stg_mkt_user，使用 ${view_ddl}"
+  fi
+  if [[ ! -f "$view_ddl" ]]; then
+    log "ERR: 缺少 ${view_ddl}"
     exit 1
   fi
   if ! MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
       -u "$LM_MYSQL_USER" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-      < sql/ddl/lm_user_info_flink_views.sql 2>>"$LOG_FILE"; then
+      < "$view_ddl" 2>>"$LOG_FILE"; then
     if all_views_ready; then
       log "WARN: CREATE VIEW 无权限，但 VIEW 已存在，继续"
       return 0
     fi
-    log "ERR: 请用有权限账号手动执行 sql/ddl/lm_user_info_flink_views.sql"
+    log "ERR: 请用有权限账号手动执行 ${view_ddl}"
     exit 1
   fi
   log "VIEW 已创建/刷新"
 }
 
+base_table_exists() {
+  local name=$1
+  local cnt
+  cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.tables
+     WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}'
+       AND table_name='${name}' AND table_type='BASE TABLE';")
+  [[ "$cnt" == "1" ]]
+}
+
+table_has_column() {
+  local table_name=$1 col_name=$2
+  local cnt
+  cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.columns
+     WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}'
+       AND table_name='${table_name}' AND column_name='${col_name}';")
+  [[ "$cnt" == "1" ]]
+}
+
+resolve_source_tables() {
+  if base_table_exists "flink_stg_mkt_user"; then
+    export LM_SRC_TABLE_MKT="flink_stg_mkt_user"
+    export LM_SRC_TABLE_UD="flink_stg_ud_latest"
+    export LM_SRC_TABLE_LUP="flink_stg_lup_latest"
+    export LM_SRC_TABLE_DAC="flink_stg_dac_latest"
+    export LM_SRC_MODE="staging"
+    log "源表模式: flink_stg_* 实体表（JDBC 直接读表，避免 VIEW 分区列问题）"
+  else
+    export LM_SRC_TABLE_MKT="v_flink_mkt_user"
+    export LM_SRC_TABLE_UD="v_flink_ud_latest"
+    export LM_SRC_TABLE_LUP="v_flink_lup_latest"
+    export LM_SRC_TABLE_DAC="v_flink_dac_latest"
+    export LM_SRC_MODE="view"
+    log "源表模式: v_flink_* VIEW"
+  fi
+  log "  mkt=${LM_SRC_TABLE_MKT} ud=${LM_SRC_TABLE_UD} lup=${LM_SRC_TABLE_LUP} dac=${LM_SRC_TABLE_DAC}"
+}
+
+check_source_partition_columns() {
+  local -a specs=(
+    "${LM_SRC_TABLE_MKT}:id_part"
+    "${LM_SRC_TABLE_UD}:user_id_part"
+    "${LM_SRC_TABLE_LUP}:id_part"
+    "${LM_SRC_TABLE_DAC}:id_part"
+  )
+  local spec tbl col
+  for spec in "${specs[@]}"; do
+    tbl="${spec%%:*}"
+    col="${spec##*:}"
+    if ! table_has_column "$tbl" "$col"; then
+      log "ERR: ${tbl} 缺少分区列 ${col} → Flink 报 Unknown column 'id_part' in where clause"
+      if [[ "${LM_SRC_MODE:-view}" == "staging" && "$tbl" == "flink_stg_dac_latest" ]]; then
+        log "  dac 可建空表: CREATE TABLE flink_stg_dac_latest (id_part DECIMAL(20,0), deviceId VARCHAR(128), channel VARCHAR(128), KEY(id_part));"
+      fi
+      return 1
+    fi
+    log "  ✓ ${tbl}.${col}"
+  done
+  return 0
+}
+
+partition_probe_source() {
+  local tbl=$1 col=$2
+  local row_cnt
+  row_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM \`${tbl}\`;")
+  if [[ "$row_cnt" == "0" ]]; then
+    log "  ${tbl} 空表(${row_cnt}行)，跳过分区 WHERE 探测"
+    return 0
+  fi
+  log "  分区探测 SELECT 1 FROM ${tbl} WHERE ${col}>=1 LIMIT 1 ..."
+  mysql_probe "SELECT 1 FROM \`${tbl}\` WHERE \`${col}\` >= 1 AND \`${col}\` < 1000000000 LIMIT 1;" | grep -q '^1$'
+}
+
 preflight_check() {
   log "---- 提交前检查 ----"
-  local v
-  for v in "${REQUIRED_VIEWS[@]}"; do
-    if ! view_in_schema "$v"; then
-      log "ERR: information_schema 中无 VIEW ${v}"
-      exit 1
-    fi
-  done
-  if [[ "${LM_SKIP_VIEW_PROBE:-0}" != "1" ]]; then
-    log "探测 VIEW 可读性（${MYSQL_PROBE_TIMEOUT}s 超时，v_flink_ud_latest 聚合慢可设 LM_SKIP_VIEW_PROBE=1）"
-    for v in "${REQUIRED_VIEWS[@]}"; do
-      log "  探测 SELECT 1 FROM ${v} LIMIT 1 ..."
-      if ! view_probe_one_row "$v"; then
-        log "WARN: ${v} 探测超时/失败；若 VIEW 已手动建好可 LM_SKIP_VIEW_PROBE=1 继续"
-        if [[ "${LM_SKIP_VIEW_PROBE:-0}" != "1" ]]; then
-          log "ERR: 探测失败。大表 VIEW 首次聚合很慢，可: LM_SKIP_VIEW_PROBE=1 bash scripts/run-ng-user-info-bulk.sh"
-          exit 1
+  resolve_source_tables
+
+  if [[ "${LM_SRC_MODE:-view}" == "staging" ]]; then
+    local t
+    for t in "$LM_SRC_TABLE_MKT" "$LM_SRC_TABLE_UD" "$LM_SRC_TABLE_LUP" "$LM_SRC_TABLE_DAC"; do
+      if ! base_table_exists "$t"; then
+        log "ERR: 缺少实体表 ${t}"
+        if [[ "$t" == "flink_stg_dac_latest" ]]; then
+          log "  dac 允许空表，在老库执行:"
+          log "  CREATE TABLE flink_stg_dac_latest (id_part DECIMAL(20,0) NOT NULL, deviceId VARCHAR(128) NOT NULL, channel VARCHAR(128), KEY idx_id_part(id_part)) ENGINE=InnoDB;"
         fi
+        exit 1
       fi
     done
   else
-    log "LM_SKIP_VIEW_PROBE=1，跳过 VIEW 数据探测"
+    local v
+    for v in "${REQUIRED_VIEWS[@]}"; do
+      if ! view_in_schema "$v"; then
+        log "ERR: information_schema 中无 VIEW ${v}"
+        exit 1
+      fi
+    done
+  fi
+
+  log "分区列检查（JDBC scan.partition.column）:"
+  check_source_partition_columns || exit 1
+
+  if [[ "${LM_SKIP_VIEW_PROBE:-0}" != "1" ]]; then
+    log "Flink 分区 WHERE 探测（${MYSQL_PROBE_TIMEOUT}s 超时）:"
+    partition_probe_source "$LM_SRC_TABLE_MKT" "id_part" || { log "ERR: ${LM_SRC_TABLE_MKT} 分区探测失败"; exit 1; }
+    partition_probe_source "$LM_SRC_TABLE_UD" "user_id_part" || { log "ERR: ${LM_SRC_TABLE_UD} 分区探测失败"; exit 1; }
+    partition_probe_source "$LM_SRC_TABLE_LUP" "id_part" || { log "ERR: ${LM_SRC_TABLE_LUP} 分区探测失败"; exit 1; }
+    partition_probe_source "$LM_SRC_TABLE_DAC" "id_part" || { log "ERR: ${LM_SRC_TABLE_DAC} 分区探测失败"; exit 1; }
+  else
+    log "LM_SKIP_VIEW_PROBE=1，跳过分区 WHERE 探测"
   fi
   local tgt_ok
   tgt_ok=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \

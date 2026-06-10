@@ -18,7 +18,7 @@ CREATE TABLE src_mkt_user (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'v_flink_mkt_user',
+    'table-name' = '${LM_SRC_TABLE_MKT}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'scan.partition.column' = 'id_part',
@@ -54,7 +54,7 @@ CREATE TABLE src_ud_latest (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'v_flink_ud_latest',
+    'table-name' = '${LM_SRC_TABLE_UD}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'scan.partition.column' = 'user_id_part',
@@ -72,7 +72,7 @@ CREATE TABLE src_lup_latest (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'v_flink_lup_latest',
+    'table-name' = '${LM_SRC_TABLE_LUP}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'scan.partition.column' = 'id_part',
@@ -89,7 +89,7 @@ CREATE TABLE src_dac_latest (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'v_flink_dac_latest',
+    'table-name' = '${LM_SRC_TABLE_DAC}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'scan.partition.column' = 'id_part',
