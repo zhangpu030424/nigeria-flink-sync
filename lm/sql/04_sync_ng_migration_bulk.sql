@@ -354,36 +354,50 @@ SELECT * FROM src_mkt_user
 ORDER BY id
 LIMIT ${LM_MIGRATION_LIMIT};
 
--- group_user_id（与 AppConfig.php / ng_migration_all_in_one.sql 一致）
+CREATE TEMPORARY VIEW v_cam AS
+SELECT CAST(ac.`value` AS INT) AS sub_app_id, ac.`appId` AS main_app_id
+FROM src_mkt_app_config ac
+INNER JOIN (
+    SELECT CAST(`value` AS INT) AS sub_app_id, MAX(id) AS max_id
+    FROM src_mkt_app_config
+    WHERE `key` = 'coreAppId'
+    GROUP BY CAST(`value` AS INT)
+) pick ON pick.max_id = ac.id;
+
+CREATE TEMPORARY VIEW v_user_eff AS
+SELECT
+    u.id,
+    u.`appId`,
+    u.mobile,
+    u.created,
+    COALESCE(cam.main_app_id, u.`appId`) AS eff_app_id
+FROM src_mkt_user u
+LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`;
+
+CREATE TEMPORARY VIEW v_group_user_id AS
+SELECT user_id, group_user_id
+FROM (
+    SELECT
+        c.id AS user_id,
+        p.id AS group_user_id,
+        ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY p.created ASC, p.id ASC) AS rn
+    FROM v_user_eff c
+    INNER JOIN v_user_eff p
+        ON p.mobile = c.mobile
+        AND p.eff_app_id = c.eff_app_id
+        AND p.created <= c.created
+) t
+WHERE rn = 1;
+
 CREATE TEMPORARY VIEW tmp_user_group AS
 SELECT
     u.id AS user_id,
     u.`appId` AS appId,
     u.mobile,
     u.created,
-    COALESCE(
-        (
-            SELECT u2.id
-            FROM src_mkt_user u2
-            WHERE u2.mobile = u.mobile
-              AND u2.created <= u.created
-              AND u2.`appId` = COALESCE(
-                  (
-                      SELECT ac.`appId`
-                      FROM src_mkt_app_config ac
-                      WHERE ac.`key` = 'coreAppId'
-                        AND CAST(ac.`value` AS INT) = u.`appId`
-                      ORDER BY ac.id DESC
-                      LIMIT 1
-                  ),
-                  u.`appId`
-              )
-            ORDER BY u2.created ASC, u2.id ASC
-            LIMIT 1
-        ),
-        u.id
-    ) AS group_user_id
-FROM v_user_lim u;
+    COALESCE(g.group_user_id, u.id) AS group_user_id
+FROM v_user_lim u
+LEFT JOIN v_group_user_id g ON g.user_id = u.id;
 
 -- user_data 每用户最新一条
 CREATE TEMPORARY VIEW v_ud_latest AS

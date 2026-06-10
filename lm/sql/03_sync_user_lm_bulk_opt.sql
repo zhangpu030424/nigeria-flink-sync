@@ -120,22 +120,36 @@ INNER JOIN (
     GROUP BY `deviceId`
 ) dac_max ON dac_max.max_id = dac1.id;
 
+CREATE TEMPORARY VIEW v_user_eff AS
+SELECT
+    u.id,
+    u.`appId`,
+    u.mobile,
+    u.created,
+    COALESCE(cam.main_app_id, u.`appId`) AS eff_app_id
+FROM src_lm_user_raw u
+LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`;
+
+CREATE TEMPORARY VIEW v_group_user_id AS
+SELECT user_id, group_user_id
+FROM (
+    SELECT
+        c.id AS user_id,
+        p.id AS group_user_id,
+        ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY p.created ASC, p.id ASC) AS rn
+    FROM v_user_eff c
+    INNER JOIN v_user_eff p
+        ON p.mobile = c.mobile
+        AND p.eff_app_id = c.eff_app_id
+        AND p.created <= c.created
+) t
+WHERE rn = 1;
+
 INSERT INTO sink_user
 SELECT
     u.id AS user_id,
     u.`appId` AS app_id,
-    COALESCE(
-        (
-            SELECT u2.id
-            FROM src_lm_user_raw u2
-            WHERE u2.mobile = u.mobile
-              AND u2.created <= u.created
-              AND u2.`appId` = COALESCE(cam.main_app_id, u.`appId`)
-            ORDER BY u2.created ASC, u2.id ASC
-            LIMIT 1
-        ),
-        u.id
-    ) AS group_user_id,
+    COALESCE(g.group_user_id, u.id) AS group_user_id,
     u.id AS info_user_id,
     TRIM(u.mobile) AS mobile,
     CASE
@@ -169,7 +183,7 @@ SELECT
     END AS ad_group_id,
     CAST(NULL AS STRING) AS advertiser_id
 FROM v_user_lim u
-LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`
+LEFT JOIN v_group_user_id g ON g.user_id = u.id
 LEFT JOIN v_dac_latest dac
     ON dac.`deviceId` = u.`deviceId`
    AND u.`deviceId` IS NOT NULL AND u.`deviceId` <> 0

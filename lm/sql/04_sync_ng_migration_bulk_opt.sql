@@ -384,6 +384,32 @@ INNER JOIN (
     GROUP BY CAST(`value` AS INT)
 ) pick ON pick.max_id = ac.id;
 
+CREATE TEMPORARY VIEW v_user_eff AS
+SELECT
+    u.id,
+    u.`appId`,
+    u.mobile,
+    u.created,
+    u.`deviceId`,
+    COALESCE(cam.main_app_id, u.`appId`) AS eff_app_id
+FROM src_mkt_user u
+LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`;
+
+CREATE TEMPORARY VIEW v_group_user_id AS
+SELECT user_id, group_user_id
+FROM (
+    SELECT
+        c.id AS user_id,
+        p.id AS group_user_id,
+        ROW_NUMBER() OVER (PARTITION BY c.id ORDER BY p.created ASC, p.id ASC) AS rn
+    FROM v_user_eff c
+    INNER JOIN v_user_eff p
+        ON p.mobile = c.mobile
+        AND p.eff_app_id = c.eff_app_id
+        AND p.created <= c.created
+) t
+WHERE rn = 1;
+
 CREATE TEMPORARY VIEW tmp_user_group AS
 SELECT
     u.id AS user_id,
@@ -391,20 +417,9 @@ SELECT
     u.mobile,
     u.created,
     u.`deviceId`,
-    COALESCE(
-        (
-            SELECT u2.id
-            FROM src_mkt_user u2
-            WHERE u2.mobile = u.mobile
-              AND u2.created <= u.created
-              AND u2.`appId` = COALESCE(cam.main_app_id, u.`appId`)
-            ORDER BY u2.created ASC, u2.id ASC
-            LIMIT 1
-        ),
-        u.id
-    ) AS group_user_id
+    COALESCE(g.group_user_id, u.id) AS group_user_id
 FROM v_user_lim u
-LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`;
+LEFT JOIN v_group_user_id g ON g.user_id = u.id;
 
 CREATE TEMPORARY VIEW v_ud_latest AS
 SELECT ud.*
@@ -609,18 +624,7 @@ SELECT
     a.`appId`,
     '1.0.0',
     a.`userId`,
-    COALESCE(
-        (
-            SELECT u2.id
-            FROM src_mkt_user u2
-            WHERE u2.mobile = u.mobile
-              AND u2.created <= u.created
-              AND u2.`appId` = COALESCE(cam.main_app_id, u.`appId`)
-            ORDER BY u2.created ASC, u2.id ASC
-            LIMIT 1
-        ),
-        a.`userId`
-    ),
+    COALESCE(g.group_user_id, a.`userId`),
     a.`applicationNo`,
     CAST(0 AS TINYINT),
     CASE WHEN a.`repeatLoan` = 0 THEN CAST(1 AS TINYINT) ELSE CAST(0 AS TINYINT) END,
@@ -685,7 +689,7 @@ SELECT
     )
 FROM v_app_lim a
 INNER JOIN src_mkt_user u ON u.id = a.`userId`
-LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`
+LEFT JOIN v_group_user_id g ON g.user_id = u.id
 LEFT JOIN v_ud_latest ud ON ud.`userId` = a.`userId`
 LEFT JOIN src_mkt_device d ON d.id = a.`deviceId`
 LEFT JOIN src_core_application ca ON ca.ext_sn = a.`applicationNo`
