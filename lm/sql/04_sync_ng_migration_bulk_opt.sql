@@ -1,19 +1,11 @@
--- 尼日利亚老库 → 目标库 Flink Batch（来自 ng_migration_flink.sql）
--- 覆盖: user_info / user_bankcard / user_product / application / loan（不含 user / id_mapping）
--- 执行: bash lm/scripts/run-ng-migration-bulk.sh
--- 试跑: .env 设 LM_MIGRATION_LIMIT=20
+-- 老库 → 目标库 Flink Batch（索引优化版 SQL 逻辑）
+-- 覆盖: user_info / user_bankcard / user_product / application / loan
+-- 试跑: LM_MIGRATION_LIMIT=20 bash lm/scripts/run-ng-migration-bulk-opt.sh
+-- 全量: LM_MIGRATION_LIMIT=2147483647
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
-
--- ===================== 连接参数（按需修改） =====================
--- 源库 market
--- jdbc:mysql://127.0.0.1:3306/ng_loan_market?useUnicode=true&characterEncoding=utf8&useSSL=false
--- 源库 core
--- jdbc:mysql://127.0.0.1:3306/ng_loan_core?useUnicode=true&characterEncoding=utf8&useSSL=false
--- 目标库 id
--- jdbc:mysql://127.0.0.1:3306/id?useUnicode=true&characterEncoding=utf8&useSSL=false
 
 -- ===================== 源表：ng_loan_market =====================
 
@@ -22,7 +14,6 @@ CREATE TABLE src_mkt_user (
     `appId`         INT,
     mobile          STRING,
     `deviceId`      BIGINT,
-    `credentialNo`  STRING,
     `isCancel`      TINYINT,
     created         TIMESTAMP(0),
     updated         TIMESTAMP(0)
@@ -45,6 +36,17 @@ CREATE TABLE src_mkt_app_config (
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'table-name' = 'app_config'
+);
+
+CREATE TABLE src_mkt_app (
+    id   INT,
+    name STRING
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'username' = '${LM_MYSQL_USER}',
+    'password' = '${LM_MYSQL_PASSWORD}',
+    'table-name' = 'app'
 );
 
 CREATE TABLE src_mkt_application (
@@ -150,6 +152,19 @@ CREATE TABLE src_mkt_log_user_password (
     'table-name' = 'log_user_password'
 );
 
+-- 老库表名可能是 user_reg_ip 或 user_registration_ip，按实际改 table-name
+CREATE TABLE src_mkt_user_reg_ip (
+    id       INT,
+    `userId` BIGINT,
+    ip       STRING
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'username' = '${LM_MYSQL_USER}',
+    'password' = '${LM_MYSQL_PASSWORD}',
+    'table-name' = 'user_reg_ip'
+);
+
 -- ===================== 源表：ng_loan_core =====================
 
 CREATE TABLE src_core_application (
@@ -199,7 +214,7 @@ CREATE TABLE src_core_repay_record (
     'table-name' = 'repay_record'
 );
 
--- ===================== 目标表：id 库（无 dt_ 前缀） =====================
+-- ===================== 目标表 =====================
 
 CREATE TABLE sink_user_info (
     user_id     BIGINT,
@@ -346,46 +361,51 @@ CREATE TABLE sink_loan (
     'table-name' = 'loan'
 );
 
--- ===================== 公共视图 =====================
+-- ===================== 公共视图（索引优化版逻辑） =====================
 
--- 试跑：LM_MIGRATION_LIMIT 控制用户数参与 group_user_id 计算
 CREATE TEMPORARY VIEW v_user_lim AS
 SELECT * FROM src_mkt_user
-ORDER BY id
+ORDER BY id DESC
 LIMIT ${LM_MIGRATION_LIMIT};
 
--- group_user_id（与 AppConfig.php / ng_migration_all_in_one.sql 一致）
+CREATE TEMPORARY VIEW v_app_lim AS
+SELECT * FROM src_mkt_application
+WHERE `applicationNo` IS NOT NULL AND `applicationNo` <> ''
+ORDER BY id DESC
+LIMIT ${LM_MIGRATION_LIMIT};
+
+CREATE TEMPORARY VIEW v_cam AS
+SELECT CAST(ac.`value` AS INT) AS sub_app_id, ac.`appId` AS main_app_id
+FROM src_mkt_app_config ac
+INNER JOIN (
+    SELECT CAST(`value` AS INT) AS sub_app_id, MAX(id) AS max_id
+    FROM src_mkt_app_config
+    WHERE `key` = 'coreAppId'
+    GROUP BY CAST(`value` AS INT)
+) pick ON pick.max_id = ac.id;
+
 CREATE TEMPORARY VIEW tmp_user_group AS
 SELECT
     u.id AS user_id,
-    u.`appId` AS appId,
+    u.`appId`,
     u.mobile,
     u.created,
+    u.`deviceId`,
     COALESCE(
         (
             SELECT u2.id
             FROM src_mkt_user u2
             WHERE u2.mobile = u.mobile
               AND u2.created <= u.created
-              AND u2.`appId` = COALESCE(
-                  (
-                      SELECT ac.`appId`
-                      FROM src_mkt_app_config ac
-                      WHERE ac.`key` = 'coreAppId'
-                        AND CAST(ac.`value` AS INT) = u.`appId`
-                      ORDER BY ac.id DESC
-                      LIMIT 1
-                  ),
-                  u.`appId`
-              )
+              AND u2.`appId` = COALESCE(cam.main_app_id, u.`appId`)
             ORDER BY u2.created ASC, u2.id ASC
             LIMIT 1
         ),
         u.id
     ) AS group_user_id
-FROM v_user_lim u;
+FROM v_user_lim u
+LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`;
 
--- user_data 每用户最新一条
 CREATE TEMPORARY VIEW v_ud_latest AS
 SELECT ud.*
 FROM src_mkt_user_data ud
@@ -395,34 +415,63 @@ INNER JOIN (
     GROUP BY `userId`
 ) ud_max ON ud_max.max_id = ud.id;
 
--- log_user_password 每 appId+mobile 最新一条
+CREATE TEMPORARY VIEW v_ud_bank_latest AS
+SELECT ud.*
+FROM src_mkt_user_data ud
+INNER JOIN (
+    SELECT `userId`, MAX(id) AS max_id
+    FROM src_mkt_user_data
+    WHERE `bankCode` <> '' AND `bankAccount` <> ''
+    GROUP BY `userId`
+) ud_max ON ud_max.max_id = ud.id
+WHERE ud.`bankCode` <> '' AND ud.`bankAccount` <> '';
+
 CREATE TEMPORARY VIEW v_lup_latest AS
 SELECT l1.`appId`, l1.mobile, l1.password
 FROM src_mkt_log_user_password l1
 INNER JOIN (
-    SELECT `appId`, mobile, MAX(id) AS max_id
-    FROM src_mkt_log_user_password
-    GROUP BY `appId`, mobile
-) l2 ON l2.max_id = l1.id;
+    SELECT l.`appId`, l.mobile, MAX(l.id) AS max_id
+    FROM src_mkt_log_user_password l
+    INNER JOIN v_user_lim uk ON uk.`appId` = l.`appId` AND uk.mobile = l.mobile
+    GROUP BY l.`appId`, l.mobile
+) lm ON lm.max_id = l1.id;
 
--- device_ad_channel 每 device 最新一条
 CREATE TEMPORARY VIEW v_dac_latest AS
 SELECT dac1.*
 FROM src_mkt_device_ad_channel dac1
 INNER JOIN (
     SELECT `deviceId`, MAX(id) AS max_id
     FROM src_mkt_device_ad_channel
+    WHERE `deviceId` IS NOT NULL AND `deviceId` > 0
     GROUP BY `deviceId`
 ) dac_max ON dac_max.max_id = dac1.id;
 
--- core 最后一次还款时间
+CREATE TEMPORARY VIEW v_uri_latest AS
+SELECT uri1.`userId`, uri1.ip
+FROM src_mkt_user_reg_ip uri1
+INNER JOIN (
+    SELECT `userId`, MAX(id) AS max_id
+    FROM src_mkt_user_reg_ip
+    GROUP BY `userId`
+) uri_max ON uri_max.max_id = uri1.id;
+
 CREATE TEMPORARY VIEW v_last_paid_time AS
 SELECT ca.ext_sn, MAX(rr.repay_time) AS last_paid_time
 FROM src_core_application ca
 INNER JOIN src_core_repay_record rr ON rr.sn = ca.sn
+INNER JOIN v_app_lim a ON a.`applicationNo` = ca.ext_sn
 GROUP BY ca.ext_sn;
 
--- ===================== Step 1: user_info（LIMIT ${LM_MIGRATION_LIMIT}） =====================
+CREATE TEMPORARY VIEW v_rp_latest AS
+SELECT rp.*
+FROM src_core_repay_plan rp
+INNER JOIN (
+    SELECT sn, MAX(plan_sn) AS max_plan_sn
+    FROM src_core_repay_plan
+    GROUP BY sn
+) t ON t.sn = rp.sn AND t.max_plan_sn = rp.plan_sn;
+
+-- ===================== Step 1: user_info =====================
 
 INSERT INTO sink_user_info
 SELECT
@@ -434,13 +483,13 @@ SELECT
     CAST(NULL AS STRING),
     JSON_STRING(
         JSON_OBJECT(
-            'full_name' VALUE TRIM(CONCAT_WS(' ', ud.`firstName`, ud.`middleName`, ud.`lastName`)),
             'email' VALUE ud.email,
             'birthday' VALUE ud.birthday,
             'gender' VALUE ud.gender,
             'address' VALUE JSON_OBJECT(
-                'province' VALUE ud.`addressState`,
-                'city' VALUE ud.`addressDistrict`,
+                'province' VALUE CAST(NULL AS STRING),
+                'city' VALUE ud.`addressState`,
+                'district' VALUE ud.`addressDistrict`,
                 'detail' VALUE ud.address
             ),
             'company' VALUE ud.company,
@@ -449,11 +498,15 @@ SELECT
             'profession' VALUE ud.profession,
             'salary' VALUE ud.salary,
             'emergency_contacts' VALUE ud.`emergencyContact`,
+            'registration_ip' VALUE uri.ip,
+            'registration_time' VALUE CAST(UNIX_TIMESTAMP(u.created) AS BIGINT) * 1000,
             'children_num' VALUE ud.`numberOfChildren`,
             'pay_cycle' VALUE ud.`payCycle`,
             'salary_day' VALUE ud.`salaryDay`,
             'app' VALUE JSON_OBJECT(
-                'app_id' VALUE CAST(u.`appId` AS STRING)
+                'name' VALUE ap.name,
+                'app_id' VALUE CAST(u.`appId` AS STRING),
+                'version' VALUE CAST(NULL AS STRING)
             ),
             'install_source' VALUE dac.channel
         )
@@ -463,30 +516,37 @@ SELECT
 FROM v_user_lim u
 LEFT JOIN v_ud_latest ud ON ud.`userId` = u.id
 LEFT JOIN v_lup_latest lup ON lup.`appId` = u.`appId` AND lup.mobile = u.mobile
-LEFT JOIN v_dac_latest dac ON dac.`deviceId` = u.`deviceId`
-ORDER BY u.id
-LIMIT ${LM_MIGRATION_LIMIT};
+LEFT JOIN v_uri_latest uri ON uri.`userId` = u.id
+LEFT JOIN v_dac_latest dac ON dac.`deviceId` = u.`deviceId` AND u.`deviceId` IS NOT NULL AND u.`deviceId` > 0
+LEFT JOIN src_mkt_app ap ON ap.id = u.`appId`;
 
--- ===================== Step 2: user_bankcard（LIMIT ${LM_MIGRATION_LIMIT}） =====================
+-- ===================== Step 2: user_bankcard =====================
 
 INSERT INTO sink_user_bankcard
 SELECT
-    ug.group_user_id,
+    g.group_user_id,
     ud.`bankCode`,
     ud.`bankAccount`,
     CAST(1 AS TINYINT)
-FROM tmp_user_group ug
-INNER JOIN v_ud_latest ud ON ud.`userId` = ug.group_user_id
-WHERE ud.`bankCode` <> '' AND ud.`bankAccount` <> ''
-ORDER BY ug.group_user_id
-LIMIT ${LM_MIGRATION_LIMIT};
+FROM (
+    SELECT ug.group_user_id, ug.user_id
+    FROM tmp_user_group ug
+    INNER JOIN (
+        SELECT DISTINCT `userId` AS user_id
+        FROM src_mkt_user_data
+        WHERE `bankCode` <> '' AND `bankAccount` <> ''
+        ORDER BY `userId` DESC
+        LIMIT ${LM_MIGRATION_LIMIT}
+    ) pick ON pick.user_id = ug.user_id
+) g
+INNER JOIN v_ud_bank_latest ud ON ud.`userId` = g.group_user_id;
 
--- ===================== Step 3: user_product（LIMIT ${LM_MIGRATION_LIMIT}） =====================
+-- ===================== Step 3: user_product =====================
 
 INSERT INTO sink_user_product
 SELECT
-    t.group_user_id,
-    CAST(t.`productId` AS STRING),
+    pick.group_user_id,
+    CAST(pick.`productId` AS STRING),
     JSON_STRING(
         JSON_OBJECT(
             'repayment_method' VALUE 1,
@@ -495,35 +555,46 @@ SELECT
             'periods' VALUE 1,
             'periods_days' VALUE JSON_ARRAY(7),
             'param_tpl' VALUE JSON_OBJECT(
-                'aha' VALUE 0.5,
                 'interest_rate' VALUE 0,
                 'penalty_rate' VALUE 0.05,
-                'upfront_rate' VALUE 0.35
+                'post_paid_rate' VALUE 0,
+                'reduction_rate' VALUE 0,
+                'roll_allowed' VALUE 0,
+                'roll_due_method' VALUE 1,
+                'rollover_rate' VALUE 0,
+                'service_fee_rate' VALUE 0,
+                'tax_fee_rate' VALUE 0,
+                'upfront_rate' VALUE 0.35,
+                'value_date' VALUE 0
             )
         )
     ),
     CAST(1 AS TINYINT),
-    CAST(t.credit_amount AS BIGINT),
-    CAST(t.credit_amount AS BIGINT),
+    CAST(a.amount AS BIGINT),
+    CAST(a.amount AS BIGINT),
     CAST(NULL AS BIGINT),
     CAST(NULL AS BIGINT)
 FROM (
-    SELECT
-        pick.group_user_id,
-        pick.`productId`,
-        a.amount AS credit_amount
+    SELECT g.group_user_id, ap.`productId`, MAX(ap.id) AS max_app_id
     FROM (
-        SELECT ug.group_user_id, a2.`productId`, MAX(a2.id) AS max_app_id
+        SELECT ug.user_id, ug.group_user_id
         FROM tmp_user_group ug
-        INNER JOIN src_mkt_application a2 ON a2.`userId` = ug.user_id
-        GROUP BY ug.group_user_id, a2.`productId`
-    ) pick
-    INNER JOIN src_mkt_application a ON a.id = pick.max_app_id
-) t
-ORDER BY t.group_user_id, t.`productId`
-LIMIT ${LM_MIGRATION_LIMIT};
+        INNER JOIN (
+            SELECT DISTINCT `userId` AS user_id
+            FROM src_mkt_application
+            WHERE `productId` IS NOT NULL AND `productId` <> 0
+            ORDER BY `userId` DESC
+            LIMIT ${LM_MIGRATION_LIMIT}
+        ) u_pick ON u_pick.user_id = ug.user_id
+    ) g
+    INNER JOIN src_mkt_application ap
+        ON ap.`userId` = g.user_id
+       AND ap.`productId` IS NOT NULL AND ap.`productId` <> 0
+    GROUP BY g.group_user_id, ap.`productId`
+) pick
+INNER JOIN src_mkt_application a ON a.id = pick.max_app_id;
 
--- ===================== Step 4: application（LIMIT ${LM_MIGRATION_LIMIT}） =====================
+-- ===================== Step 4: application =====================
 
 INSERT INTO sink_application
 SELECT
@@ -569,6 +640,9 @@ SELECT
         'disbursed_amount' VALUE a.`disburseAmount`,
         'interest' VALUE 0,
         'admin_fee' VALUE GREATEST(a.amount - a.`shouldLoanAmount`, 0),
+        'service_fee' VALUE 0,
+        'tax_fee' VALUE 0,
+        'reduction_amount' VALUE 0,
         'total_amount' VALUE a.repayment,
         'term' VALUE a.term,
         'start_date' VALUE CAST(FROM_UNIXTIME(a.`applyDate`) AS DATE),
@@ -590,29 +664,26 @@ SELECT
     CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE),
     CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE),
     CASE a.`status`
-        WHEN 0 THEN 1 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 4 THEN 1
-        WHEN 5 THEN 3 WHEN 3 THEN 5 WHEN 6 THEN 5 WHEN 8 THEN 7
-        WHEN 7 THEN 11 WHEN 9 THEN 13 WHEN 12 THEN 15
-        WHEN 13 THEN 20 WHEN 14 THEN 20 WHEN 15 THEN 23
-        WHEN 17 THEN 27 WHEN 18 THEN 27 WHEN 19 THEN 27
+        WHEN 0 THEN 1 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 4 THEN 1 WHEN 5 THEN 3
+        WHEN 3 THEN 5 WHEN 6 THEN 5 WHEN 8 THEN 7 WHEN 7 THEN 11 WHEN 9 THEN 13
+        WHEN 12 THEN 15 WHEN 13 THEN 20 WHEN 14 THEN 20
+        WHEN 15 THEN 23 WHEN 17 THEN 27 WHEN 18 THEN 27 WHEN 19 THEN 27
         ELSE a.`status`
     END
-FROM src_mkt_application a
+FROM v_app_lim a
+INNER JOIN src_mkt_user u ON u.id = a.`userId`
 LEFT JOIN tmp_user_group ug ON ug.user_id = a.`userId`
 LEFT JOIN v_ud_latest ud ON ud.`userId` = a.`userId`
 LEFT JOIN src_mkt_device d ON d.id = a.`deviceId`
 LEFT JOIN src_core_application ca ON ca.ext_sn = a.`applicationNo`
-LEFT JOIN v_last_paid_time lpt ON lpt.ext_sn = a.`applicationNo`
-WHERE a.`applicationNo` <> ''
-ORDER BY a.id
-LIMIT ${LM_MIGRATION_LIMIT};
+LEFT JOIN v_last_paid_time lpt ON lpt.ext_sn = a.`applicationNo`;
 
--- ===================== Step 5: loan（LIMIT ${LM_MIGRATION_LIMIT}） =====================
+-- ===================== Step 5: loan =====================
 
 INSERT INTO sink_loan
 SELECT
     CONCAT('NG-', rp.plan_sn),
-    ma.`applicationNo`,
+    base.`applicationNo`,
     CAST(1 AS TINYINT),
     CAST(NULL AS TINYINT),
     CAST(FROM_UNIXTIME(rp.start_date) AS DATE),
@@ -636,18 +707,9 @@ SELECT
         WHEN rp.`status` = 2 THEN 27
         ELSE rp.`status`
     END
-FROM src_mkt_application ma
-INNER JOIN src_core_application ca ON ca.ext_sn = ma.`applicationNo`
-INNER JOIN src_core_repay_plan rp ON rp.sn = ca.sn
-WHERE ma.`applicationNo` <> ''
-ORDER BY ma.id, rp.plan_sn
-LIMIT ${LM_MIGRATION_LIMIT};
-
--- ===================== 验证查询（各 LIMIT ${LM_MIGRATION_LIMIT}） =====================
-
--- SELECT 'user_info' AS tbl, COUNT(*) AS cnt FROM sink_user_info;
--- SELECT * FROM sink_user_info LIMIT ${LM_MIGRATION_LIMIT};
--- SELECT * FROM sink_user_bankcard LIMIT ${LM_MIGRATION_LIMIT};
--- SELECT * FROM sink_user_product LIMIT ${LM_MIGRATION_LIMIT};
--- SELECT * FROM sink_application LIMIT ${LM_MIGRATION_LIMIT};
--- SELECT * FROM sink_loan LIMIT ${LM_MIGRATION_LIMIT};
+FROM (
+    SELECT ma.id AS ma_id, ma.`applicationNo`, ca.sn
+    FROM v_app_lim ma
+    INNER JOIN src_core_application ca ON ca.ext_sn = ma.`applicationNo`
+) base
+INNER JOIN v_rp_latest rp ON rp.sn = base.sn;

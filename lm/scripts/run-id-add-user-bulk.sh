@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 老库 ng_loan_market.id_add_user 宽表 → 目标 user（独立 Batch Job，不改 SOURCE_MYSQL_* incr）
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 MONITOR_ONLY=0
 JOB_ID_ARG=""
@@ -165,18 +165,18 @@ ensure_flink_view() {
     log "VIEW 已存在，跳过创建（已手动建 VIEW 时正常；强制刷新: LM_VIEW_REFRESH=1）"
     return 0
   fi
-  if [[ ! -f sql/ddl/lm_id_add_user_flink_view.sql ]]; then
-    log "ERR: 缺少 sql/ddl/lm_id_add_user_flink_view.sql"
+  if [[ ! -f lm/ddl/lm_id_add_user_flink_view.sql ]]; then
+    log "ERR: 缺少 lm/ddl/lm_id_add_user_flink_view.sql"
     exit 1
   fi
   if ! MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
       -u "$LM_MYSQL_USER" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-      < sql/ddl/lm_id_add_user_flink_view.sql 2>>"$LOG_FILE"; then
+      < lm/ddl/lm_id_add_user_flink_view.sql 2>>"$LOG_FILE"; then
     if view_exists; then
       log "WARN: CREATE VIEW 无权限，但 v_id_add_user_flink 已存在，继续提交 Job"
       return 0
     fi
-    log "ERR: 老库创建 VIEW 失败且无可用 VIEW，请手动执行 sql/ddl/lm_id_add_user_flink_view.sql"
+    log "ERR: 老库创建 VIEW 失败且无可用 VIEW，请手动执行 lm/ddl/lm_id_add_user_flink_view.sql"
     exit 1
   fi
   log "VIEW v_id_add_user_flink 已创建/刷新"
@@ -218,8 +218,8 @@ preflight_check() {
     "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='v_id_add_user_flink' AND column_name='user_id_part';")
   if [[ "$part_col" != "1" ]]; then
     log "ERR: VIEW 缺少 user_id_part 列（16 路分区读需要）。请执行:"
-    log "     mysql ... ng_loan_market < sql/ddl/lm_id_add_user_flink_view.sql"
-    log "     或 LM_VIEW_REFRESH=1 bash scripts/run-id-add-user-bulk.sh（需 CREATE VIEW 权限）"
+    log "     mysql ... ng_loan_market < lm/ddl/lm_id_add_user_flink_view.sql"
+    log "     或 LM_VIEW_REFRESH=1 bash lm/scripts/run-id-add-user-bulk.sh（需 CREATE VIEW 权限）"
     exit 1
   fi
   if [[ "$tgt_ok" != "1" ]]; then
@@ -343,7 +343,7 @@ BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 log "提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
 
 set +e
-bash scripts/run-sql.sh sql/05_sync_id_add_user_bulk.sql 2>&1 | tee "$SQL_LOG"
+bash scripts/run-sql.sh lm/sql/05_sync_id_add_user_bulk.sql 2>&1 | tee "$SQL_LOG"
 SQL_RC=${PIPESTATUS[0]}
 set -e
 

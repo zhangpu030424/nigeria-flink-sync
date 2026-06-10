@@ -1,5 +1,5 @@
 -- 老库 ng_loan_market 一次性全量 → 目标 user（不建 VIEW，无 VT，mobile 明文直传）
--- 执行: bash scripts/run-user-lm-bulk.sh
+-- 执行: bash lm/scripts/run-user-lm-bulk.sh
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'false';

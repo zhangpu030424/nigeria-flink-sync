@@ -1,7 +1,7 @@
 -- 老库宽表 id_add_user → 目标 user（直传，无 VT、无 JOIN）
 -- 前置: 老库已建 VIEW v_id_add_user_flink（run-id-add-user-bulk.sh 会自动创建）
--- 试跑: LM_MIGRATION_LIMIT=20 bash scripts/run-id-add-user-bulk.sh
--- 全量: bash scripts/run-id-add-user-bulk.sh
+-- 试跑: LM_MIGRATION_LIMIT=20 bash lm/scripts/run-id-add-user-bulk.sh
+-- 全量: bash lm/scripts/run-id-add-user-bulk.sh
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';

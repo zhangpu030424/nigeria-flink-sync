@@ -2,7 +2,7 @@
 # 从 ng_loan_market 抽 DISTINCT 手机号 → 写入 nigeria_backend.vt_token_cache（status=0）
 # 随后执行: ./scripts/vt-preload.sh --mode fast --vt-type mobile --skip-count
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if [[ ! -f .env ]]; then
   echo "请先: cp .env.example .env"

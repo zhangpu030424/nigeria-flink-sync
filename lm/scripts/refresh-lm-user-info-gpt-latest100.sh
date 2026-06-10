@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # GPT 版：最新 N 条 user_info 落地 flink_stg_user_info_ready
-# 用法: LM_PICK_N=100 bash scripts/refresh-lm-user-info-gpt-latest100.sh
+# 用法: LM_PICK_N=100 bash lm/scripts/refresh-lm-user-info-gpt-latest100.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if [[ ! -f .env ]]; then
   echo "请先: cp .env.example .env"
@@ -40,7 +40,7 @@ table_exists() {
 }
 
 PREP="/tmp/lm_user_info_gpt_staging_latest100-$$.sql"
-envsubst '${LM_PICK_N}' < sql/ddl/lm_user_info_gpt_staging_latest100.sql > "$PREP"
+envsubst '${LM_PICK_N}' < lm/ddl/lm_user_info_gpt_staging_latest100.sql > "$PREP"
 
 if ! table_exists "user_registration_ip"; then
   echo ">> WARN: 无 user_registration_ip，registration_ip 写 NULL"

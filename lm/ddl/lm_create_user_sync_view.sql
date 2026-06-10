@@ -1,5 +1,5 @@
 -- 【可选，当前方案不用】老库 VIEW 方式已弃用，请直接用:
---   ./scripts/run-user-lm-bulk.sh  （03_sync_user_lm_bulk.sql 内嵌 SELECT，不建 VIEW）
+--   ./lm/scripts/run-user-lm-bulk.sh  （03_sync_user_lm_bulk.sql 内嵌 SELECT，不建 VIEW）
 --
 -- 若仍需手动验证 generate_user.py 等价查询，在 mysql 客户端执行:
---   sql/lm_user_export_select.sql
+--   lm/sql/lm_user_export_select.sql

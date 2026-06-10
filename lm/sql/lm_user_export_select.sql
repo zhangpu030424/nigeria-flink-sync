@@ -1,5 +1,5 @@
 -- generate_user.py 等价查询（仅 SELECT，手动验证用）
--- mysql -h<LM_HOST> -P17033 -u<user> -p ng_loan_market < sql/lm_user_export_select.sql
+-- mysql -h<LM_HOST> -P17033 -u<user> -p ng_loan_market < lm/sql/lm_user_export_select.sql
 -- 验证时可加: LIMIT 10  或  WHERE u.id = 123456
 
 SELECT

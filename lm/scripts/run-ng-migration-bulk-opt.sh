@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 老库 ng_loan_market + ng_loan_core → 目标库 5 表批量迁移
-# SQL: lm/sql/04_sync_ng_migration_bulk.sql（ng_migration_flink.sql）
-# 试跑: LM_MIGRATION_LIMIT=20  全量: LM_MIGRATION_LIMIT=2147483647（默认）
+# 老库 5 表批量迁移（索引优化版 SQL 逻辑 → Flink）
+# SQL: lm/sql/04_sync_ng_migration_bulk_opt.sql
+# 试跑: LM_MIGRATION_LIMIT=20 bash lm/scripts/run-ng-migration-bulk-opt.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -29,20 +29,16 @@ export LM_CORE_MYSQL_PORT="${LM_CORE_MYSQL_PORT:-${LM_MYSQL_PORT:-3306}}"
 export LM_CORE_MYSQL_USER="${LM_CORE_MYSQL_USER:-$LM_MYSQL_USER}"
 export LM_CORE_MYSQL_PASSWORD="${LM_CORE_MYSQL_PASSWORD:-$LM_MYSQL_PASSWORD}"
 export LM_CORE_MYSQL_DATABASE="${LM_CORE_MYSQL_DATABASE:-ng_loan_core}"
-export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-2147483647}"
+export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-20}"
 
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 LOG_DIR="logs"
-LOG_FILE="${LOG_DIR}/sync-ng-migration-bulk.log"
-SQL_LOG="${LOG_DIR}/sync-ng-migration-bulk-sql.log"
+LOG_FILE="${LOG_DIR}/sync-ng-migration-bulk-opt.log"
+SQL_LOG="${LOG_DIR}/sync-ng-migration-bulk-opt-sql.log"
 mkdir -p "$LOG_DIR"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-list_running_job_ids() {
-  docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true
 }
 
 SLOTS="${FLINK_TASK_SLOTS:-16}"
@@ -54,22 +50,23 @@ running_n=0
 while read -r _jid; do
   [[ -z "$_jid" ]] && continue
   running_n=$((running_n + 1))
-done < <(list_running_job_ids)
+done < <(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true)
 
 reserved=$((running_n * INCR_PAR + SLOT_BUFFER))
 max_bulk=$((SLOTS - reserved))
 (( max_bulk < 1 )) && max_bulk=1
 if (( BULK_PARALLEL > max_bulk )); then
-  log "WARN: 并行度 ${BULK_PARALLEL} → ${max_bulk}（slots=${SLOTS} 存量Job=${running_n}）"
+  log "WARN: 并行度 ${BULK_PARALLEL} → ${max_bulk}"
   BULK_PARALLEL=$max_bulk
 fi
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 
-log "老库 market: ${LM_MYSQL_DATABASE:-ng_loan_market}@${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
-log "老库 core:  ${LM_CORE_MYSQL_DATABASE}@${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}"
+log "【优化版】老库 market: ${LM_MYSQL_DATABASE:-ng_loan_market}@${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
+log "【优化版】老库 core:  ${LM_CORE_MYSQL_DATABASE}@${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}"
 log "目标库:     ${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}"
 log "LIMIT:      ${LM_MIGRATION_LIMIT}  并行度: ${FLINK_PARALLELISM}"
-log "提交: lm/sql/04_sync_ng_migration_bulk.sql"
+log "提交: lm/sql/04_sync_ng_migration_bulk_opt.sql"
+log "MySQL 对照: LM_MIGRATION_LIMIT=${LM_MIGRATION_LIMIT} bash lm/scripts/run-lm-verify-mysql.sh user"
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   log "ERR: 容器 ${JM} 未运行"
@@ -77,7 +74,7 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
 fi
 
 set +e
-bash scripts/run-sql.sh lm/sql/04_sync_ng_migration_bulk.sql 2>&1 | tee "$SQL_LOG"
+bash scripts/run-sql.sh lm/sql/04_sync_ng_migration_bulk_opt.sql 2>&1 | tee "$SQL_LOG"
 SQL_RC=${PIPESTATUS[0]}
 set -e
 
@@ -86,5 +83,4 @@ if [[ "$SQL_RC" -ne 0 ]]; then
   exit "$SQL_RC"
 fi
 
-log "完成。5 步 INSERT 已提交（batch）。验证目标库:"
-log "  user_info / user_bankcard / user_product / application / loan COUNT(*)"
+log "完成。验证目标库 user_info / user_bankcard / user_product / application / loan"

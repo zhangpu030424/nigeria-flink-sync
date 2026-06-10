@@ -1,6 +1,6 @@
 -- 最新 N 条 user_info 导出（业务逻辑同 export_user_info.sql）
 -- 子表 MAX(id) 仅在选中 user 范围内聚合
--- 验证: mysql -h... -u... -p ng_loan_market < sql/export_user_info_latest100.sql
+-- 验证: mysql -h... -u... -p ng_loan_market < lm/sql/export_user_info_latest100.sql
 -- 可调: 改下面 LIMIT 100 中的数字
 -- 注意: 临时表在同一 SELECT 中不可重复引用，故复制 tmp_u_pick2 / tmp_u_keys2 / tmp_u_keys3
 

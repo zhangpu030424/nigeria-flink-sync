@@ -1,6 +1,6 @@
 -- 在老库 ng_loan_market 执行一次（Flink JDBC 读 unsigned/bigint/tinyint 会类型冲突，VIEW 侧全部 CAST 为 CHAR）
 
--- 执行: mysql -h... -u... -p ng_loan_market < sql/ddl/lm_id_add_user_flink_view.sql
+-- 执行: mysql -h... -u... -p ng_loan_market < lm/ddl/lm_id_add_user_flink_view.sql
 
 CREATE OR REPLACE VIEW v_id_add_user_flink AS
 SELECT

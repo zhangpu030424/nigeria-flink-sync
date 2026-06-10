@@ -1,5 +1,5 @@
 -- GPT 版 sink_user_info（最新 N 条 user，子表 MAX(id) 仅在选中范围内聚合）
--- 执行: LM_PICK_N=100 bash scripts/refresh-lm-user-info-gpt-latest100.sh
+-- 执行: LM_PICK_N=100 bash lm/scripts/refresh-lm-user-info-gpt-latest100.sh
 -- 勿直接 mysql < 本文件；须经 refresh 脚本 envsubst 替换 ${LM_PICK_N}
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;

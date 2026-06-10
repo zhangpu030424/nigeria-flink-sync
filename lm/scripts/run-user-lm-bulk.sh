@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 老库 ng_loan_market 一次性 user 全量 → 目标库（独立 Job，不改 SOURCE_MYSQL_* incr）
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 MONITOR_ONLY=0
 JOB_ID_ARG=""
@@ -180,7 +180,7 @@ fi
 log "老库: ${LM_MYSQL_DATABASE:-ng_loan_market}@${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
 log "目标: ${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}"
 log "模式: 无 VT，mobile 明文直传"
-log "提交: sql/03_sync_user_lm_bulk.sql"
+log "提交: lm/sql/03_sync_user_lm_bulk.sql"
 
 SLOTS="${FLINK_TASK_SLOTS:-16}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
@@ -228,7 +228,7 @@ BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 log "提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
 
 set +e
-bash scripts/run-sql.sh sql/03_sync_user_lm_bulk.sql 2>&1 | tee "$SQL_LOG"
+bash scripts/run-sql.sh lm/sql/03_sync_user_lm_bulk.sql 2>&1 | tee "$SQL_LOG"
 SQL_RC=${PIPESTATUS[0]}
 set -e
 

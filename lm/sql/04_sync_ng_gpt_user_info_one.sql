@@ -1,6 +1,6 @@
 -- GPT user_info：单表 JDBC 读 MySQL VIEW（无 Flink 多表 JOIN、无 JDBC 分区）
 -- 源: v_flink_gpt_user_info_sink 或 flink_stg_user_info_ready（LM_SRC_TABLE_READY）
--- 执行: bash scripts/run-ng-user-info-gpt-direct.sh
+-- 执行: bash lm/scripts/run-ng-user-info-gpt-direct.sh
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
