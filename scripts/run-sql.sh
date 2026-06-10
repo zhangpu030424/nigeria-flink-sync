@@ -32,13 +32,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < .env
 set +a
 
-# 全量 SQL 强制用 BULK 并行（.env 里 FLINK_PARALLELISM=1 是给 incr 的，不能带进 bulk）
-if [[ "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_direct* || "$SQL_FILE" == *gpt_user_info_one* || "$SQL_FILE" == *dwd_load* || "$SQL_FILE" == *from_dwd* || "$SQL_FILE" == *id_add_user_bulk* ]]; then
+# 老库 Batch bulk 用 BULK 并行（latest100 / gpt_one 由脚本传入低并行，不在此覆盖）
+if [[ "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *_lm_bulk* || "$SQL_FILE" == *ng_migration_bulk* ]]; then
   _BULK="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-40}}"
   export FLINK_PARALLELISM="${_BULK}"
 fi
-_JDBC_NOPART=0
-[[ "$SQL_FILE" == *user_info_direct* || "$SQL_FILE" == *gpt_user_info_one* ]] && _JDBC_NOPART=1
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-16}"
 export USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
 export FLINK_MINI_BATCH_SIZE="${FLINK_MINI_BATCH_SIZE:-10000}"
@@ -49,21 +47,9 @@ export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-timestamp}"
 export CDC_STARTUP_TIMESTAMP_MILLIS="${CDC_STARTUP_TIMESTAMP_MILLIS:-0}"
 export LM_MIGRATION_LIMIT_CLAUSE="${LM_MIGRATION_LIMIT_CLAUSE:-}"
 export LM_USER_ID_RANGE_CLAUSE="${LM_USER_ID_RANGE_CLAUSE:-}"
-export LM_SRC_TABLE_READY="${LM_SRC_TABLE_READY:-v_flink_gpt_user_info_sink}"
-export LM_SRC_TABLE_MKT="${LM_SRC_TABLE_MKT:-v_flink_mkt_user}"
-export LM_SRC_TABLE_UD="${LM_SRC_TABLE_UD:-v_flink_ud_latest}"
-export LM_SRC_TABLE_LUP="${LM_SRC_TABLE_LUP:-v_flink_lup_latest}"
-export LM_SRC_TABLE_DAC="${LM_SRC_TABLE_DAC:-v_flink_dac_latest}"
-export LM_SRC_TABLE_URI_BASE="${LM_SRC_TABLE_URI_BASE:-user_registration_ip}"
-export LM_SRC_TABLE_APP_BASE="${LM_SRC_TABLE_APP_BASE:-app}"
-export LM_MIGRATION_LIMIT_CLAUSE_DWD_USER="${LM_MIGRATION_LIMIT_CLAUSE_DWD_USER:-}"
-export DWD_MYSQL_HOST="${DWD_MYSQL_HOST:-${LM_MYSQL_WRITE_HOST:-${LM_MYSQL_HOST:-127.0.0.1}}}"
-export DWD_MYSQL_PORT="${DWD_MYSQL_PORT:-${LM_MYSQL_WRITE_PORT:-${LM_MYSQL_PORT:-3306}}}"
-export DWD_MYSQL_USER="${DWD_MYSQL_USER:-${LM_MYSQL_WRITE_USER:-${LM_MYSQL_USER:-root}}}"
-export DWD_MYSQL_PASSWORD="${DWD_MYSQL_PASSWORD:-${LM_MYSQL_WRITE_PASSWORD:-${LM_MYSQL_PASSWORD:-}}}"
-export DWD_MYSQL_DATABASE="${DWD_MYSQL_DATABASE:-ng_migration_dwd}"
+export LM_SRC_TABLE_READY="${LM_SRC_TABLE_READY:-flink_stg_user_info_ready}"
 
-VARS='${SOURCE_MYSQL_HOST} ${SOURCE_MYSQL_PORT} ${SOURCE_MYSQL_USER} ${SOURCE_MYSQL_PASSWORD} ${SOURCE_MYSQL_DATABASE} ${LM_MYSQL_HOST} ${LM_MYSQL_PORT} ${LM_MYSQL_USER} ${LM_MYSQL_PASSWORD} ${LM_MYSQL_DATABASE} ${LM_CORE_MYSQL_HOST} ${LM_CORE_MYSQL_PORT} ${LM_CORE_MYSQL_USER} ${LM_CORE_MYSQL_PASSWORD} ${LM_CORE_MYSQL_DATABASE} ${LM_MIGRATION_LIMIT} ${LM_MIGRATION_LIMIT_CLAUSE} ${LM_MIGRATION_LIMIT_CLAUSE_DWD_USER} ${LM_USER_ID_RANGE_CLAUSE} ${LM_SRC_TABLE_READY} ${LM_SRC_TABLE_MKT} ${LM_SRC_TABLE_UD} ${LM_SRC_TABLE_LUP} ${LM_SRC_TABLE_DAC} ${LM_SRC_TABLE_URI_BASE} ${LM_SRC_TABLE_APP_BASE} ${DWD_MYSQL_HOST} ${DWD_MYSQL_PORT} ${DWD_MYSQL_USER} ${DWD_MYSQL_PASSWORD} ${DWD_MYSQL_DATABASE} ${TARGET_MYSQL_HOST} ${TARGET_MYSQL_PORT} ${TARGET_MYSQL_USER} ${TARGET_MYSQL_PASSWORD} ${TARGET_MYSQL_DATABASE} ${FLINK_PARALLELISM} ${FLINK_MINI_BATCH_SIZE} ${FLINK_SINK_BUFFER_ROWS} ${FLINK_CDC_CHUNK_SIZE} ${FLINK_CDC_FETCH_SIZE} ${CDC_STARTUP_MODE} ${CDC_STARTUP_TIMESTAMP_MILLIS}'
+VARS='${SOURCE_MYSQL_HOST} ${SOURCE_MYSQL_PORT} ${SOURCE_MYSQL_USER} ${SOURCE_MYSQL_PASSWORD} ${SOURCE_MYSQL_DATABASE} ${LM_MYSQL_HOST} ${LM_MYSQL_PORT} ${LM_MYSQL_USER} ${LM_MYSQL_PASSWORD} ${LM_MYSQL_DATABASE} ${LM_CORE_MYSQL_HOST} ${LM_CORE_MYSQL_PORT} ${LM_CORE_MYSQL_USER} ${LM_CORE_MYSQL_PASSWORD} ${LM_CORE_MYSQL_DATABASE} ${LM_MIGRATION_LIMIT} ${LM_MIGRATION_LIMIT_CLAUSE} ${LM_USER_ID_RANGE_CLAUSE} ${LM_SRC_TABLE_READY} ${TARGET_MYSQL_HOST} ${TARGET_MYSQL_PORT} ${TARGET_MYSQL_USER} ${TARGET_MYSQL_PASSWORD} ${TARGET_MYSQL_DATABASE} ${FLINK_PARALLELISM} ${FLINK_MINI_BATCH_SIZE} ${FLINK_SINK_BUFFER_ROWS} ${FLINK_CDC_CHUNK_SIZE} ${FLINK_CDC_FETCH_SIZE} ${CDC_STARTUP_MODE} ${CDC_STARTUP_TIMESTAMP_MILLIS}'
 
 PREPARED="/tmp/nigeria-flink-run-$$.sql"
 envsubst "$VARS" < "$SQL_FILE" > "$PREPARED"
@@ -73,28 +59,21 @@ REMOTE="/tmp/nigeria-flink-run.sql"
 
 echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
-if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *dwd_load* || "$SQL_FILE" == *from_dwd* ]]; then
-  if [[ "${FLINK_PARALLELISM:-1}" -lt 8 && "$_JDBC_NOPART" != "1" ]]; then
-    echo ">> ERR: 全量 FLINK_PARALLELISM=${FLINK_PARALLELISM}（应≥8）"
-    echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致（如 20）"
+if [[ "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *_lm_bulk* ]]; then
+  if [[ "${FLINK_PARALLELISM:-1}" -lt 4 ]]; then
+    echo ">> ERR: 全量 FLINK_PARALLELISM=${FLINK_PARALLELISM}（应≥4）"
+    echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致"
+    rm -f "$PREPARED"
+    exit 1
+  fi
+  par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
+  if [[ "${par:-0}" -lt 4 ]]; then
+    echo ">> ERR: scan.partition.num=${par}，并行度未注入"
     rm -f "$PREPARED"
     exit 1
   fi
 fi
 grep -E "^SET 'parallelism|scan.partition.num|'table-name'" "$PREPARED" 2>/dev/null | head -10 || true
-if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *dwd_load* || "$SQL_FILE" == *from_dwd* ]]; then
-  if [[ "$_JDBC_NOPART" != "1" ]]; then
-    par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
-    if [[ "${par:-0}" -lt 8 ]]; then
-      echo ">> ERR: scan.partition.num=${par}（应≥8），生成 SQL 并行度未注入"
-      echo ">> 请设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致后重跑"
-      rm -f "$PREPARED"
-      exit 1
-    fi
-  else
-    echo ">> 直连模式: 无 JDBC 分区，Source 并行=1，Sink parallelism.default=${FLINK_PARALLELISM}"
-  fi
-fi
 docker cp "$PREPARED" "${CONTAINER}:${REMOTE}"
 docker exec "$CONTAINER" ./bin/sql-client.sh -D "parallelism.default=${FLINK_PARALLELISM}" -f "$REMOTE"
 rm -f "$PREPARED"
