@@ -30,6 +30,8 @@ mkdir -p "$LOG_DIR"
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-4}"
 
 echo "[$(date '+%F %T')] GPT 版 user_info 试同步（最新 ${LM_PICK_N} 条）"
+export LM_SRC_TABLE_READY=flink_stg_user_info_ready
+export LM_USER_ID_RANGE_CLAUSE=""
 bash scripts/refresh-lm-user-info-gpt-latest100.sh
 
 while read -r jid; do
@@ -38,5 +40,5 @@ while read -r jid; do
 done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
   | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
 
-bash scripts/run-sql.sh sql/04_sync_ng_user_info_latest100.sql 2>&1 | tee "$SQL_LOG"
+bash scripts/run-sql.sh sql/04_sync_ng_gpt_user_info_one.sql 2>&1 | tee "$SQL_LOG"
 echo "[$(date '+%F %T')] 完成。验证: SELECT user_id, JSON_EXTRACT(info,'$.registration_time') FROM user_info ORDER BY user_id DESC LIMIT 5;"

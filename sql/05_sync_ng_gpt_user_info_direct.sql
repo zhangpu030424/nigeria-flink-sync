@@ -1,6 +1,5 @@
 -- GPT 版 user_info：Flink 直连老库 VIEW，无 JDBC 分区、无 flink_stg_* 物化表
--- 前置: v_flink_* / v_flink_uri_latest / v_flink_mkt_app（主库建 VIEW 后等同步到从库）
--- 执行: bash scripts/run-ng-user-info-gpt-direct.sh
+-- 【已废弃】多表 JOIN 会 ClassCastException；请用 04_sync_ng_gpt_user_info_one.sql + run-ng-user-info-gpt-direct.sh
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';

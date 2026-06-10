@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# GPT 版 user_info 全量：停 Job → Flink 直连 VIEW（无物化、无 JDBC 分区）
-#
-# .env 示例（20 核）:
-#   FLINK_TASK_SLOTS=20 FLINK_PARALLELISM_BULK=20
+# GPT user_info 全量：VIEW + Flink 单表（无 Step3 物化、无 JDBC 分区）
+# 可选分段: LM_USER_INFO_CHUNK_ROWS=500000（按 user.id 分段，避免一次 Job 过大）
 #
 # 全量: bash scripts/run-ng-user-info-gpt-bulk-max.sh
-# 旧路径（MySQL 物化 flink_stg_user_info_ready）: LM_USER_INFO_MATERIALIZE=1 bash scripts/run-ng-user-info-gpt-bulk-max.sh
+# 试跑: LM_MIGRATION_LIMIT=100 bash scripts/run-ng-user-info-gpt-direct.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,40 +25,72 @@ export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-0}"
 [[ "$LM_MIGRATION_LIMIT" == "2147483647" ]] && export LM_MIGRATION_LIMIT=0
 
 if [[ "${LM_USER_INFO_MATERIALIZE:-0}" == "1" ]]; then
-  SLOTS="${FLINK_TASK_SLOTS:-40}"
-  MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-${SLOTS}}"
-  export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-${SLOTS}}"
-  export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK}"
-  export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
-  export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
-  export SYNC_SLOT_BUFFER=0
-  if [[ "${FLINK_PARALLELISM}" -gt "${MAX_PAR}" ]]; then
-    export FLINK_PARALLELISM="${MAX_PAR}"
-    export FLINK_PARALLELISM_BULK="${MAX_PAR}"
-  fi
-  if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
-    export FLINK_PARALLELISM="${SLOTS}"
-    export FLINK_PARALLELISM_BULK="${SLOTS}"
-  fi
-  echo "========== GPT user_info 物化表模式（LM_USER_INFO_MATERIALIZE=1）=========="
+  echo "========== 物化表模式 LM_USER_INFO_MATERIALIZE=1 =========="
   bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
-  bash scripts/check-flink-slots.sh 2>/dev/null || true
   bash scripts/refresh-lm-user-info-gpt-full.sh
-  exec bash scripts/run-ng-user-info-gpt-bulk-ready.sh
+  export LM_SRC_TABLE_READY=flink_stg_user_info_ready
+  exec bash scripts/run-ng-user-info-gpt-direct.sh
 fi
 
 SLOTS="${FLINK_TASK_SLOTS:-20}"
 export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-${SLOTS}}"
-export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK}"
-if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
-  export FLINK_PARALLELISM="${SLOTS}"
+if [[ "${FLINK_PARALLELISM_BULK}" -gt "${SLOTS}" ]]; then
   export FLINK_PARALLELISM_BULK="${SLOTS}"
 fi
 
-echo "========== GPT user_info 全量（直连 VIEW，无物化/无分区）=========="
-echo ">> Step 1/2: 释放 slot"
-bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
+CHUNK="${LM_USER_INFO_CHUNK_ROWS:-0}"
+JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
+FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 
-echo ""
-echo ">> Step 2/2: Flink 直连老库 VIEW → 目标 user_info"
+wait_job() {
+  local jid=$1
+  local i st
+  for ((i=0; i<86400; i+=15)); do
+    st=$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/${jid}" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('state',''))" 2>/dev/null || echo "")
+    case "$st" in
+      FINISHED) echo ">> Job ${jid} FINISHED"; return 0 ;;
+      FAILED|CANCELED) echo "ERR: Job ${jid} ${st}"; return 1 ;;
+      *) [[ $((i % 60)) -eq 0 && -n "$st" ]] && echo "[$(date '+%F %T')] Job ${jid} ${st}..." ;;
+    esac
+    sleep 15
+  done
+  echo "ERR: Job ${jid} 超时未完成"
+  return 1
+}
+
+echo "========== GPT user_info（VIEW + 单表 Flink）=========="
+bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
+bash scripts/check-flink-slots.sh 2>/dev/null || true
+
+if [[ "$CHUNK" =~ ^[0-9]+$ && "$CHUNK" -gt 0 && "$LM_MIGRATION_LIMIT" == "0" ]]; then
+  # shellcheck source=lib/lm-mysql-write.sh
+  source "$(dirname "$0")/lib/lm-mysql-write.sh"
+  max_id=$(lm_mysql_query_read "SELECT COALESCE(MAX(id),0) FROM \`user\`;" 2>/dev/null || echo 0)
+  if ! [[ "$max_id" =~ ^[0-9]+$ ]] || [[ "$max_id" -eq 0 ]]; then
+    echo "ERR: 无法读 user 表 MAX(id)"
+    exit 1
+  fi
+  echo ">> 分段全量: chunk=${CHUNK}  max_user_id=${max_id}"
+  lo=1
+  seg=0
+  while [[ "$lo" -le "$max_id" ]]; do
+    hi=$((lo + CHUNK - 1))
+    seg=$((seg + 1))
+    export LM_USER_ID_RANGE_CLAUSE="AND CAST(user_id AS UNSIGNED) BETWEEN ${lo} AND ${hi}"
+    export LM_MIGRATION_LIMIT_CLAUSE=""
+    echo ""
+    echo ">> 段 ${seg}: user.id ${lo} ~ ${hi}"
+    job_id=$(bash scripts/run-ng-user-info-gpt-direct.sh | grep -oE '[a-f0-9]{32}' | tail -1)
+    if [[ "$job_id" =~ ^[a-f0-9]{32}$ ]]; then
+      wait_job "$job_id" || exit 1
+    else
+      echo "WARN: 未捕获 JobId，请 Web UI 确认"
+    fi
+    lo=$((hi + 1))
+  done
+  echo ">> 全部分段完成"
+  exit 0
+fi
+
+export LM_USER_ID_RANGE_CLAUSE=""
 exec bash scripts/run-ng-user-info-gpt-direct.sh
