@@ -8,7 +8,7 @@ SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_id_add_user (
-    user_id_part BIGINT,
+    user_id_part DECIMAL(20, 0),
     user_id STRING,
     app_id STRING,
     group_user_id STRING,

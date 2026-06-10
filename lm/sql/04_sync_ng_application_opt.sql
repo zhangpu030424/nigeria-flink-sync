@@ -6,8 +6,8 @@ SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
-    id       BIGINT,
-    `appId`  BIGINT,
+    id       DECIMAL(20, 0),
+    `appId`  DECIMAL(20, 0),
     mobile   STRING,
     created  TIMESTAMP(0)
 ) WITH (
@@ -19,8 +19,8 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app_config (
-    id      BIGINT,
-    `appId` BIGINT,
+    id      DECIMAL(20, 0),
+    `appId` DECIMAL(20, 0),
     `key`   STRING,
     `value` STRING
 ) WITH (
@@ -32,25 +32,25 @@ CREATE TABLE src_mkt_app_config (
 );
 
 CREATE TABLE src_mkt_application (
-    id                  BIGINT,
+    id                  DECIMAL(20, 0),
     `applicationNo`     STRING,
-    `appId`             BIGINT,
-    `userId`            BIGINT,
-    `deviceId`          BIGINT,
+    `appId`             DECIMAL(20, 0),
+    `userId`            DECIMAL(20, 0),
+    `deviceId`          DECIMAL(20, 0),
     mobile              STRING,
-    `productId`         BIGINT,
-    amount              BIGINT,
-    repayment           BIGINT,
-    `shouldLoanAmount`  BIGINT,
-    `disburseAmount`    BIGINT,
+    `productId`         DECIMAL(20, 0),
+    amount              DECIMAL(20, 0),
+    repayment           DECIMAL(20, 0),
+    `shouldLoanAmount`  DECIMAL(20, 0),
+    `disburseAmount`    DECIMAL(20, 0),
     `bankCode`          STRING,
     `bankAccount`       STRING,
     term                INT,
     `repeatLoan`        TINYINT,
-    `applyDate`         BIGINT,
-    `dueDate`           BIGINT,
-    `disburseTime`      BIGINT,
-    `paidTime`          BIGINT,
+    `applyDate`         DECIMAL(20, 0),
+    `dueDate`           DECIMAL(20, 0),
+    `disburseTime`      DECIMAL(20, 0),
+    `paidTime`          DECIMAL(20, 0),
     `status`            TINYINT,
     gaid                STRING
 ) WITH (
@@ -62,8 +62,8 @@ CREATE TABLE src_mkt_application (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id       BIGINT,
-    `userId` BIGINT,
+    id       DECIMAL(20, 0),
+    `userId` DECIMAL(20, 0),
     bvn      STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -74,7 +74,7 @@ CREATE TABLE src_mkt_user_data (
 );
 
 CREATE TABLE src_mkt_device (
-    id           BIGINT,
+    id           DECIMAL(20, 0),
     `deviceUUID` STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -87,8 +87,8 @@ CREATE TABLE src_mkt_device (
 CREATE TABLE src_core_application (
     sn         STRING,
     ext_sn     STRING,
-    apply_time BIGINT,
-    audit_time BIGINT
+    apply_time DECIMAL(20, 0),
+    audit_time DECIMAL(20, 0)
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}/${LM_CORE_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
@@ -99,7 +99,7 @@ CREATE TABLE src_core_application (
 
 CREATE TABLE src_core_repay_record (
     sn          STRING,
-    repay_time  BIGINT
+    repay_time  DECIMAL(20, 0)
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}/${LM_CORE_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',

@@ -8,7 +8,7 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'pipeline.operator-chaining' = 'false';
 
 CREATE TABLE src_user_info_ready (
-    user_id_part BIGINT,
+    user_id_part DECIMAL(20, 0),
     user_id STRING,
     id_number STRING,
     full_name STRING,

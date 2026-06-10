@@ -6,10 +6,10 @@ SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
-    id              BIGINT,
-    `appId`         BIGINT,
+    id              DECIMAL(20, 0),
+    `appId`         DECIMAL(20, 0),
     mobile          STRING,
-    `deviceId`      BIGINT,
+    `deviceId`      DECIMAL(20, 0),
     created         TIMESTAMP(0)
 ) WITH (
     'connector' = 'jdbc',
@@ -20,7 +20,7 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app (
-    id   BIGINT,
+    id   DECIMAL(20, 0),
     name STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -31,8 +31,8 @@ CREATE TABLE src_mkt_app (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id                  BIGINT,
-    `userId`            BIGINT,
+    id                  DECIMAL(20, 0),
+    `userId`            DECIMAL(20, 0),
     bvn                 STRING,
     `firstName`         STRING,
     `middleName`        STRING,
@@ -43,7 +43,7 @@ CREATE TABLE src_mkt_user_data (
     marital             TINYINT,
     profession          STRING,
     education           TINYINT,
-    salary              BIGINT,
+    salary              DECIMAL(20, 0),
     `addressState`      STRING,
     `addressDistrict`   STRING,
     address             STRING,
@@ -61,8 +61,8 @@ CREATE TABLE src_mkt_user_data (
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id                                    BIGINT,
-    `deviceId`                            BIGINT,
+    id                                    DECIMAL(20, 0),
+    `deviceId`                            DECIMAL(20, 0),
     channel                               STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -73,8 +73,8 @@ CREATE TABLE src_mkt_device_ad_channel (
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id       BIGINT,
-    `appId`  BIGINT,
+    id       DECIMAL(20, 0),
+    `appId`  DECIMAL(20, 0),
     mobile   STRING,
     password STRING
 ) WITH (
@@ -87,8 +87,8 @@ CREATE TABLE src_mkt_log_user_password (
 
 -- registration_ip 源表：run 脚本按老库实际表名注入 ${LM_USER_REG_IP_TABLE}；无表时脚本会去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
-    id       BIGINT,
-    `userId` BIGINT,
+    id       DECIMAL(20, 0),
+    `userId` DECIMAL(20, 0),
     ip       STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -165,7 +165,7 @@ INNER JOIN (
 
 INSERT INTO sink_user_info
 SELECT
-    u.id,
+    CAST(u.id AS BIGINT),
     COALESCE(ud.bvn, ''),
     COALESCE(TRIM(CONCAT_WS(' ', ud.`firstName`, ud.`middleName`, ud.`lastName`)), ''),
     lup.password,

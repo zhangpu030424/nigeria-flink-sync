@@ -10,10 +10,10 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 -- ===================== 源表：ng_loan_market =====================
 
 CREATE TABLE src_mkt_user (
-    id              BIGINT,
-    `appId`         BIGINT,
+    id              DECIMAL(20, 0),
+    `appId`         DECIMAL(20, 0),
     mobile          STRING,
-    `deviceId`      BIGINT,
+    `deviceId`      DECIMAL(20, 0),
     `isCancel`      TINYINT,
     created         TIMESTAMP(0),
     updated         TIMESTAMP(0)
@@ -26,8 +26,8 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app_config (
-    id      BIGINT,
-    `appId` BIGINT,
+    id      DECIMAL(20, 0),
+    `appId` DECIMAL(20, 0),
     `key`   STRING,
     `value` STRING
 ) WITH (
@@ -39,7 +39,7 @@ CREATE TABLE src_mkt_app_config (
 );
 
 CREATE TABLE src_mkt_app (
-    id   BIGINT,
+    id   DECIMAL(20, 0),
     name STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -50,25 +50,25 @@ CREATE TABLE src_mkt_app (
 );
 
 CREATE TABLE src_mkt_application (
-    id                  BIGINT,
+    id                  DECIMAL(20, 0),
     `applicationNo`     STRING,
-    `appId`             BIGINT,
-    `userId`            BIGINT,
-    `deviceId`          BIGINT,
+    `appId`             DECIMAL(20, 0),
+    `userId`            DECIMAL(20, 0),
+    `deviceId`          DECIMAL(20, 0),
     mobile              STRING,
-    `productId`         BIGINT,
-    amount              BIGINT,
-    repayment           BIGINT,
-    `shouldLoanAmount`  BIGINT,
-    `disburseAmount`    BIGINT,
+    `productId`         DECIMAL(20, 0),
+    amount              DECIMAL(20, 0),
+    repayment           DECIMAL(20, 0),
+    `shouldLoanAmount`  DECIMAL(20, 0),
+    `disburseAmount`    DECIMAL(20, 0),
     `bankCode`          STRING,
     `bankAccount`       STRING,
     term                INT,
     `repeatLoan`        TINYINT,
-    `applyDate`         BIGINT,
-    `dueDate`           BIGINT,
-    `disburseTime`      BIGINT,
-    `paidTime`          BIGINT,
+    `applyDate`         DECIMAL(20, 0),
+    `dueDate`           DECIMAL(20, 0),
+    `disburseTime`      DECIMAL(20, 0),
+    `paidTime`          DECIMAL(20, 0),
     `status`            TINYINT,
     gaid                STRING,
     created             TIMESTAMP(0)
@@ -81,8 +81,8 @@ CREATE TABLE src_mkt_application (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id                  BIGINT,
-    `userId`            BIGINT,
+    id                  DECIMAL(20, 0),
+    `userId`            DECIMAL(20, 0),
     bvn                 STRING,
     `firstName`         STRING,
     `middleName`        STRING,
@@ -95,7 +95,7 @@ CREATE TABLE src_mkt_user_data (
     marital             TINYINT,
     profession          STRING,
     education           TINYINT,
-    salary              BIGINT,
+    salary              DECIMAL(20, 0),
     `addressState`      STRING,
     `addressDistrict`   STRING,
     address             STRING,
@@ -113,7 +113,7 @@ CREATE TABLE src_mkt_user_data (
 );
 
 CREATE TABLE src_mkt_device (
-    id           BIGINT,
+    id           DECIMAL(20, 0),
     `deviceUUID` STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -124,8 +124,8 @@ CREATE TABLE src_mkt_device (
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id                                    BIGINT,
-    `deviceId`                            BIGINT,
+    id                                    DECIMAL(20, 0),
+    `deviceId`                            DECIMAL(20, 0),
     channel                               STRING,
     google_ads_campaign_id                STRING,
     google_ads_adgroup_id                 STRING,
@@ -140,8 +140,8 @@ CREATE TABLE src_mkt_device_ad_channel (
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id       BIGINT,
-    `appId`  BIGINT,
+    id       DECIMAL(20, 0),
+    `appId`  DECIMAL(20, 0),
     mobile   STRING,
     password STRING
 ) WITH (
@@ -154,8 +154,8 @@ CREATE TABLE src_mkt_log_user_password (
 
 -- registration_ip 源表：run 脚本注入 ${LM_USER_REG_IP_TABLE}；无表时去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
-    id       BIGINT,
-    `userId` BIGINT,
+    id       DECIMAL(20, 0),
+    `userId` DECIMAL(20, 0),
     ip       STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -170,8 +170,8 @@ CREATE TABLE src_mkt_user_reg_ip (
 CREATE TABLE src_core_application (
     sn         STRING,
     ext_sn     STRING,
-    apply_time BIGINT,
-    audit_time BIGINT
+    apply_time DECIMAL(20, 0),
+    audit_time DECIMAL(20, 0)
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}/${LM_CORE_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
@@ -184,16 +184,16 @@ CREATE TABLE src_core_repay_plan (
     plan_sn          STRING,
     sn               STRING,
     `status`         TINYINT,
-    start_date       BIGINT,
-    due_date         BIGINT,
-    settle_time      BIGINT,
-    prin_amt         BIGINT,
-    interest         BIGINT,
-    orig_fee         BIGINT,
-    penalty          BIGINT,
-    amt              BIGINT,
-    repaid_amt       BIGINT,
-    repay_last_time  BIGINT,
+    start_date       DECIMAL(20, 0),
+    due_date         DECIMAL(20, 0),
+    settle_time      DECIMAL(20, 0),
+    prin_amt         DECIMAL(20, 0),
+    interest         DECIMAL(20, 0),
+    orig_fee         DECIMAL(20, 0),
+    penalty          DECIMAL(20, 0),
+    amt              DECIMAL(20, 0),
+    repaid_amt       DECIMAL(20, 0),
+    repay_last_time  DECIMAL(20, 0),
     created_at       TIMESTAMP(0)
 ) WITH (
     'connector' = 'jdbc',
@@ -205,7 +205,7 @@ CREATE TABLE src_core_repay_plan (
 
 CREATE TABLE src_core_repay_record (
     sn          STRING,
-    repay_time  BIGINT
+    repay_time  DECIMAL(20, 0)
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_CORE_MYSQL_HOST}:${LM_CORE_MYSQL_PORT}/${LM_CORE_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
@@ -490,7 +490,7 @@ INNER JOIN (
 
 INSERT INTO sink_user_info
 SELECT
-    u.id,
+    CAST(u.id AS BIGINT),
     COALESCE(ud.bvn, ''),
     COALESCE(TRIM(CONCAT_WS(' ', ud.`firstName`, ud.`middleName`, ud.`lastName`)), ''),
     lup.password,
