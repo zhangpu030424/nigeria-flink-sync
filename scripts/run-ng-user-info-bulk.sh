@@ -71,36 +71,52 @@ else
   LIMIT_DESC="全量"
 fi
 
+MYSQL_PROBE_TIMEOUT="${LM_MYSQL_PROBE_TIMEOUT:-15}"
+
 mysql_count() {
   local host=$1 port=$2 user=$3 pass=$4 db=$5 sql=$6
-  MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
+  MYSQL_PWD="$pass" mysql --connect-timeout=10 -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
 }
 
-view_readable() {
+mysql_probe() {
+  local sql=$1
+  timeout "$MYSQL_PROBE_TIMEOUT" env MYSQL_PWD="$LM_MYSQL_PASSWORD" \
+    mysql --connect-timeout=10 \
+    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" \
+    "${LM_MYSQL_DATABASE:-ng_loan_market}" -N -e "$sql" 2>/dev/null
+}
+
+view_in_schema() {
   local name=$1
   local cnt
   cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
     "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-    "SELECT COUNT(*) FROM \`${name}\` LIMIT 1;")
-  [[ "$cnt" =~ ^[0-9]+$ ]]
+    "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='${name}';")
+  [[ "$cnt" == "1" ]]
+}
+
+view_probe_one_row() {
+  local name=$1
+  mysql_probe "SELECT 1 FROM \`${name}\` LIMIT 1;" | grep -q '^1$'
 }
 
 all_views_ready() {
   local v
   for v in "${REQUIRED_VIEWS[@]}"; do
-    view_readable "$v" || return 1
+    log "  元数据检查 ${v} ..."
+    view_in_schema "$v" || return 1
   done
   return 0
 }
 
 ensure_flink_views() {
-  log "---- 检查老库 user_info VIEW ----"
+  log "---- 检查老库 user_info VIEW（仅 information_schema，不做 COUNT 全表）----"
   if [[ "${SKIP_LM_VIEW_CREATE:-0}" == "1" ]]; then
-    log "SKIP_LM_VIEW_CREATE=1，跳过 VIEW 创建"
+    log "SKIP_LM_VIEW_CREATE=1，跳过 VIEW 创建/检查"
     return 0
   fi
   if all_views_ready && [[ "${LM_VIEW_REFRESH:-0}" != "1" ]]; then
-    log "VIEW 已存在: ${REQUIRED_VIEWS[*]}"
+    log "VIEW 元数据已存在: ${REQUIRED_VIEWS[*]}"
     return 0
   fi
   if [[ ! -f sql/ddl/lm_user_info_flink_views.sql ]]; then
@@ -124,22 +140,31 @@ preflight_check() {
   log "---- 提交前检查 ----"
   local v
   for v in "${REQUIRED_VIEWS[@]}"; do
-    if ! view_readable "$v"; then
-      log "ERR: 无法读取 VIEW ${v}"
+    if ! view_in_schema "$v"; then
+      log "ERR: information_schema 中无 VIEW ${v}"
       exit 1
     fi
   done
-  local user_cnt ud_cnt tgt_ok
-  user_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
-    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-    "SELECT COUNT(*) FROM v_flink_mkt_user;")
-  ud_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
-    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-    "SELECT COUNT(*) FROM v_flink_ud_latest;")
+  if [[ "${LM_SKIP_VIEW_PROBE:-0}" != "1" ]]; then
+    log "探测 VIEW 可读性（${MYSQL_PROBE_TIMEOUT}s 超时，v_flink_ud_latest 聚合慢可设 LM_SKIP_VIEW_PROBE=1）"
+    for v in "${REQUIRED_VIEWS[@]}"; do
+      log "  探测 SELECT 1 FROM ${v} LIMIT 1 ..."
+      if ! view_probe_one_row "$v"; then
+        log "WARN: ${v} 探测超时/失败；若 VIEW 已手动建好可 LM_SKIP_VIEW_PROBE=1 继续"
+        if [[ "${LM_SKIP_VIEW_PROBE:-0}" != "1" ]]; then
+          log "ERR: 探测失败。大表 VIEW 首次聚合很慢，可: LM_SKIP_VIEW_PROBE=1 bash scripts/run-ng-user-info-bulk.sh"
+          exit 1
+        fi
+      fi
+    done
+  else
+    log "LM_SKIP_VIEW_PROBE=1，跳过 VIEW 数据探测"
+  fi
+  local tgt_ok
   tgt_ok=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
     "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" \
     "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${TARGET_MYSQL_DATABASE}' AND table_name='user_info';")
-  log "源 user=${user_cnt}  ud_latest=${ud_cnt}  目标 user_info 存在=${tgt_ok}"
+  log "目标 user_info 表存在=${tgt_ok}（源表行数不在此 COUNT，避免扫两千万 VIEW）"
   if [[ "$tgt_ok" != "1" ]]; then
     log "ERR: 目标库无 user_info 表"
     exit 1
