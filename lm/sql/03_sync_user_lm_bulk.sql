@@ -7,9 +7,9 @@ SET 'execution.runtime-mode' = 'batch';
 
 CREATE TABLE IF NOT EXISTS src_lm_user_raw (
     id BIGINT,
-    appid INT,
+    appid BIGINT,
     mobile STRING,
-    isCancel INT,
+    isCancel TINYINT,
     updated TIMESTAMP(3),
     deviceId BIGINT,
     created TIMESTAMP(3),
@@ -110,7 +110,7 @@ SELECT
 FROM (
     SELECT
         u.id AS user_id,
-        u.appid AS app_id,
+        CAST(u.appid AS INT) AS app_id,
         CASE
             WHEN app_hit.user_id IS NOT NULL THEN COALESCE(grp.first_user_id, u.id)
             ELSE u.id

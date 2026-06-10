@@ -13,7 +13,7 @@ SELECT id FROM `user` ORDER BY id DESC LIMIT ${LM_PICK_N};
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
@@ -34,7 +34,7 @@ INSERT INTO tmp_u_pick2 SELECT id FROM tmp_u_pick;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys2;
 CREATE TEMPORARY TABLE tmp_u_keys2 (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
@@ -45,7 +45,7 @@ INSERT INTO tmp_u_keys2 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys3;
 CREATE TEMPORARY TABLE tmp_u_keys3 (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
@@ -55,7 +55,7 @@ INSERT INTO tmp_u_keys3 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
 
 DROP TABLE IF EXISTS flink_stg_user_info_ready;
 CREATE TABLE flink_stg_user_info_ready (
-    user_id_part DECIMAL(20, 0) NOT NULL,
+    user_id_part BIGINT NOT NULL,
     user_id      VARCHAR(32)     NOT NULL,
     id_number    VARCHAR(64)     NOT NULL DEFAULT '',
     full_name    VARCHAR(512)    NOT NULL DEFAULT '',
@@ -71,7 +71,7 @@ INSERT INTO flink_stg_user_info_ready (
     user_id_part, user_id, id_number, full_name, password, live_image, id_card, info
 )
 SELECT
-    CAST(u.id AS DECIMAL(20, 0)),
+    u.id,
     CAST(u.id AS CHAR),
     COALESCE(ud.bvn, ''),
     COALESCE(TRIM(CONCAT_WS(' ', ud.`firstName`, ud.`middleName`, ud.`lastName`)), ''),

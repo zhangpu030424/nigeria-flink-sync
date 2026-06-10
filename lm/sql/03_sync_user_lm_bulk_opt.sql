@@ -9,9 +9,9 @@ SET 'execution.runtime-mode' = 'batch';
 
 CREATE TABLE IF NOT EXISTS src_lm_user_raw (
     id BIGINT,
-    `appId` INT,
+    `appId` BIGINT,
     mobile STRING,
-    `isCancel` INT,
+    `isCancel` TINYINT,
     updated TIMESTAMP(3),
     `deviceId` BIGINT,
     created TIMESTAMP(3),
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS src_lm_dac_raw (
 
 CREATE TABLE IF NOT EXISTS src_lm_app_config (
     id BIGINT,
-    `appId` INT,
+    `appId` BIGINT,
     `key` STRING,
     `value` STRING,
     PRIMARY KEY (id) NOT ENFORCED
@@ -99,13 +99,13 @@ ORDER BY id DESC
 LIMIT ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_cam AS
-SELECT CAST(ac.`value` AS INT) AS sub_app_id, ac.`appId` AS main_app_id
+SELECT CAST(ac.`value` AS BIGINT) AS sub_app_id, ac.`appId` AS main_app_id
 FROM src_lm_app_config ac
 INNER JOIN (
-    SELECT CAST(`value` AS INT) AS sub_app_id, MAX(id) AS max_id
+    SELECT CAST(`value` AS BIGINT) AS sub_app_id, MAX(id) AS max_id
     FROM src_lm_app_config
     WHERE `key` = 'coreAppId'
-    GROUP BY CAST(`value` AS INT)
+    GROUP BY CAST(`value` AS BIGINT)
 ) pick ON pick.max_id = ac.id;
 
 CREATE TEMPORARY VIEW v_dac_latest AS
@@ -148,7 +148,7 @@ WHERE rn = 1;
 INSERT INTO sink_user
 SELECT
     u.id AS user_id,
-    u.`appId` AS app_id,
+    CAST(u.`appId` AS INT) AS app_id,
     COALESCE(g.group_user_id, u.id) AS group_user_id,
     u.id AS info_user_id,
     TRIM(u.mobile) AS mobile,

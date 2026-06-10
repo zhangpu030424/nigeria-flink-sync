@@ -11,7 +11,7 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
     id              BIGINT,
-    `appId`         INT,
+    `appId`         BIGINT,
     mobile          STRING,
     `deviceId`      BIGINT,
     `isCancel`      TINYINT,
@@ -26,8 +26,8 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app_config (
-    id      INT,
-    `appId` INT,
+    id      BIGINT,
+    `appId` BIGINT,
     `key`   STRING,
     `value` STRING
 ) WITH (
@@ -39,7 +39,7 @@ CREATE TABLE src_mkt_app_config (
 );
 
 CREATE TABLE src_mkt_app (
-    id   INT,
+    id   BIGINT,
     name STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -52,15 +52,15 @@ CREATE TABLE src_mkt_app (
 CREATE TABLE src_mkt_application (
     id                  BIGINT,
     `applicationNo`     STRING,
-    `appId`             INT,
+    `appId`             BIGINT,
     `userId`            BIGINT,
     `deviceId`          BIGINT,
     mobile              STRING,
-    `productId`         INT,
-    amount              INT,
-    repayment           INT,
-    `shouldLoanAmount`  INT,
-    `disburseAmount`    INT,
+    `productId`         BIGINT,
+    amount              BIGINT,
+    repayment           BIGINT,
+    `shouldLoanAmount`  BIGINT,
+    `disburseAmount`    BIGINT,
     `bankCode`          STRING,
     `bankAccount`       STRING,
     term                INT,
@@ -81,7 +81,7 @@ CREATE TABLE src_mkt_application (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id                  INT,
+    id                  BIGINT,
     `userId`            BIGINT,
     bvn                 STRING,
     `firstName`         STRING,
@@ -95,7 +95,7 @@ CREATE TABLE src_mkt_user_data (
     marital             TINYINT,
     profession          STRING,
     education           TINYINT,
-    salary              INT,
+    salary              BIGINT,
     `addressState`      STRING,
     `addressDistrict`   STRING,
     address             STRING,
@@ -124,7 +124,7 @@ CREATE TABLE src_mkt_device (
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id                                    INT,
+    id                                    BIGINT,
     `deviceId`                            BIGINT,
     channel                               STRING,
     google_ads_campaign_id                STRING,
@@ -140,8 +140,8 @@ CREATE TABLE src_mkt_device_ad_channel (
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id       INT,
-    `appId`  INT,
+    id       BIGINT,
+    `appId`  BIGINT,
     mobile   STRING,
     password STRING
 ) WITH (
@@ -154,7 +154,7 @@ CREATE TABLE src_mkt_log_user_password (
 
 -- registration_ip 源表：run 脚本注入 ${LM_USER_REG_IP_TABLE}；无表时去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
-    id       INT,
+    id       BIGINT,
     `userId` BIGINT,
     ip       STRING
 ) WITH (
@@ -187,12 +187,12 @@ CREATE TABLE src_core_repay_plan (
     start_date       BIGINT,
     due_date         BIGINT,
     settle_time      BIGINT,
-    prin_amt         INT,
-    interest         INT,
-    orig_fee         INT,
-    penalty          INT,
-    amt              INT,
-    repaid_amt       INT,
+    prin_amt         BIGINT,
+    interest         BIGINT,
+    orig_fee         BIGINT,
+    penalty          BIGINT,
+    amt              BIGINT,
+    repaid_amt       BIGINT,
     repay_last_time  BIGINT,
     created_at       TIMESTAMP(0)
 ) WITH (
@@ -375,13 +375,13 @@ ORDER BY id DESC
 LIMIT ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_cam AS
-SELECT CAST(ac.`value` AS INT) AS sub_app_id, ac.`appId` AS main_app_id
+SELECT CAST(ac.`value` AS BIGINT) AS sub_app_id, ac.`appId` AS main_app_id
 FROM src_mkt_app_config ac
 INNER JOIN (
-    SELECT CAST(`value` AS INT) AS sub_app_id, MAX(id) AS max_id
+    SELECT CAST(`value` AS BIGINT) AS sub_app_id, MAX(id) AS max_id
     FROM src_mkt_app_config
     WHERE `key` = 'coreAppId'
-    GROUP BY CAST(`value` AS INT)
+    GROUP BY CAST(`value` AS BIGINT)
 ) pick ON pick.max_id = ac.id;
 
 CREATE TEMPORARY VIEW v_user_eff AS
@@ -500,7 +500,7 @@ SELECT
         JSON_OBJECT(
             'email' VALUE ud.email,
             'birthday' VALUE ud.birthday,
-            'gender' VALUE ud.gender,
+            'gender' VALUE CAST(ud.gender AS INT),
             'address' VALUE JSON_OBJECT(
                 'province' VALUE CAST(NULL AS STRING),
                 'city' VALUE ud.`addressState`,
@@ -508,16 +508,16 @@ SELECT
                 'detail' VALUE ud.address
             ),
             'company' VALUE ud.company,
-            'education' VALUE ud.education,
-            'marital' VALUE ud.marital,
+            'education' VALUE CAST(ud.education AS INT),
+            'marital' VALUE CAST(ud.marital AS INT),
             'profession' VALUE ud.profession,
-            'salary' VALUE ud.salary,
+            'salary' VALUE CAST(ud.salary AS BIGINT),
             'emergency_contacts' VALUE ud.`emergencyContact`,
             'registration_ip' VALUE uri.ip,
             'registration_time' VALUE CAST(UNIX_TIMESTAMP(CAST(u.created AS STRING)) AS BIGINT) * 1000,
-            'children_num' VALUE ud.`numberOfChildren`,
-            'pay_cycle' VALUE ud.`payCycle`,
-            'salary_day' VALUE ud.`salaryDay`,
+            'children_num' VALUE CAST(ud.`numberOfChildren` AS INT),
+            'pay_cycle' VALUE CAST(ud.`payCycle` AS INT),
+            'salary_day' VALUE CAST(ud.`salaryDay` AS INT),
             'app' VALUE JSON_OBJECT(
                 'name' VALUE ap.name,
                 'app_id' VALUE CAST(u.`appId` AS STRING),
@@ -621,7 +621,7 @@ SELECT
         ELSE CONCAT('+234', a.mobile)
     END,
     'ng01',
-    a.`appId`,
+    CAST(a.`appId` AS INT),
     '1.0.0',
     a.`userId`,
     COALESCE(g.group_user_id, a.`userId`),
@@ -651,15 +651,15 @@ SELECT
     JSON_STRING(JSON_OBJECT(
         'roll_sequence' VALUE 0,
         'period' VALUE 1,
-        'principal' VALUE a.`shouldLoanAmount`,
-        'disbursed_amount' VALUE a.`disburseAmount`,
+        'principal' VALUE CAST(a.`shouldLoanAmount` AS BIGINT),
+        'disbursed_amount' VALUE CAST(a.`disburseAmount` AS BIGINT),
         'interest' VALUE 0,
-        'admin_fee' VALUE GREATEST(a.amount - a.`shouldLoanAmount`, 0),
+        'admin_fee' VALUE CAST(GREATEST(a.amount - a.`shouldLoanAmount`, 0) AS BIGINT),
         'service_fee' VALUE 0,
         'tax_fee' VALUE 0,
         'reduction_amount' VALUE 0,
-        'total_amount' VALUE a.repayment,
-        'term' VALUE a.term,
+        'total_amount' VALUE CAST(a.repayment AS BIGINT),
+        'term' VALUE CAST(a.term AS INT),
         'start_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`applyDate`) AS DATE) AS STRING),
         'due_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE) AS STRING),
         'roll_allowed' VALUE 0
@@ -702,7 +702,7 @@ SELECT
     CONCAT('NG-', rp.plan_sn),
     base.`applicationNo`,
     CAST(1 AS TINYINT),
-    CAST(NULL AS TINYINT),
+    CAST(0 AS TINYINT),
     CAST(FROM_UNIXTIME(rp.start_date) AS DATE),
     CAST(FROM_UNIXTIME(rp.due_date) AS DATE),
     CAST(FROM_UNIXTIME(rp.due_date) AS DATE),

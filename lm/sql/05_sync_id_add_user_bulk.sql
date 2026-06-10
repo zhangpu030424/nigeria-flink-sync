@@ -8,7 +8,7 @@ SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_id_add_user (
-    user_id_part DECIMAL(20, 0),
+    user_id_part BIGINT,
     user_id STRING,
     app_id STRING,
     group_user_id STRING,
@@ -91,7 +91,7 @@ SELECT
 FROM (
     SELECT
         CAST(user_id AS BIGINT) AS user_id,
-        CAST(app_id AS INT) AS app_id,
+        CAST(CAST(NULLIF(TRIM(app_id), '') AS BIGINT) AS INT) AS app_id,
         CAST(COALESCE(NULLIF(TRIM(group_user_id), ''), user_id) AS BIGINT) AS group_user_id,
         CAST(COALESCE(NULLIF(TRIM(info_user_id), ''), user_id) AS BIGINT) AS info_user_id,
         TRIM(mobile) AS mobile,

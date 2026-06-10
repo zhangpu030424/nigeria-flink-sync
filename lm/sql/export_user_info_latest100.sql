@@ -15,7 +15,7 @@ SELECT id FROM `user` ORDER BY id DESC LIMIT 100;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
@@ -36,7 +36,7 @@ INSERT INTO tmp_u_pick2 SELECT id FROM tmp_u_pick;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys2;
 CREATE TEMPORARY TABLE tmp_u_keys2 (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
@@ -47,7 +47,7 @@ INSERT INTO tmp_u_keys2 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys3;
 CREATE TEMPORARY TABLE tmp_u_keys3 (
     id         BIGINT NOT NULL PRIMARY KEY,
-    `appId`    INT    NOT NULL,
+    `appId`    BIGINT NOT NULL,
     mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),

@@ -7,7 +7,7 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
     id              BIGINT,
-    `appId`         INT,
+    `appId`         BIGINT,
     mobile          STRING,
     `deviceId`      BIGINT,
     created         TIMESTAMP(0)
@@ -20,7 +20,7 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app (
-    id   INT,
+    id   BIGINT,
     name STRING
 ) WITH (
     'connector' = 'jdbc',
@@ -31,7 +31,7 @@ CREATE TABLE src_mkt_app (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id                  INT,
+    id                  BIGINT,
     `userId`            BIGINT,
     bvn                 STRING,
     `firstName`         STRING,
@@ -43,7 +43,7 @@ CREATE TABLE src_mkt_user_data (
     marital             TINYINT,
     profession          STRING,
     education           TINYINT,
-    salary              INT,
+    salary              BIGINT,
     `addressState`      STRING,
     `addressDistrict`   STRING,
     address             STRING,
@@ -61,7 +61,7 @@ CREATE TABLE src_mkt_user_data (
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id                                    INT,
+    id                                    BIGINT,
     `deviceId`                            BIGINT,
     channel                               STRING
 ) WITH (
@@ -73,8 +73,8 @@ CREATE TABLE src_mkt_device_ad_channel (
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id       INT,
-    `appId`  INT,
+    id       BIGINT,
+    `appId`  BIGINT,
     mobile   STRING,
     password STRING
 ) WITH (
@@ -87,7 +87,7 @@ CREATE TABLE src_mkt_log_user_password (
 
 -- registration_ip 源表：run 脚本按老库实际表名注入 ${LM_USER_REG_IP_TABLE}；无表时脚本会去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
-    id       INT,
+    id       BIGINT,
     `userId` BIGINT,
     ip       STRING
 ) WITH (
@@ -175,7 +175,7 @@ SELECT
         JSON_OBJECT(
             'email' VALUE ud.email,
             'birthday' VALUE ud.birthday,
-            'gender' VALUE ud.gender,
+            'gender' VALUE CAST(ud.gender AS INT),
             'address' VALUE JSON_OBJECT(
                 'province' VALUE CAST(NULL AS STRING),
                 'city' VALUE ud.`addressState`,
@@ -183,16 +183,16 @@ SELECT
                 'detail' VALUE ud.address
             ),
             'company' VALUE ud.company,
-            'education' VALUE ud.education,
-            'marital' VALUE ud.marital,
+            'education' VALUE CAST(ud.education AS INT),
+            'marital' VALUE CAST(ud.marital AS INT),
             'profession' VALUE ud.profession,
-            'salary' VALUE ud.salary,
+            'salary' VALUE CAST(ud.salary AS BIGINT),
             'emergency_contacts' VALUE ud.`emergencyContact`,
             'registration_ip' VALUE uri.ip,
             'registration_time' VALUE CAST(UNIX_TIMESTAMP(CAST(u.created AS STRING)) AS BIGINT) * 1000,
-            'children_num' VALUE ud.`numberOfChildren`,
-            'pay_cycle' VALUE ud.`payCycle`,
-            'salary_day' VALUE ud.`salaryDay`,
+            'children_num' VALUE CAST(ud.`numberOfChildren` AS INT),
+            'pay_cycle' VALUE CAST(ud.`payCycle` AS INT),
+            'salary_day' VALUE CAST(ud.`salaryDay` AS INT),
             'app' VALUE JSON_OBJECT(
                 'name' VALUE ap.name,
                 'app_id' VALUE CAST(u.`appId` AS STRING),

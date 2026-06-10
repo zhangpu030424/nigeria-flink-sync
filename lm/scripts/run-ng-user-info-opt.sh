@@ -110,6 +110,13 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   exit 1
 fi
 
+echo "[$(date '+%F %T')] 取消残留 sink_user_info Job（如有）"
+while read -r jid; do
+  [[ -z "$jid" ]] && continue
+  docker exec "$JM" ./bin/flink cancel "$jid" 2>/dev/null || true
+done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
+  | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
+
 bash scripts/run-sql.sh "$PREP" 2>&1 | tee "$SQL_LOG"
 rm -f "$PREP"
 echo "[$(date '+%F %T')] 完成。验证: SELECT COUNT(*) FROM user_info;"

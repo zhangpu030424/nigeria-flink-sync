@@ -4,7 +4,7 @@
 
 CREATE OR REPLACE VIEW v_id_add_user_flink AS
 SELECT
-    CAST(user_id AS DECIMAL(20, 0)) AS user_id_part,
+    CAST(user_id AS SIGNED) AS user_id_part,
     CAST(user_id AS CHAR)            AS user_id,
     CAST(app_id AS CHAR)          AS app_id,
     CAST(group_user_id AS CHAR)   AS group_user_id,

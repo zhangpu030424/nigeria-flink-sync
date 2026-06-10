@@ -7,7 +7,7 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_mkt_user (
     id       BIGINT,
-    `appId`  INT,
+    `appId`  BIGINT,
     mobile   STRING,
     created  TIMESTAMP(0)
 ) WITH (
@@ -19,8 +19,8 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_app_config (
-    id      INT,
-    `appId` INT,
+    id      BIGINT,
+    `appId` BIGINT,
     `key`   STRING,
     `value` STRING
 ) WITH (
@@ -34,15 +34,15 @@ CREATE TABLE src_mkt_app_config (
 CREATE TABLE src_mkt_application (
     id                  BIGINT,
     `applicationNo`     STRING,
-    `appId`             INT,
+    `appId`             BIGINT,
     `userId`            BIGINT,
     `deviceId`          BIGINT,
     mobile              STRING,
-    `productId`         INT,
-    amount              INT,
-    repayment           INT,
-    `shouldLoanAmount`  INT,
-    `disburseAmount`    INT,
+    `productId`         BIGINT,
+    amount              BIGINT,
+    repayment           BIGINT,
+    `shouldLoanAmount`  BIGINT,
+    `disburseAmount`    BIGINT,
     `bankCode`          STRING,
     `bankAccount`       STRING,
     term                INT,
@@ -62,7 +62,7 @@ CREATE TABLE src_mkt_application (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id       INT,
+    id       BIGINT,
     `userId` BIGINT,
     bvn      STRING
 ) WITH (
@@ -170,13 +170,13 @@ ORDER BY id DESC
 LIMIT ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_cam AS
-SELECT CAST(ac.`value` AS INT) AS sub_app_id, ac.`appId` AS main_app_id
+SELECT CAST(ac.`value` AS BIGINT) AS sub_app_id, ac.`appId` AS main_app_id
 FROM src_mkt_app_config ac
 INNER JOIN (
-    SELECT CAST(`value` AS INT) AS sub_app_id, MAX(id) AS max_id
+    SELECT CAST(`value` AS BIGINT) AS sub_app_id, MAX(id) AS max_id
     FROM src_mkt_app_config
     WHERE `key` = 'coreAppId'
-    GROUP BY CAST(`value` AS INT)
+    GROUP BY CAST(`value` AS BIGINT)
 ) pick ON pick.max_id = ac.id;
 
 CREATE TEMPORARY VIEW v_user_eff AS
@@ -230,7 +230,7 @@ SELECT
         ELSE CONCAT('+234', a.mobile)
     END,
     'ng01',
-    a.`appId`,
+    CAST(a.`appId` AS INT),
     '1.0.0',
     a.`userId`,
     COALESCE(g.group_user_id, a.`userId`),
@@ -260,15 +260,15 @@ SELECT
     JSON_STRING(JSON_OBJECT(
         'roll_sequence' VALUE 0,
         'period' VALUE 1,
-        'principal' VALUE a.`shouldLoanAmount`,
-        'disbursed_amount' VALUE a.`disburseAmount`,
+        'principal' VALUE CAST(a.`shouldLoanAmount` AS BIGINT),
+        'disbursed_amount' VALUE CAST(a.`disburseAmount` AS BIGINT),
         'interest' VALUE 0,
-        'admin_fee' VALUE GREATEST(a.amount - a.`shouldLoanAmount`, 0),
+        'admin_fee' VALUE CAST(GREATEST(a.amount - a.`shouldLoanAmount`, 0) AS BIGINT),
         'service_fee' VALUE 0,
         'tax_fee' VALUE 0,
         'reduction_amount' VALUE 0,
-        'total_amount' VALUE a.repayment,
-        'term' VALUE a.term,
+        'total_amount' VALUE CAST(a.repayment AS BIGINT),
+        'term' VALUE CAST(a.term AS INT),
         'start_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`applyDate`) AS DATE) AS STRING),
         'due_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE) AS STRING),
         'roll_allowed' VALUE 0
