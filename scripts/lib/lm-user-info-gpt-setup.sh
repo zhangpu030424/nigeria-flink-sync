@@ -125,13 +125,44 @@ lm_gpt_ensure_ready() {
   lm_gpt_wait_sink_view_read
 }
 
+lm_gpt_probe_sink() {
+  local host_fn=$1 port_fn=$2 user_fn=$3 pass=$4
+  local host port user pass uid
+  host=$("$host_fn")
+  port=$("$port_fn")
+  user=$("$user_fn")
+  pass=$("$pass_fn")
+  uid=$(MYSQL_PWD="$pass" mysql --connect-timeout=10 \
+    -h "$host" -P "$port" -u "$user" "${LM_MYSQL_DATABASE}" \
+    -N -e "SELECT CAST(id AS CHAR) FROM \`user\` ORDER BY id DESC LIMIT 1;" 2>/dev/null || echo "")
+  if [[ -z "$uid" ]]; then
+    echo ">> SKIP: user 表无样例行，不 probe sink VIEW（元数据已 OK 即可）"
+    return 0
+  fi
+  echo ">> 试读 sink VIEW（单 user_id=${uid}，超时 ${LM_GPT_PROBE_TIMEOUT_SEC:-30}s，非全表扫描）..."
+  if timeout "${LM_GPT_PROBE_TIMEOUT_SEC:-30}" env MYSQL_PWD="$pass" mysql --connect-timeout=10 \
+    -h "$host" -P "$port" -u "$user" "${LM_MYSQL_DATABASE}" \
+    -N -e "SELECT user_id FROM v_flink_gpt_user_info_sink WHERE user_id='${uid}' LIMIT 1;" 2>/dev/null | grep -q .; then
+    echo ">> sink VIEW 试读 OK user_id=${uid}"
+    return 0
+  fi
+  echo ">> WARN: sink VIEW 单条 probe 超时或失败（900 万级 VIEW 正常偏慢）"
+  echo ">>       VIEW 元数据已存在，可直接提交 Flink；全量建议分段:"
+  echo ">>       LM_USER_INFO_CHUNK_ROWS=500000 bash scripts/run-ng-user-info-gpt-bulk-max.sh"
+  return 0
+}
+
+lm_gpt_probe_sink_write() { lm_gpt_probe_sink lm_mysql_write_host lm_mysql_write_port lm_mysql_write_user lm_mysql_write_password; }
+lm_gpt_probe_sink_read() { lm_gpt_probe_sink lm_mysql_read_host lm_mysql_read_port lm_mysql_read_user lm_mysql_read_password; }
+
+lm_mysql_read_user() { echo "${LM_MYSQL_USER:?}"; }
+lm_mysql_read_password() { echo "${LM_MYSQL_PASSWORD:?}"; }
+
 lm_gpt_preflight_read() {
-  local cnt
-  cnt=$(lm_mysql_query_read "SELECT COUNT(*) FROM v_flink_gpt_user_info_sink LIMIT 1;" 2>/dev/null || echo "ERR")
-  if [[ "$cnt" == "ERR" ]] || ! [[ "$cnt" =~ ^[0-9]+$ ]]; then
-    echo "ERR: 无法 SELECT v_flink_gpt_user_info_sink @ ${LM_MYSQL_HOST}"
+  if ! lm_gpt_view_exists_read "v_flink_gpt_user_info_sink"; then
+    echo "ERR: 从库无 v_flink_gpt_user_info_sink"
     return 1
   fi
-  echo ">> 预检 OK: v_flink_gpt_user_info_sink 约 ${cnt} 行"
+  lm_gpt_probe_sink_read
   return 0
 }

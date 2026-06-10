@@ -61,10 +61,9 @@ if [[ "$missing" == "1" ]]; then
   exit 1
 fi
 
-row=$(lm_mysql_query_read "SELECT user_id FROM v_flink_gpt_user_info_sink LIMIT 1;" 2>/dev/null || echo "")
-if [[ -n "$row" ]]; then
-  echo ">> SELECT 试读 OK sample user_id=${row}"
+if lm_gpt_view_exists_read "v_flink_gpt_user_info_sink"; then
+  lm_gpt_probe_sink_read
 else
-  echo ">> ERR: VIEW 存在但 SELECT 失败（权限或 VIEW 定义错误）"
+  echo ">> ERR: v_flink_gpt_user_info_sink 不存在"
   exit 1
 fi

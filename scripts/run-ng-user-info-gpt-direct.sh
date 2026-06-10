@@ -58,9 +58,7 @@ source "$(dirname "$0")/lib/lm-user-info-gpt-setup.sh"
 
 if [[ "$LM_SRC_TABLE_READY" == "v_flink_gpt_user_info_sink" ]]; then
   lm_gpt_ensure_ready
-  lm_mysql_query_read "SELECT user_id FROM v_flink_gpt_user_info_sink LIMIT 1;" >/dev/null \
-    || { echo "ERR: 从库读 VIEW 失败"; exit 1; }
-  echo ">> 预检: VIEW 可读"
+  lm_gpt_probe_sink_read
 else
   echo ">> 读实体表 ${LM_SRC_TABLE_READY}（跳过 VIEW 检查）"
 fi

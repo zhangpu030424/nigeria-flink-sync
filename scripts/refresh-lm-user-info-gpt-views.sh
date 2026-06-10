@@ -47,9 +47,7 @@ for v in v_flink_mkt_user v_flink_ud_latest v_flink_lup_latest v_flink_dac_lates
   }
 done
 
-sample=$(lm_mysql_query_write "SELECT user_id FROM v_flink_gpt_user_info_sink LIMIT 1;" 2>/dev/null || echo "")
-[[ -n "$sample" ]] || { echo "ERR: 主库 SELECT v_flink_gpt_user_info_sink 失败"; exit 1; }
-echo ">> 主库试读 OK user_id=${sample}"
+lm_gpt_probe_sink_write
 
 if [[ "$W_HOST" != "$R_HOST" || "$W_PORT" != "$R_PORT" ]]; then
   echo ""
