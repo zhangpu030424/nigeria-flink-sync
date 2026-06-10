@@ -5,6 +5,7 @@
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'pipeline.operator-chaining' = 'false';
 
 CREATE TABLE src_user_info_ready (
     user_id_part DECIMAL(20, 0),

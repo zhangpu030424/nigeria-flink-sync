@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 老库落地 user_info 同步用实体表（聚合一次），再刷新 VIEW 指向实体表
 # 用法: bash scripts/refresh-lm-user-info-staging.sh
+# DDL 走 LM_MYSQL_WRITE_*（主库）；未配置时等同 LM_MYSQL_*
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,41 +22,26 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < .env
 set +a
 
-: "${LM_MYSQL_HOST:?}"
-: "${LM_MYSQL_USER:?}"
-: "${LM_MYSQL_PASSWORD:?}"
-LM_MYSQL_PORT="${LM_MYSQL_PORT:-3306}"
+# shellcheck source=lib/lm-mysql-write.sh
+source "$(dirname "$0")/lib/lm-mysql-write.sh"
 LM_MYSQL_DATABASE="${LM_MYSQL_DATABASE:-ng_loan_market}"
 
+lm_mysql_assert_writable || exit 1
+
 echo ">> 老库落地实体表（可能需 10～60 分钟，视数据量）"
-echo ">> ${LM_MYSQL_DATABASE} @ ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
-ro=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
-  -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" -N -e "SELECT @@read_only;" 2>/dev/null || echo "?")
-if [[ "$ro" == "1" ]]; then
-  echo "ERR: 当前连的是只读从库 (read_only=1)，不能 CREATE TABLE"
-  echo "  请在主库执行 sql/ddl/lm_user_info_flink_staging_tables.sql，等同步后再让 Flink 读从库"
-  echo "  或改用 VIEW 方案，见 docs/LM_REPLICA_MIGRATION.md"
-  exit 1
-fi
+echo ">> ${LM_MYSQL_DATABASE} @ $(lm_mysql_write_host):$(lm_mysql_write_port)"
 echo ">> 开始: $(date '+%F %T')"
 
-MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql \
-  --connect-timeout=30 \
-  -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
-  -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
-  < sql/ddl/lm_user_info_flink_staging_tables.sql
+lm_mysql_exec_write sql/ddl/lm_user_info_flink_staging_tables.sql
 
 echo ">> 刷新 VIEW → 实体表"
-MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql \
-  --connect-timeout=30 \
-  -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
-  -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
-  < sql/ddl/lm_user_info_flink_views_staging.sql
+lm_mysql_exec_write sql/ddl/lm_user_info_flink_views_staging.sql
 
 echo ">> 完成: $(date '+%F %T')"
 for t in flink_stg_mkt_user flink_stg_ud_latest flink_stg_lup_latest flink_stg_dac_latest; do
-  cnt=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
-    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
-    -N -e "SELECT COUNT(*) FROM ${t};" 2>/dev/null || echo "?")
+  cnt=$(lm_mysql_query_write "SELECT COUNT(*) FROM ${t};" || echo "?")
   echo "   ${t}: ${cnt} 行"
 done
+if [[ "$(lm_mysql_write_host)" != "$(lm_mysql_read_host)" ]]; then
+  echo ">> 主从分离: 请等 flink_stg_* 同步到从库 $(lm_mysql_read_host) 后再跑 Flink"
+fi

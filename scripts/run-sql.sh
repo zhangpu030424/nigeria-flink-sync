@@ -31,8 +31,14 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   export "$line"
 done < .env
 set +a
-export USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
+
+# 全量 SQL 强制用 BULK 并行（.env 里 FLINK_PARALLELISM=1 是给 incr 的，不能带进 bulk）
+if [[ "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* ]]; then
+  _BULK="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-40}}"
+  export FLINK_PARALLELISM="${_BULK}"
+fi
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-16}"
+export USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
 export FLINK_MINI_BATCH_SIZE="${FLINK_MINI_BATCH_SIZE:-10000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-10000}"
 export FLINK_CDC_CHUNK_SIZE="${FLINK_CDC_CHUNK_SIZE:-100000}"
@@ -57,21 +63,24 @@ echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
 if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
   if [[ "${FLINK_PARALLELISM:-1}" -lt 8 ]]; then
-    echo ">> WARN: 全量迁移 FLINK_PARALLELISM=${FLINK_PARALLELISM} 偏低，请用 run-*-bulk.sh 或 export FLINK_PARALLELISM=30"
+    echo ">> ERR: 全量 FLINK_PARALLELISM=${FLINK_PARALLELISM}（应≥8）"
+    echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK=40 FLINK_TASK_SLOTS=40"
+    rm -f "$PREPARED"
+    exit 1
   fi
 fi
 grep -E "^SET 'parallelism|scan.partition.num|'table-name'" "$PREPARED" 2>/dev/null | head -10 || true
-if [[ "$SQL_FILE" == *user_info_bulk* ]]; then
+if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
   par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
   if [[ "${par:-0}" -lt 8 ]]; then
-    echo ">> ERR: user_info bulk scan.partition.num=${par}（应≥8）"
-    echo ">> 请设 FLINK_PARALLELISM_BULK=30，勿用 .env 的 FLINK_PARALLELISM=1 跑全量"
+    echo ">> ERR: scan.partition.num=${par}（应≥8），生成 SQL 并行度未注入"
+    echo ">> 请设 FLINK_PARALLELISM_BULK=40 后重跑"
     rm -f "$PREPARED"
     exit 1
   fi
 fi
 docker cp "$PREPARED" "${CONTAINER}:${REMOTE}"
-docker exec "$CONTAINER" ./bin/sql-client.sh -D parallelism.default="${FLINK_PARALLELISM}" -f "$REMOTE"
+docker exec "$CONTAINER" ./bin/sql-client.sh -D "parallelism.default=${FLINK_PARALLELISM}" -f "$REMOTE"
 rm -f "$PREPARED"
 
 echo ">> 完成。INSERT 类语句会提交长期 Job，请到 Web UI 查看 Running Jobs。"
