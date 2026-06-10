@@ -47,5 +47,12 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   exit 1
 fi
 
+echo "[$(date '+%F %T')] 取消残留 sink_application Job（如有）"
+while read -r jid; do
+  [[ -z "$jid" ]] && continue
+  docker exec "$JM" ./bin/flink cancel "$jid" 2>/dev/null || true
+done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
+  | grep -i 'sink_application' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
+
 bash scripts/run-sql.sh lm/sql/04_sync_ng_application_opt.sql 2>&1 | tee "$SQL_LOG"
 echo "[$(date '+%F %T')] 完成。验证: SELECT COUNT(*) FROM application;"
