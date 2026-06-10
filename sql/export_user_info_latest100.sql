@@ -1,9 +1,7 @@
 -- 最新 N 条 user_info 导出（业务逻辑同 export_user_info.sql）
 -- 子表 MAX(id) 仅在选中 user 范围内聚合，避免扫千万级全表
 -- 验证: mysql -h... -u... -p ng_loan_market < sql/export_user_info_latest100.sql
--- 可调: SET @pick_n = 100;
-
-SET @pick_n := 100;
+-- 可调: 改下面 LIMIT 100 中的数字
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;
 CREATE TEMPORARY TABLE tmp_u_pick (
@@ -14,7 +12,7 @@ INSERT INTO tmp_u_pick (id)
 SELECT id
 FROM `user`
 ORDER BY id DESC
-LIMIT @pick_n;
+LIMIT 100;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (

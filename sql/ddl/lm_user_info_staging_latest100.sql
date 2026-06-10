@@ -1,8 +1,7 @@
 -- 老库：按 export_user_info_latest100 逻辑落地 flink_stg_user_info_ready（Flink 单表读，无 JOIN/聚合）
 -- 执行: LM_PICK_N=100 bash scripts/refresh-lm-user-info-latest100.sh
--- 若 user_registration_ip 不存在，可设 SKIP_URI_JOIN=1（脚本会去掉 uri 相关 JOIN）
-
-SET @pick_n := ${LM_PICK_N};
+-- 若 user_registration_ip 不存在，refresh 脚本会自动去掉 uri JOIN
+-- 勿直接 mysql < 本文件；须经 refresh 脚本 envsubst 替换 ${LM_PICK_N}
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;
 CREATE TEMPORARY TABLE tmp_u_pick (
@@ -13,7 +12,7 @@ INSERT INTO tmp_u_pick (id)
 SELECT id
 FROM `user`
 ORDER BY id DESC
-LIMIT @pick_n;
+LIMIT ${LM_PICK_N};
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (

@@ -27,6 +27,7 @@ set +a
 LM_MYSQL_PORT="${LM_MYSQL_PORT:-3306}"
 LM_MYSQL_DATABASE="${LM_MYSQL_DATABASE:-ng_loan_market}"
 export LM_PICK_N="${LM_PICK_N:-100}"
+[[ "$LM_PICK_N" =~ ^[0-9]+$ ]] || { echo "ERR: LM_PICK_N 必须是正整数，当前=${LM_PICK_N}"; exit 1; }
 
 table_exists() {
   local tbl=$1

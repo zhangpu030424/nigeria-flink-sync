@@ -1,8 +1,7 @@
 -- GPT 版 sink_user_info（最新 N 条 user，子表 MAX(id) 仅在选中范围内聚合）
 -- 来源: GPT版本SQL.md — dwd_latest_* + m_app + registration_time
 -- 执行: LM_PICK_N=100 bash scripts/refresh-lm-user-info-gpt-latest100.sh
-
-SET @pick_n := ${LM_PICK_N};
+-- 勿直接 mysql < 本文件；须经 refresh 脚本 envsubst 替换 ${LM_PICK_N}
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;
 CREATE TEMPORARY TABLE tmp_u_pick (
@@ -10,7 +9,7 @@ CREATE TEMPORARY TABLE tmp_u_pick (
 ) ENGINE = Memory;
 
 INSERT INTO tmp_u_pick (id)
-SELECT id FROM `user` ORDER BY id DESC LIMIT @pick_n;
+SELECT id FROM `user` ORDER BY id DESC LIMIT ${LM_PICK_N};
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (
