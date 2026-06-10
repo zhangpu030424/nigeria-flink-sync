@@ -82,9 +82,13 @@ submit_and_wait() {
   local label=$2
   echo ""
   echo ">> ${label}: ${sql_file}"
+  [[ -f "$sql_file" ]] || { echo "ERR: SQL 文件不存在（路径可能被污染）: ${sql_file}"; exit 1; }
   local before job_id
   before=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | tr '\n' ' ')
-  bash scripts/run-sql.sh "$sql_file"
+  if ! bash scripts/run-sql.sh "$sql_file"; then
+    echo "ERR: run-sql.sh 失败，见上方 Flink/SQL 报错"
+    exit 1
+  fi
   sleep 5
   job_id=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | while read -r j; do
     [[ " $before " == *" $j "* ]] && continue
@@ -97,7 +101,7 @@ submit_and_wait() {
   fi
 }
 
-# reg_ip 灌数（追加到 load SQL 末尾）
+# reg_ip 灌数（追加到 load SQL 末尾；WARN 走 stderr 避免污染路径变量）
 build_dwd_load_sql() {
   local out="/tmp/dwd_load_ng_user_info-$$.sql"
   cp sql/06_dwd_load_ng_user_info_batch.sql "$out"
@@ -116,9 +120,26 @@ FROM (
 ) WHERE rn = 1;
 EOSQL
   else
-    echo ">> WARN: 无 ${LM_SRC_TABLE_URI_BASE}，跳过 dwd_latest_user_reg_ip"
+    echo ">> WARN: 无 ${LM_SRC_TABLE_URI_BASE}，跳过 dwd_latest_user_reg_ip" >&2
+    python3 - "$out" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+text = re.sub(
+    r"CREATE TABLE m_user_reg_ip \([\s\S]*?\);\s*",
+    "",
+    text,
+    count=1,
+)
+text = re.sub(
+    r"CREATE TABLE dwd_latest_user_reg_ip \([\s\S]*?\);\s*",
+    "",
+    text,
+    count=1,
+)
+open(sys.argv[1], "w", encoding="utf-8").write(text)
+PY
   fi
-  echo "$out"
+  printf '%s\n' "$out"
 }
 
 echo "========== DWD 版 user_info（sql.md）=========="
@@ -154,6 +175,7 @@ fi
 bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
 
 DWD_LOAD_SQL=$(build_dwd_load_sql)
+echo ">> 生成 load SQL: ${DWD_LOAD_SQL}"
 submit_and_wait "$DWD_LOAD_SQL" "Step 3/4 Flink 灌 DWD"
 rm -f "$DWD_LOAD_SQL"
 
