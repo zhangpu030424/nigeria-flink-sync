@@ -147,10 +147,10 @@ WHERE rn = 1;
 
 INSERT INTO sink_user
 SELECT
-    u.id AS user_id,
+    CAST(u.id AS BIGINT) AS user_id,
     CAST(u.`appId` AS INT) AS app_id,
-    COALESCE(g.group_user_id, u.id) AS group_user_id,
-    u.id AS info_user_id,
+    CAST(COALESCE(g.group_user_id, u.id) AS BIGINT) AS group_user_id,
+    CAST(u.id AS BIGINT) AS info_user_id,
     TRIM(u.mobile) AS mobile,
     CASE
         WHEN u.`isCancel` = 1 OR CAST(u.`isCancel` AS STRING) = '1' THEN

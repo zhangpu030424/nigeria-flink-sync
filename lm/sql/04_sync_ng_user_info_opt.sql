@@ -1,4 +1,5 @@
 -- 老库 user_info 单表试跑（索引优化版 SQL 逻辑）
+-- JDBC 源表整型列用 DECIMAL(20,0)，避免 MySQL UNSIGNED → BigInteger 与 Flink BIGINT 冲突
 -- 试跑: LM_MIGRATION_LIMIT=20 bash lm/scripts/run-ng-user-info-opt.sh
 
 SET 'execution.runtime-mode' = 'batch';
