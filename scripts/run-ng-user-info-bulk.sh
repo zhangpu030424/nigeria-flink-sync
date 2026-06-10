@@ -208,6 +208,40 @@ flink_records_out() {
   echo "$raw" | grep -oE '"value":"[0-9]+"' | head -1 | grep -oE '[0-9]+' || echo "n/a"
 }
 
+verify_job_source_parallelism() {
+  local jid="${1:-}" expect="${2:-30}"
+  [[ -z "$jid" ]] && return 0
+  local raw min_par
+  raw=$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/${jid}" 2>/dev/null || true)
+  [[ -z "$raw" ]] && return 0
+  log "---- Job 算子并行度（期望源表≥${expect}）----"
+  echo "$raw" | python3 -c "
+import json,sys,re
+expect=int(sys.argv[1])
+d=json.load(sys.stdin)
+for v in d.get('vertices',[]):
+    n=v.get('name','')
+    if 'src_' not in n and 'Source:' not in n:
+        continue
+    p=v.get('parallelism',-1)
+    print(f'  {n[:72]}  parallelism={p}')
+" "$expect" 2>/dev/null | tee -a "$LOG_FILE" || true
+  min_par=$(echo "$raw" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+ps=[]
+for v in d.get('vertices',[]):
+    n=v.get('name','')
+    if 'src_' in n or 'Source:' in n:
+        ps.append(v.get('parallelism',0))
+print(min(ps) if ps else 0)
+" 2>/dev/null || echo "0")
+  if [[ "$min_par" =~ ^[0-9]+$ && "$min_par" -lt "$expect" ]]; then
+    log "WARN: 源算子并行=${min_par} < 期望${expect}！请 cancel 本 Job + 停 incr + 确认用 run-ng-user-info-bulk.sh 提交（勿直接 run-sql.sh）"
+    log "  HashJoin 显示 CREATED/-1 常因 slot 被占满，下游算子排不上队"
+  fi
+}
+
 print_job_exception() {
   local jid="${1:-}" raw
   [[ -z "$jid" ]] && return 0
@@ -294,10 +328,39 @@ if [[ "$FLINK_PARALLELISM" -lt 30 && "$REQ_PARALLEL" -ge 30 ]]; then
   log "  提示: 存量 incr 占 slot 时可用≤${max_bulk}；全量迁移建议先 cancel incr 再跑"
 fi
 
+print_slot_status() {
+  log "---- 集群 slot 实况 ----"
+  docker exec "$JM" ./bin/flink list 2>/dev/null | tee -a "$LOG_FILE" || true
+  FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
+  curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/taskmanagers" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    t=f=0
+    for tm in d.get('taskmanagers',[]):
+        t+=tm.get('slotsNumber',0)
+        f+=tm.get('freeSlots',0)
+    print(f'TM slots合计={t} 空闲={f}（若合计≠.env FLINK_TASK_SLOTS 请 force-recreate taskmanager）')
+except Exception as e:
+    print('无法读取 TaskManagers:', e)
+" 2>/dev/null | tee -a "$LOG_FILE" || true
+}
+
+if [[ "$FLINK_PARALLELISM" -lt "$REQ_PARALLEL" && "${SYNC_BULK_IGNORE_SLOT_CAP:-0}" != "1" ]]; then
+  log "ERR: 并行 ${FLINK_PARALLELISM} < 请求 ${REQ_PARALLEL}（存量 Flink Job=${running_n} 占 slot）"
+  log "  列表页 Tasks=4 是 4 个算子，不是 30 核；当前只会每个算子 ${FLINK_PARALLELISM} 路 JDBC"
+  log "  解决: ① cancel 存量 incr  ② .env FLINK_TASK_SLOTS=30 + recreate TM  ③ 或 SYNC_BULK_IGNORE_SLOT_CAP=1"
+  print_slot_status
+  exit 1
+fi
+
 if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   log "ERR: 容器 ${JM} 未运行"
   exit 1
 fi
+
+print_slot_status
+bash scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE" || true
 
 ensure_flink_views
 preflight_check
@@ -311,6 +374,7 @@ set -e
 JOB_ID=$(capture_new_job_id "$BEFORE_JOBS" || true)
 log "sql-client 退出码=${SQL_RC}  Job=${JOB_ID:-?}"
 [[ "$SQL_RC" -ne 0 ]] && exit "$SQL_RC"
+verify_job_source_parallelism "${JOB_ID:-}" "$FLINK_PARALLELISM"
 
 monitor_loop "${JOB_ID:-}"
 final_state=$(flink_job_state "${JOB_ID:-}")
