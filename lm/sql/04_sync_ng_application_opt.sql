@@ -269,8 +269,8 @@ SELECT
         'reduction_amount' VALUE 0,
         'total_amount' VALUE a.repayment,
         'term' VALUE a.term,
-        'start_date' VALUE CAST(FROM_UNIXTIME(a.`applyDate`) AS DATE),
-        'due_date' VALUE CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE),
+        'start_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`applyDate`) AS DATE) AS STRING),
+        'due_date' VALUE CAST(CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE) AS STRING),
         'roll_allowed' VALUE 0
     )),
     CAST(a.amount AS BIGINT),
