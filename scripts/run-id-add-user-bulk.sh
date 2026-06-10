@@ -143,12 +143,30 @@ for i, item in enumerate(d.get('all-exceptions', [])[:3], 1):
 " 2>/dev/null | tee -a "$LOG_FILE" || true
 }
 
+ensure_flink_view() {
+  log "---- 创建/刷新老库 VIEW v_id_add_user_flink ----"
+  if [[ ! -f sql/ddl/lm_id_add_user_flink_view.sql ]]; then
+    log "ERR: 缺少 sql/ddl/lm_id_add_user_flink_view.sql"
+    exit 1
+  fi
+  if ! MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
+      -u "$LM_MYSQL_USER" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+      < sql/ddl/lm_id_add_user_flink_view.sql 2>>"$LOG_FILE"; then
+    log "ERR: 老库创建 VIEW 失败，请检查 LM_MYSQL_* 账号是否有 CREATE VIEW 权限"
+    exit 1
+  fi
+  log "VIEW v_id_add_user_flink 已就绪"
+}
+
 preflight_check() {
   log "---- 提交前检查 ----"
-  local src_ok tgt_ok bad_cnt valid_cnt
+  local src_ok view_ok tgt_ok bad_cnt valid_cnt
   src_ok=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
     "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
     "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='id_add_user';")
+  view_ok=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='v_id_add_user_flink';")
   tgt_ok=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
     "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" \
     "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${TARGET_MYSQL_DATABASE}' AND table_name='user';")
@@ -159,11 +177,15 @@ preflight_check() {
     "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
     "SELECT COUNT(*) FROM id_add_user WHERE user_id IS NOT NULL AND app_id IS NOT NULL AND mobile IS NOT NULL AND TRIM(mobile)<>'';")
 
-  log "源表 id_add_user 存在=${src_ok}  可同步行数=${valid_cnt}  无效行=${bad_cnt}"
+  log "源表 id_add_user 存在=${src_ok}  VIEW=${view_ok}  可同步行数=${valid_cnt}  无效行=${bad_cnt}"
   log "目标表 user 存在=${tgt_ok}  库=${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}"
 
   if [[ "$src_ok" != "1" ]]; then
     log "ERR: 源库找不到 id_add_user"
+    exit 1
+  fi
+  if [[ "$view_ok" != "1" ]]; then
+    log "ERR: 源库找不到 v_id_add_user_flink VIEW"
     exit 1
   fi
   if [[ "$tgt_ok" != "1" ]]; then
@@ -276,6 +298,7 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   exit 1
 fi
 
+ensure_flink_view
 preflight_check
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')

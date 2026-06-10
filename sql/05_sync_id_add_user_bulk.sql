@@ -1,9 +1,7 @@
 -- 老库宽表 id_add_user → 目标 user（直传，无 VT、无 JOIN）
--- 执行: bash scripts/run-id-add-user-bulk.sh
+-- 前置: 老库已建 VIEW v_id_add_user_flink（run-id-add-user-bulk.sh 会自动创建）
 -- 试跑: LM_MIGRATION_LIMIT=20 bash scripts/run-id-add-user-bulk.sh
--- 全量: bash scripts/run-id-add-user-bulk.sh（默认不加 LIMIT，避免 SortLimit OOM）
---
--- 源表 JDBC 读入统一用 STRING，规避 MySQL unsigned bigint→BigInteger、tinyint(1)→Boolean 等类型转换问题
+-- 全量: bash scripts/run-id-add-user-bulk.sh
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
@@ -30,7 +28,7 @@ CREATE TABLE src_id_add_user (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'id_add_user',
+    'table-name' = 'v_id_add_user_flink',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
