@@ -84,7 +84,7 @@ submit_and_wait() {
   echo ">> ${label}: ${sql_file}"
   [[ -f "$sql_file" ]] || { echo "ERR: SQL 文件不存在（路径可能被污染）: ${sql_file}"; exit 1; }
   local before job_id
-  before=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | tr '\n' ' ')
+  before=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | tr '\n' ' ' || true)
   if ! bash scripts/run-sql.sh "$sql_file"; then
     echo "ERR: run-sql.sh 失败，见上方 Flink/SQL 报错"
     exit 1
@@ -93,7 +93,7 @@ submit_and_wait() {
   job_id=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | while read -r j; do
     [[ " $before " == *" $j "* ]] && continue
     echo "$j"
-  done | head -1)
+  done | head -1 || true)
   if [[ "$job_id" =~ ^[a-f0-9]{32}$ ]]; then
     wait_job "$job_id"
   else

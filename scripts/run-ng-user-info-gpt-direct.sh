@@ -76,7 +76,7 @@ while read -r jid; do
 done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
   | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
 
-BEFORE=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | tr '\n' ' ')
+BEFORE=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | tr '\n' ' ' || true)
 bash scripts/run-sql.sh sql/04_sync_ng_gpt_user_info_one.sql
 
 sleep 3
