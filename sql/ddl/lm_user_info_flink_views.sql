@@ -45,9 +45,10 @@ INNER JOIN (
 
 CREATE OR REPLACE VIEW v_flink_lup_latest AS
 SELECT
-    CAST(l1.`appId` AS CHAR)  AS `appId`,
-    CAST(l1.mobile AS CHAR)   AS mobile,
-    CAST(l1.password AS CHAR) AS password
+    CAST(l1.id AS DECIMAL(20, 0)) AS id_part,
+    CAST(l1.`appId` AS CHAR)      AS `appId`,
+    CAST(l1.mobile AS CHAR)       AS mobile,
+    CAST(l1.password AS CHAR)     AS password
 FROM log_user_password l1
 INNER JOIN (
     SELECT `appId`, mobile, MAX(id) AS max_id
@@ -57,8 +58,9 @@ INNER JOIN (
 
 CREATE OR REPLACE VIEW v_flink_dac_latest AS
 SELECT
-    CAST(d1.`deviceId` AS CHAR) AS `deviceId`,
-    CAST(d1.channel AS CHAR)      AS channel
+    CAST(d1.id AS DECIMAL(20, 0)) AS id_part,
+    CAST(d1.`deviceId` AS CHAR)     AS `deviceId`,
+    CAST(d1.channel AS CHAR)        AS channel
 FROM device_ad_channel d1
 INNER JOIN (
     SELECT `deviceId`, MAX(id) AS max_id

@@ -261,25 +261,38 @@ if [[ "$MONITOR_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-SLOTS="${FLINK_TASK_SLOTS:-16}"
+SLOTS="${FLINK_TASK_SLOTS:-30}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
-USER_INFO_MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-16}"
-BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-16}}"
+# 32C64G 独占全量时 buffer=0 吃满 30 slot；与 incr 同跑可 export SYNC_SLOT_BUFFER=2
+SLOT_BUFFER="${SYNC_SLOT_BUFFER:-0}"
+USER_INFO_MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-30}"
+REQ_PARALLEL="${FLINK_PARALLELISM:-${FLINK_PARALLELISM_BULK:-30}}"
+BULK_PARALLEL="${REQ_PARALLEL}"
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
 running_n=0
 while read -r _jid; do [[ -n "$_jid" ]] && running_n=$((running_n + 1)); done < <(list_running_job_ids)
-max_bulk=$((SLOTS - running_n * INCR_PAR - 2))
+max_bulk=$((SLOTS - running_n * INCR_PAR - SLOT_BUFFER))
 (( max_bulk < 1 )) && max_bulk=1
-(( BULK_PARALLEL > max_bulk )) && BULK_PARALLEL=$max_bulk
+_CAP_BEFORE="${BULK_PARALLEL}"
+if [[ "${SYNC_BULK_IGNORE_SLOT_CAP:-0}" != "1" ]]; then
+  (( BULK_PARALLEL > max_bulk )) && BULK_PARALLEL=$max_bulk
+fi
 (( BULK_PARALLEL > USER_INFO_MAX_PAR )) && BULK_PARALLEL=$USER_INFO_MAX_PAR
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 
 log "user_info 迁移"
 log "  源: ${LM_MYSQL_DATABASE:-ng_loan_market}@${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
 log "  目标: ${TARGET_MYSQL_DATABASE}.user_info @ ${TARGET_MYSQL_HOST}"
-log "  LIMIT=${LIMIT_DESC}  并行度=${FLINK_PARALLELISM}"
+log "  LIMIT=${LIMIT_DESC}"
+log "  JDBC并行: 请求=${REQ_PARALLEL} slots=${SLOTS} 存量Job=${running_n} 空闲≤${max_bulk} 上限=${USER_INFO_MAX_PAR} → 实际=${FLINK_PARALLELISM}"
+if [[ "$REQ_PARALLEL" != "$FLINK_PARALLELISM" ]]; then
+  log "  WARN: 并行被压低！要满 30 核: .env FLINK_TASK_SLOTS=30、停 incr Job、或 SYNC_BULK_IGNORE_SLOT_CAP=1"
+fi
+if [[ "$FLINK_PARALLELISM" -lt 30 && "$REQ_PARALLEL" -ge 30 ]]; then
+  log "  提示: 存量 incr 占 slot 时可用≤${max_bulk}；全量迁移建议先 cancel incr 再跑"
+fi
 
 if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   log "ERR: 容器 ${JM} 未运行"

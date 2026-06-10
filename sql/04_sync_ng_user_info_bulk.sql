@@ -1,4 +1,4 @@
--- 作业：user_info（多表拼 JSON，老库 VIEW 预聚合 + 16 路分区读 user）
+-- 作业：user_info（多表拼 JSON，老库 VIEW 预聚合 + N 路 JDBC 分区读，N=${FLINK_PARALLELISM}）
 -- 前置: v_flink_mkt_user / v_flink_ud_latest / v_flink_lup_latest / v_flink_dac_latest
 -- 执行: bash scripts/run-ng-user-info-bulk.sh
 -- 试跑: LM_MIGRATION_LIMIT=20 bash scripts/run-ng-user-info-bulk.sh
@@ -65,6 +65,7 @@ CREATE TABLE src_ud_latest (
 );
 
 CREATE TABLE src_lup_latest (
+    id_part DECIMAL(20, 0),
     `appId` STRING,
     mobile STRING,
     password STRING
@@ -74,10 +75,15 @@ CREATE TABLE src_lup_latest (
     'table-name' = 'v_flink_lup_latest',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id_part',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_dac_latest (
+    id_part DECIMAL(20, 0),
     `deviceId` STRING,
     channel STRING
 ) WITH (
@@ -86,6 +92,10 @@ CREATE TABLE src_dac_latest (
     'table-name' = 'v_flink_dac_latest',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id_part',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
