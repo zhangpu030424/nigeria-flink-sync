@@ -29,18 +29,37 @@ LM_MYSQL_DATABASE="${LM_MYSQL_DATABASE:-ng_loan_market}"
 export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-20}"
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-2}"
 
-# 多 CDC 源须错开 server-id（与并行度无关，每表独占一段）
+# 多 CDC 源须错开 server-id；每段宽度 ≥ FLINK_PARALLELISM（CDC chunk 并行）
 _base="${LM_CDC_SERVER_ID_BASE:-5700}"
-export LM_CDC_SERVER_ID_USER="${LM_CDC_SERVER_ID_USER:-$((_base + 1))-$((_base + 4))}"
-export LM_CDC_SERVER_ID_USER_DATA="${LM_CDC_SERVER_ID_USER_DATA:-$((_base + 11))-$((_base + 14))}"
-export LM_CDC_SERVER_ID_LUP="${LM_CDC_SERVER_ID_LUP:-$((_base + 21))-$((_base + 24))}"
-export LM_CDC_SERVER_ID_DAC="${LM_CDC_SERVER_ID_DAC:-$((_base + 31))-$((_base + 34))}"
-export LM_CDC_SERVER_ID_URI="${LM_CDC_SERVER_ID_URI:-$((_base + 41))-$((_base + 44))}"
+_sid_span=$((FLINK_PARALLELISM + 2))
+export LM_CDC_SERVER_ID_USER="${LM_CDC_SERVER_ID_USER:-$((_base + 1))-$((_base + _sid_span))}"
+export LM_CDC_SERVER_ID_USER_DATA="${LM_CDC_SERVER_ID_USER_DATA:-$((_base + 20))-$((_base + 20 + _sid_span))}"
+export LM_CDC_SERVER_ID_LUP="${LM_CDC_SERVER_ID_LUP:-$((_base + 40))-$((_base + 40 + _sid_span))}"
+export LM_CDC_SERVER_ID_DAC="${LM_CDC_SERVER_ID_DAC:-$((_base + 60))-$((_base + 60 + _sid_span))}"
+export LM_CDC_SERVER_ID_URI="${LM_CDC_SERVER_ID_URI:-$((_base + 80))-$((_base + 80 + _sid_span))}"
 
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
+FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 LOG_DIR="logs"
 SQL_LOG="${LOG_DIR}/sync-ng-user-info-cdc-lookup-sql.log"
 mkdir -p "$LOG_DIR"
+
+list_running_job_ids() {
+  docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true
+}
+
+latest_job_id() {
+  curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/overview" 2>/dev/null \
+    | grep -oE '"jid":"[a-f0-9]{32}"' | tail -1 | cut -d'"' -f4 || true
+}
+
+print_job_hint() {
+  echo "[$(date '+%F %T')] 最近 Job（含 FINISHED/FAILED）:"
+  docker exec "$JM" ./bin/flink list -a 2>/dev/null | tail -20 || true
+  local jid
+  jid=$(latest_job_id || true)
+  [[ -n "${jid:-}" ]] && echo "[$(date '+%F %T')] Web UI: http://127.0.0.1:${FLINK_WEB_PORT}/#/job/${jid}/overview"
+}
 
 table_exists() {
   local tbl=$1
@@ -142,6 +161,44 @@ while read -r jid; do
 done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
   | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
 
+BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
+echo "[$(date '+%F %T')] 提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
+
+set +e
 bash scripts/run-sql.sh "$PREP" 2>&1 | tee "$SQL_LOG"
+SQL_RC=${PIPESTATUS[0]}
+set -e
 rm -f "$PREP"
+
+if grep -qiE 'Exception|ERROR|ValidationException|TableException|SqlParserException' "$SQL_LOG" 2>/dev/null; then
+  echo "[$(date '+%F %T')] ERR: sql 日志含异常，请查看 ${SQL_LOG}"
+  grep -iE 'Exception|ERROR|ValidationException|TableException|SqlParserException' "$SQL_LOG" | tail -15 || true
+fi
+
+echo "[$(date '+%F %T')] sql-client 退出码=${SQL_RC}"
+if [[ "$SQL_RC" -ne 0 ]]; then
+  print_job_hint
+  exit "$SQL_RC"
+fi
+
+JOB_ID=""
+for _ in 1 2 3 4 5; do
+  sleep 1
+  for jid in $(list_running_job_ids); do
+    if ! echo " $BEFORE_JOBS " | grep -q " $jid "; then
+      JOB_ID="$jid"
+      break 2
+    fi
+  done
+done
+JOB_ID="${JOB_ID:-$(latest_job_id || true)}"
+
+if [[ -z "${JOB_ID:-}" ]]; then
+  echo "[$(date '+%F %T')] WARN: 未发现 Job。Batch+CDC 若 planning 失败通常此处为空；请查 ${SQL_LOG}"
+  print_job_hint
+  exit 1
+fi
+
+echo "[$(date '+%F %T')] Job=${JOB_ID}（Batch 模式跑完即 FINISHED，不一定在 Running 里）"
+print_job_hint
 echo "[$(date '+%F %T')] 完成。验证: SELECT COUNT(*) FROM user_info;"

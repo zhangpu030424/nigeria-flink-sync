@@ -5,7 +5,9 @@
 -- 前置: LM_MYSQL_USER 需 REPLICATION SLAVE/CLIENT 权限（CDC binlog 快照）
 
 SET 'execution.runtime-mode' = 'batch';
+SET 'table.dml-sync' = 'true';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
+SET 'table.optimizer.dim-lookup-join.batch.enabled' = 'true';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE cdc_mkt_user (
@@ -14,7 +16,6 @@ CREATE TABLE cdc_mkt_user (
     mobile          STRING,
     `deviceId`      DECIMAL(20, 0),
     created         TIMESTAMP(0),
-    proc_time       AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
@@ -26,7 +27,9 @@ CREATE TABLE cdc_mkt_user (
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${LM_CDC_SERVER_ID_USER}',
+    'scan.startup.mode' = 'snapshot',
     'scan.incremental.snapshot.enabled' = 'true',
+    'scan.incremental.close-idle-reader.enabled' = 'true',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
     __CDC_USER_SNAPSHOT_OVERRIDE__
@@ -65,7 +68,9 @@ CREATE TABLE cdc_mkt_user_data (
     'table-name' = 'user_data',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${LM_CDC_SERVER_ID_USER_DATA}',
+    'scan.startup.mode' = 'snapshot',
     'scan.incremental.snapshot.enabled' = 'true',
+    'scan.incremental.close-idle-reader.enabled' = 'true',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
@@ -86,7 +91,9 @@ CREATE TABLE cdc_mkt_log_user_password (
     'table-name' = 'log_user_password',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${LM_CDC_SERVER_ID_LUP}',
+    'scan.startup.mode' = 'snapshot',
     'scan.incremental.snapshot.enabled' = 'true',
+    'scan.incremental.close-idle-reader.enabled' = 'true',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
@@ -106,7 +113,9 @@ CREATE TABLE cdc_mkt_device_ad_channel (
     'table-name' = 'device_ad_channel',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${LM_CDC_SERVER_ID_DAC}',
+    'scan.startup.mode' = 'snapshot',
     'scan.incremental.snapshot.enabled' = 'true',
+    'scan.incremental.close-idle-reader.enabled' = 'true',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
@@ -127,7 +136,9 @@ CREATE TABLE cdc_mkt_user_reg_ip (
     'table-name' = '${LM_USER_REG_IP_TABLE}',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${LM_CDC_SERVER_ID_URI}',
+    'scan.startup.mode' = 'snapshot',
     'scan.incremental.snapshot.enabled' = 'true',
+    'scan.incremental.close-idle-reader.enabled' = 'true',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
@@ -170,7 +181,7 @@ CREATE TABLE sink_user_info (
 );
 
 CREATE TEMPORARY VIEW v_user_lim AS
-SELECT id, `appId`, mobile, `deviceId`, created, proc_time
+SELECT id, `appId`, mobile, `deviceId`, created, PROCTIME() AS proc_time
 FROM cdc_mkt_user
 ORDER BY id DESC
 LIMIT ${LM_MIGRATION_LIMIT};
