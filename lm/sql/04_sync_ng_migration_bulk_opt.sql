@@ -674,13 +674,15 @@ SELECT
     (a.`applyDate` + 7 * 86400) * 1000,
     CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE),
     CAST(FROM_UNIXTIME(a.`dueDate`) AS DATE),
-    CASE a.`status`
-        WHEN 0 THEN 1 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 4 THEN 1 WHEN 5 THEN 3
-        WHEN 3 THEN 5 WHEN 6 THEN 5 WHEN 8 THEN 7 WHEN 7 THEN 11 WHEN 9 THEN 13
-        WHEN 12 THEN 15 WHEN 13 THEN 20 WHEN 14 THEN 20
-        WHEN 15 THEN 23 WHEN 17 THEN 27 WHEN 18 THEN 27 WHEN 19 THEN 27
-        ELSE a.`status`
-    END
+    CAST(
+        CASE a.`status`
+            WHEN 0 THEN 1 WHEN 1 THEN 1 WHEN 2 THEN 1 WHEN 4 THEN 1 WHEN 5 THEN 3
+            WHEN 3 THEN 5 WHEN 6 THEN 5 WHEN 8 THEN 7 WHEN 7 THEN 11 WHEN 9 THEN 13
+            WHEN 12 THEN 15 WHEN 13 THEN 20 WHEN 14 THEN 20
+            WHEN 15 THEN 23 WHEN 17 THEN 27 WHEN 18 THEN 27 WHEN 19 THEN 27
+            ELSE a.`status`
+        END AS TINYINT
+    )
 FROM v_app_lim a
 INNER JOIN src_mkt_user u ON u.id = a.`userId`
 LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`
@@ -710,14 +712,16 @@ SELECT
     rp.repay_last_time * 1000,
     CASE WHEN rp.settle_time > 0 THEN CAST(FROM_UNIXTIME(rp.settle_time) AS DATE) ELSE CAST(NULL AS DATE) END,
     CAST(UNIX_TIMESTAMP(CAST(rp.created_at AS STRING)) AS BIGINT) * 1000,
-    CASE
-        WHEN rp.`status` = 1 AND rp.repaid_amt = 0 THEN 20
-        WHEN rp.`status` = 1 AND rp.repaid_amt <> 0 THEN 24
-        WHEN rp.`status` = 3 THEN 23
-        WHEN rp.`status` = 4 THEN 25
-        WHEN rp.`status` = 2 THEN 27
-        ELSE rp.`status`
-    END
+    CAST(
+        CASE
+            WHEN rp.`status` = 1 AND rp.repaid_amt = 0 THEN 20
+            WHEN rp.`status` = 1 AND rp.repaid_amt <> 0 THEN 24
+            WHEN rp.`status` = 3 THEN 23
+            WHEN rp.`status` = 4 THEN 25
+            WHEN rp.`status` = 2 THEN 27
+            ELSE rp.`status`
+        END AS TINYINT
+    )
 FROM (
     SELECT ma.id AS ma_id, ma.`applicationNo`, ca.sn
     FROM v_app_lim ma
