@@ -189,7 +189,7 @@ SELECT
             'salary' VALUE ud.salary,
             'emergency_contacts' VALUE ud.`emergencyContact`,
             'registration_ip' VALUE uri.ip,
-            'registration_time' VALUE CAST(UNIX_TIMESTAMP(u.created) AS BIGINT) * 1000,
+            'registration_time' VALUE CAST(UNIX_TIMESTAMP(CAST(u.created AS STRING)) AS BIGINT) * 1000,
             'children_num' VALUE ud.`numberOfChildren`,
             'pay_cycle' VALUE ud.`payCycle`,
             'salary_day' VALUE ud.`salaryDay`,

@@ -499,7 +499,7 @@ SELECT
             'salary' VALUE ud.salary,
             'emergency_contacts' VALUE ud.`emergencyContact`,
             'registration_ip' VALUE uri.ip,
-            'registration_time' VALUE CAST(UNIX_TIMESTAMP(u.created) AS BIGINT) * 1000,
+            'registration_time' VALUE CAST(UNIX_TIMESTAMP(CAST(u.created AS STRING)) AS BIGINT) * 1000,
             'children_num' VALUE ud.`numberOfChildren`,
             'pay_cycle' VALUE ud.`payCycle`,
             'salary_day' VALUE ud.`salaryDay`,
@@ -698,7 +698,7 @@ SELECT
     CASE WHEN rp.`status` IN (2, 4) THEN CAST(rp.repaid_amt AS BIGINT) ELSE CAST(0 AS BIGINT) END,
     rp.repay_last_time * 1000,
     CASE WHEN rp.settle_time > 0 THEN CAST(FROM_UNIXTIME(rp.settle_time) AS DATE) ELSE CAST(NULL AS DATE) END,
-    CAST(UNIX_TIMESTAMP(rp.created_at) AS BIGINT) * 1000,
+    CAST(UNIX_TIMESTAMP(CAST(rp.created_at AS STRING)) AS BIGINT) * 1000,
     CASE
         WHEN rp.`status` = 1 AND rp.repaid_amt = 0 THEN 20
         WHEN rp.`status` = 1 AND rp.repaid_amt <> 0 THEN 24
