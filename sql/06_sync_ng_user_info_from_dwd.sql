@@ -1,4 +1,4 @@
--- DWD 中间表 → 目标 user_info（Lookup Join，同 sql.md §3 sink_user_info）
+-- DWD 中间表 → 目标 user_info（Batch 普通 JOIN，DWD 已物化）
 -- 前置: bash scripts/run-ng-user-info-gpt-dwd.sh Step1 已灌满 dwd_*
 -- 执行: bash scripts/run-sql.sh sql/06_sync_ng_user_info_from_dwd.sql
 
@@ -58,8 +58,7 @@ CREATE TABLE dwd_latest_user_data (
     'table-name' = 'dwd_latest_user_data',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '10min'
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE dwd_latest_user_password (
@@ -75,8 +74,7 @@ CREATE TABLE dwd_latest_user_password (
     'table-name' = 'dwd_latest_user_password',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '10min'
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE dwd_latest_device_channel (
@@ -90,8 +88,7 @@ CREATE TABLE dwd_latest_device_channel (
     'table-name' = 'dwd_latest_device_channel',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '10min'
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE dwd_latest_user_reg_ip (
@@ -106,8 +103,7 @@ CREATE TABLE dwd_latest_user_reg_ip (
     'table-name' = 'dwd_latest_user_reg_ip',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '10min'
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE m_app (
@@ -120,8 +116,7 @@ CREATE TABLE m_app (
     'table-name' = '${LM_SRC_TABLE_APP_BASE}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '10000',
-    'lookup.cache.ttl' = '10min'
+    'scan.fetch-size' = '1000'
 );
 
 CREATE TABLE sink_user_info (
@@ -202,15 +197,15 @@ SELECT
     CURRENT_TIMESTAMP AS created_at,
     CURRENT_TIMESTAMP AS updated_at
 FROM dwd_user_base AS u
-LEFT JOIN dwd_latest_user_data FOR SYSTEM_TIME AS OF PROCTIME() AS ud
+LEFT JOIN dwd_latest_user_data AS ud
     ON ud.userId = u.user_id
-LEFT JOIN dwd_latest_user_password FOR SYSTEM_TIME AS OF PROCTIME() AS lup
+LEFT JOIN dwd_latest_user_password AS lup
     ON lup.appId = u.app_id AND lup.mobile = u.mobile
-LEFT JOIN dwd_latest_user_reg_ip FOR SYSTEM_TIME AS OF PROCTIME() AS uri
+LEFT JOIN dwd_latest_user_reg_ip AS uri
     ON uri.userId = u.user_id
-LEFT JOIN m_app FOR SYSTEM_TIME AS OF PROCTIME() AS app
+LEFT JOIN m_app AS app
     ON app.id = u.app_id
-LEFT JOIN dwd_latest_device_channel FOR SYSTEM_TIME AS OF PROCTIME() AS ldc
+LEFT JOIN dwd_latest_device_channel AS ldc
     ON ldc.deviceId = u.device_id
 WHERE u.mobile IS NOT NULL AND TRIM(u.mobile) <> ''
 ${LM_USER_ID_RANGE_CLAUSE}

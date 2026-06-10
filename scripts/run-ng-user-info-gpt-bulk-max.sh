@@ -76,7 +76,7 @@ if [[ "$CHUNK" =~ ^[0-9]+$ && "$CHUNK" -gt 0 && "$LM_MIGRATION_LIMIT" == "0" ]];
   while [[ "$lo" -le "$max_id" ]]; do
     hi=$((lo + CHUNK - 1))
     seg=$((seg + 1))
-    export LM_USER_ID_RANGE_CLAUSE="AND CAST(user_id AS UNSIGNED) BETWEEN ${lo} AND ${hi}"
+    export LM_USER_ID_RANGE_CLAUSE="AND u.user_id BETWEEN ${lo} AND ${hi}"
     export LM_MIGRATION_LIMIT_CLAUSE=""
     echo ""
     echo ">> 段 ${seg}: user.id ${lo} ~ ${hi}"

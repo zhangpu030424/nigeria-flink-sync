@@ -41,7 +41,7 @@ export LM_USER_ID_RANGE_CLAUSE="${LM_USER_ID_RANGE_CLAUSE:-}"
 export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-0}"
 if [[ "$LM_MIGRATION_LIMIT" =~ ^[0-9]+$ && "$LM_MIGRATION_LIMIT" -gt 0 && "$LM_MIGRATION_LIMIT" -lt 10000000 ]]; then
   export LM_MIGRATION_LIMIT_CLAUSE="ORDER BY u.user_id LIMIT ${LM_MIGRATION_LIMIT}"
-  export LM_MIGRATION_LIMIT_CLAUSE_DWD_USER="ORDER BY CAST(id AS UNSIGNED) LIMIT ${LM_MIGRATION_LIMIT}"
+  export LM_MIGRATION_LIMIT_CLAUSE_DWD_USER="ORDER BY CAST(id AS BIGINT) LIMIT ${LM_MIGRATION_LIMIT}"
   LIMIT_DESC="${LM_MIGRATION_LIMIT}"
 else
   export LM_MIGRATION_LIMIT_CLAUSE=""
@@ -191,7 +191,7 @@ import re, sys
 text = open("sql/06_sync_ng_user_info_from_dwd.sql", encoding="utf-8").read()
 text = text.replace("'name' VALUE COALESCE(app.name, '')", "'name' VALUE CAST('' AS STRING)")
 text = re.sub(
-    r"LEFT JOIN m_app FOR SYSTEM_TIME AS OF PROCTIME\(\) AS app\s*ON app\.id = u\.app_id\s*",
+    r"LEFT JOIN m_app AS app\s*ON app\.id = u\.app_id\s*",
     "",
     text,
     count=1,
