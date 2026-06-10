@@ -3,6 +3,8 @@
 #
 # 40 核并行（.env 示例）:
 #   FLINK_TASK_SLOTS=40 FLINK_PARALLELISM_BULK=40 LM_USER_INFO_MAX_PARALLEL=40
+# 20 核够用:
+#   FLINK_TASK_SLOTS=20 FLINK_PARALLELISM_BULK=20 LM_USER_INFO_MAX_PARALLEL=20
 #   docker compose up -d --force-recreate taskmanager
 #
 # 全量: bash scripts/run-ng-user-info-gpt-bulk-max.sh
@@ -42,6 +44,7 @@ fi
 if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
   echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > FLINK_TASK_SLOTS=${SLOTS}，降为 ${SLOTS}"
   export FLINK_PARALLELISM="${SLOTS}"
+  export FLINK_PARALLELISM_BULK="${SLOTS}"
 fi
 
 echo "========== GPT user_info 全量（Flink 并行=${FLINK_PARALLELISM} / slots=${SLOTS}）=========="

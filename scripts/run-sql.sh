@@ -64,7 +64,7 @@ echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_
 if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
   if [[ "${FLINK_PARALLELISM:-1}" -lt 8 ]]; then
     echo ">> ERR: 全量 FLINK_PARALLELISM=${FLINK_PARALLELISM}（应≥8）"
-    echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK=40 FLINK_TASK_SLOTS=40"
+    echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致（如 20）"
     rm -f "$PREPARED"
     exit 1
   fi
@@ -74,7 +74,7 @@ if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_latest100* ]]
   par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
   if [[ "${par:-0}" -lt 8 ]]; then
     echo ">> ERR: scan.partition.num=${par}（应≥8），生成 SQL 并行度未注入"
-    echo ">> 请设 FLINK_PARALLELISM_BULK=40 后重跑"
+    echo ">> 请设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致后重跑"
     rm -f "$PREPARED"
     exit 1
   fi

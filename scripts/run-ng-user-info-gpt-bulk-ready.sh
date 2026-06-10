@@ -28,6 +28,12 @@ set +a
 
 # 再次锁定 bulk 并行（.env 不能改回去）
 export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-40}}"
+SLOTS="${FLINK_TASK_SLOTS:-40}"
+if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
+  echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > FLINK_TASK_SLOTS=${SLOTS}，降为 ${SLOTS}"
+  export FLINK_PARALLELISM="${SLOTS}"
+  export FLINK_PARALLELISM_BULK="${SLOTS}"
+fi
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
@@ -56,9 +62,9 @@ d=json.load(sys.stdin)
 print(sum(int(t.get('slotsNumber',0) or 0) for t in d.get('taskmanagers',[])))
 " 2>/dev/null || echo "0")
 if [[ "$TM_SLOTS" =~ ^[0-9]+$ && "$TM_SLOTS" -gt 0 && "$TM_SLOTS" -lt "$FLINK_PARALLELISM" ]]; then
-  echo "ERR: TaskManager 实际 slots=${TM_SLOTS} < 请求并行 ${FLINK_PARALLELISM}"
-  echo "  请: FLINK_TASK_SLOTS=${FLINK_PARALLELISM} docker compose up -d --force-recreate taskmanager"
-  exit 1
+  echo "WARN: TaskManager 实际 slots=${TM_SLOTS} < 请求并行 ${FLINK_PARALLELISM}，降为 ${TM_SLOTS}"
+  export FLINK_PARALLELISM="${TM_SLOTS}"
+  export FLINK_PARALLELISM_BULK="${TM_SLOTS}"
 fi
 
 while read -r jid; do
