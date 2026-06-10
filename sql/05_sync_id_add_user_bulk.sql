@@ -8,6 +8,7 @@ SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
 CREATE TABLE src_id_add_user (
+    user_id_part DECIMAL(20, 0),
     user_id STRING,
     app_id STRING,
     group_user_id STRING,
@@ -31,6 +32,10 @@ CREATE TABLE src_id_add_user (
     'table-name' = 'v_id_add_user_flink',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'user_id_part',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 

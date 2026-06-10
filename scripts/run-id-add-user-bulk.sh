@@ -212,6 +212,16 @@ preflight_check() {
     log "ERR: 源库找不到 v_id_add_user_flink VIEW（可手动建 VIEW 或 SKIP_LM_VIEW_CREATE=1）"
     exit 1
   fi
+  local part_col
+  part_col=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='v_id_add_user_flink' AND column_name='user_id_part';")
+  if [[ "$part_col" != "1" ]]; then
+    log "ERR: VIEW 缺少 user_id_part 列（16 路分区读需要）。请执行:"
+    log "     mysql ... ng_loan_market < sql/ddl/lm_id_add_user_flink_view.sql"
+    log "     或 LM_VIEW_REFRESH=1 bash scripts/run-id-add-user-bulk.sh（需 CREATE VIEW 权限）"
+    exit 1
+  fi
   if [[ "$tgt_ok" != "1" ]]; then
     log "ERR: 目标库找不到 user 表，请先执行 Target.sql 建表"
     exit 1
@@ -298,8 +308,12 @@ fi
 
 SLOTS="${FLINK_TASK_SLOTS:-16}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
-# 小表直读无分区，默认并行度 1 更稳；可 export FLINK_PARALLELISM=4 覆盖
-BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-1}}"
+# 两千万级全量默认 16 并行（JDBC 按 user_id_part 分区读）；可 export FLINK_PARALLELISM=8 覆盖
+ID_ADD_USER_MAX_PAR="${LM_ID_ADD_USER_MAX_PARALLEL:-16}"
+BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-16}}"
+
+export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
+export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
 running_n=0
 while read -r _jid; do
@@ -310,7 +324,7 @@ done < <(list_running_job_ids)
 max_bulk=$((SLOTS - running_n * INCR_PAR - 2))
 (( max_bulk < 1 )) && max_bulk=1
 (( BULK_PARALLEL > max_bulk )) && BULK_PARALLEL=$max_bulk
-(( BULK_PARALLEL > 4 )) && BULK_PARALLEL=4
+(( BULK_PARALLEL > ID_ADD_USER_MAX_PAR )) && BULK_PARALLEL=$ID_ADD_USER_MAX_PAR
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 
 log "源: ${LM_MYSQL_DATABASE:-ng_loan_market}.id_add_user @ ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
