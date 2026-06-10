@@ -152,7 +152,7 @@ CREATE TABLE src_mkt_log_user_password (
     'table-name' = 'log_user_password'
 );
 
--- 老库表名可能是 user_reg_ip 或 user_registration_ip，按实际改 table-name
+-- registration_ip 源表：run 脚本注入 ${LM_USER_REG_IP_TABLE}；无表时去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
     id       INT,
     `userId` BIGINT,
@@ -162,7 +162,7 @@ CREATE TABLE src_mkt_user_reg_ip (
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'user_reg_ip'
+    'table-name' = '${LM_USER_REG_IP_TABLE}'
 );
 
 -- ===================== 源表：ng_loan_core =====================
@@ -609,7 +609,18 @@ SELECT
     a.`appId`,
     '1.0.0',
     a.`userId`,
-    COALESCE(ug.group_user_id, a.`userId`),
+    COALESCE(
+        (
+            SELECT u2.id
+            FROM src_mkt_user u2
+            WHERE u2.mobile = u.mobile
+              AND u2.created <= u.created
+              AND u2.`appId` = COALESCE(cam.main_app_id, u.`appId`)
+            ORDER BY u2.created ASC, u2.id ASC
+            LIMIT 1
+        ),
+        a.`userId`
+    ),
     a.`applicationNo`,
     CAST(0 AS TINYINT),
     CASE WHEN a.`repeatLoan` = 0 THEN CAST(1 AS TINYINT) ELSE CAST(0 AS TINYINT) END,
@@ -672,7 +683,7 @@ SELECT
     END
 FROM v_app_lim a
 INNER JOIN src_mkt_user u ON u.id = a.`userId`
-LEFT JOIN tmp_user_group ug ON ug.user_id = a.`userId`
+LEFT JOIN v_cam cam ON cam.sub_app_id = u.`appId`
 LEFT JOIN v_ud_latest ud ON ud.`userId` = a.`userId`
 LEFT JOIN src_mkt_device d ON d.id = a.`deviceId`
 LEFT JOIN src_core_application ca ON ca.ext_sn = a.`applicationNo`

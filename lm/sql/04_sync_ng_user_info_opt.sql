@@ -85,7 +85,7 @@ CREATE TABLE src_mkt_log_user_password (
     'table-name' = 'log_user_password'
 );
 
--- 老库常见表名 user_registration_ip；若是 user_reg_ip 请改 table-name
+-- registration_ip 源表：run 脚本按老库实际表名注入 ${LM_USER_REG_IP_TABLE}；无表时脚本会去掉该源
 CREATE TABLE src_mkt_user_reg_ip (
     id       INT,
     `userId` BIGINT,
@@ -95,7 +95,7 @@ CREATE TABLE src_mkt_user_reg_ip (
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'user_registration_ip'
+    'table-name' = '${LM_USER_REG_IP_TABLE}'
 );
 
 CREATE TABLE sink_user_info (

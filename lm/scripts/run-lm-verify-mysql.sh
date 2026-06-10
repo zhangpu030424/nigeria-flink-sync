@@ -39,6 +39,7 @@ run_one() {
   local file=""
   case "$key" in
     user) file="${VERIFY_DIR}/01_user.sql" ;;
+    application) file="${VERIFY_DIR}/03_application.sql" ;;
     *)
       echo "WARN: 校验 SQL [$key] 尚未放入 ${VERIFY_DIR}/，跳过"
       return 0
