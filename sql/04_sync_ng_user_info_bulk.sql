@@ -7,14 +7,16 @@
 -- 仍慢时在 ng_loan_market 执行:
 --   ALTER TABLE log_user_password ADD INDEX idx_app_mobile (`appId`, mobile);
 --
--- JDBC 读 MySQL BIGINT 常为 BigInteger，HashAggregate/DISTINCT 会 ClassCastException → 下游视图统一 CAST
+-- JDBC BIGINT → BigInteger；算子链会把 Source 与 HashAggregate 直连，视图 CAST 无效
+-- 修复：源表用 DECIMAL(20,0) + 关闭 operator-chaining
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'pipeline.operator-chaining' = 'false';
 
 CREATE TABLE src_mkt_user (
-    id BIGINT, `appId` INT, mobile STRING, `deviceId` BIGINT,
+    id DECIMAL(20, 0), `appId` INT, mobile STRING, `deviceId` DECIMAL(20, 0),
     created TIMESTAMP(0), updated TIMESTAMP(0),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -32,7 +34,7 @@ CREATE TABLE src_mkt_user (
 );
 
 CREATE TABLE src_mkt_user_data (
-    id INT, `userId` BIGINT, bvn STRING,
+    id INT, `userId` DECIMAL(20, 0), bvn STRING,
     `firstName` STRING, `middleName` STRING, `lastName` STRING,
     email STRING, gender TINYINT, birthday STRING, marital TINYINT,
     profession STRING, education TINYINT, salary INT,
@@ -72,7 +74,7 @@ CREATE TABLE src_mkt_log_user_password (
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id INT, `deviceId` BIGINT, channel STRING,
+    id INT, `deviceId` DECIMAL(20, 0), channel STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -137,10 +139,10 @@ SELECT * FROM v_src_mkt_user
 WHERE id <= ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_user_keys AS
-SELECT DISTINCT `appId`, mobile FROM v_user_batch;
+SELECT `appId`, mobile FROM v_user_batch GROUP BY `appId`, mobile;
 
 CREATE TEMPORARY VIEW v_user_devices AS
-SELECT DISTINCT `deviceId` FROM v_user_batch WHERE `deviceId` > 0;
+SELECT `deviceId` FROM v_user_batch WHERE `deviceId` > 0 GROUP BY `deviceId`;
 
 CREATE TEMPORARY VIEW v_ud_latest AS
 SELECT `userId`, bvn, `firstName`, `middleName`, `lastName`, email, gender, birthday,
