@@ -42,6 +42,17 @@ CREATE TEMPORARY TABLE tmp_u_keys2 (
 ) ENGINE = Memory;
 INSERT INTO tmp_u_keys2 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
 
+DROP TEMPORARY TABLE IF EXISTS tmp_u_keys3;
+CREATE TEMPORARY TABLE tmp_u_keys3 (
+    id         BIGINT NOT NULL PRIMARY KEY,
+    `appId`    INT    NOT NULL,
+    mobile     VARCHAR(32) NOT NULL,
+    `deviceId` BIGINT DEFAULT NULL,
+    KEY idx_app_mobile (`appId`, mobile),
+    KEY idx_device (`deviceId`)
+) ENGINE = Memory;
+INSERT INTO tmp_u_keys3 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
+
 DROP TABLE IF EXISTS flink_stg_user_info_ready;
 CREATE TABLE flink_stg_user_info_ready (
     user_id_part DECIMAL(20, 0) NOT NULL,
@@ -149,15 +160,16 @@ LEFT JOIN (
     INNER JOIN (
         SELECT dac.`deviceId`, MAX(dac.id) AS max_id
         FROM device_ad_channel dac
-        INNER JOIN tmp_u_keys2 uk
-            ON uk.`deviceId` = dac.`deviceId`
-           AND uk.`deviceId` IS NOT NULL
-           AND CAST(uk.`deviceId` AS CHAR) <> ''
-           AND uk.`deviceId` <> 0
+        INNER JOIN tmp_u_keys3 uk3
+            ON uk3.`deviceId` = dac.`deviceId`
+           AND uk3.`deviceId` IS NOT NULL
+           AND CAST(uk3.`deviceId` AS CHAR) <> ''
+           AND uk3.`deviceId` <> 0
         GROUP BY dac.`deviceId`
     ) x ON x.max_id = dac1.id
 ) ldc ON ldc.`deviceId` = u.`deviceId`;
 
+DROP TEMPORARY TABLE IF EXISTS tmp_u_keys3;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys2;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick2;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
