@@ -257,13 +257,21 @@ preflight_check() {
       fi
     done
   else
-    local v
+    local v missing=()
     for v in "${REQUIRED_VIEWS[@]}"; do
       if ! view_in_schema "$v"; then
-        log "ERR: information_schema 中无 VIEW ${v}"
-        exit 1
+        missing+=("$v")
       fi
     done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      log "ERR: 当前库 ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE:-ng_loan_market} 缺少 VIEW: ${missing[*]}"
+      log "  从库只读时不能自己建 VIEW，请 DBA 在【主库】执行:"
+      log "    mysql -h<主库> -u<写账号> -p ng_loan_market < sql/ddl/lm_user_info_flink_views.sql"
+      log "  主从同步后在从库验证: SHOW FULL TABLES LIKE 'v_flink_%';"
+      log "  Flink .env 保持从库地址，并设 LM_MYSQL_READ_REPLICA=1"
+      log "  详见 docs/LM_REPLICA_MIGRATION.md"
+      exit 1
+    fi
   fi
 
   log "分区列检查（JDBC scan.partition.column）:"
