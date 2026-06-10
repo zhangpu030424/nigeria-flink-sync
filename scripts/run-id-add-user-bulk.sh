@@ -143,8 +143,28 @@ for i, item in enumerate(d.get('all-exceptions', [])[:3], 1):
 " 2>/dev/null | tee -a "$LOG_FILE" || true
 }
 
+view_exists() {
+  local cnt
+  cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='v_id_add_user_flink';")
+  [[ "$cnt" == "1" ]] && return 0
+  cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM v_id_add_user_flink LIMIT 1;")
+  [[ "$cnt" =~ ^[0-9]+$ ]]
+}
+
 ensure_flink_view() {
-  log "---- 创建/刷新老库 VIEW v_id_add_user_flink ----"
+  log "---- 检查老库 VIEW v_id_add_user_flink ----"
+  if [[ "${SKIP_LM_VIEW_CREATE:-0}" == "1" ]]; then
+    log "SKIP_LM_VIEW_CREATE=1，跳过 VIEW 创建"
+    return 0
+  fi
+  if view_exists && [[ "${LM_VIEW_REFRESH:-0}" != "1" ]]; then
+    log "VIEW 已存在，跳过创建（已手动建 VIEW 时正常；强制刷新: LM_VIEW_REFRESH=1）"
+    return 0
+  fi
   if [[ ! -f sql/ddl/lm_id_add_user_flink_view.sql ]]; then
     log "ERR: 缺少 sql/ddl/lm_id_add_user_flink_view.sql"
     exit 1
@@ -152,10 +172,14 @@ ensure_flink_view() {
   if ! MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
       -u "$LM_MYSQL_USER" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
       < sql/ddl/lm_id_add_user_flink_view.sql 2>>"$LOG_FILE"; then
-    log "ERR: 老库创建 VIEW 失败，请检查 LM_MYSQL_* 账号是否有 CREATE VIEW 权限"
+    if view_exists; then
+      log "WARN: CREATE VIEW 无权限，但 v_id_add_user_flink 已存在，继续提交 Job"
+      return 0
+    fi
+    log "ERR: 老库创建 VIEW 失败且无可用 VIEW，请手动执行 sql/ddl/lm_id_add_user_flink_view.sql"
     exit 1
   fi
-  log "VIEW v_id_add_user_flink 已就绪"
+  log "VIEW v_id_add_user_flink 已创建/刷新"
 }
 
 preflight_check() {
@@ -184,8 +208,8 @@ preflight_check() {
     log "ERR: 源库找不到 id_add_user"
     exit 1
   fi
-  if [[ "$view_ok" != "1" ]]; then
-    log "ERR: 源库找不到 v_id_add_user_flink VIEW"
+  if [[ "$view_ok" != "1" ]] && ! view_exists; then
+    log "ERR: 源库找不到 v_id_add_user_flink VIEW（可手动建 VIEW 或 SKIP_LM_VIEW_CREATE=1）"
     exit 1
   fi
   if [[ "$tgt_ok" != "1" ]]; then
