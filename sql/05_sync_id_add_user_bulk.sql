@@ -2,22 +2,23 @@
 -- 执行: bash scripts/run-id-add-user-bulk.sh
 -- 试跑: LM_MIGRATION_LIMIT=20 bash scripts/run-id-add-user-bulk.sh
 -- 全量: bash scripts/run-id-add-user-bulk.sh（默认不加 LIMIT，避免 SortLimit OOM）
+--
+-- 源表 JDBC 读入统一用 STRING，规避 MySQL unsigned bigint→BigInteger、tinyint(1)→Boolean 等类型转换问题
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
--- MySQL unsigned bigint → JDBC BigInteger；tinyint(1) → Boolean。源表用 DECIMAL/BOOLEAN，SELECT 再 CAST。
 CREATE TABLE src_id_add_user (
-    user_id DECIMAL(20, 0),
-    app_id INT,
-    group_user_id DECIMAL(20, 0),
-    info_user_id DECIMAL(20, 0),
+    user_id STRING,
+    app_id STRING,
+    group_user_id STRING,
+    info_user_id STRING,
     mobile STRING,
-    closed_time DECIMAL(20, 0),
+    closed_time STRING,
     reg_device_uuid STRING,
-    reg_time DECIMAL(20, 0),
-    test_flag BOOLEAN,
+    reg_time STRING,
+    test_flag STRING,
     utm_source STRING,
     utm_medium STRING,
     utm_campaign STRING,
@@ -28,7 +29,7 @@ CREATE TABLE src_id_add_user (
     advertiser_id STRING
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
     'table-name' = 'id_add_user',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
@@ -88,13 +89,13 @@ FROM (
     SELECT
         CAST(user_id AS BIGINT) AS user_id,
         CAST(app_id AS INT) AS app_id,
-        CAST(COALESCE(group_user_id, user_id) AS BIGINT) AS group_user_id,
-        CAST(COALESCE(info_user_id, user_id) AS BIGINT) AS info_user_id,
+        CAST(COALESCE(NULLIF(TRIM(group_user_id), ''), user_id) AS BIGINT) AS group_user_id,
+        CAST(COALESCE(NULLIF(TRIM(info_user_id), ''), user_id) AS BIGINT) AS info_user_id,
         TRIM(mobile) AS mobile,
-        CAST(COALESCE(closed_time, CAST(0 AS DECIMAL(20, 0))) AS BIGINT) AS closed_time,
+        CAST(COALESCE(NULLIF(TRIM(closed_time), ''), '0') AS BIGINT) AS closed_time,
         COALESCE(reg_device_uuid, '') AS reg_device_uuid,
-        CAST(COALESCE(reg_time, CAST(0 AS DECIMAL(20, 0))) AS BIGINT) AS reg_time,
-        CAST(CASE WHEN COALESCE(test_flag, FALSE) THEN 1 ELSE 0 END AS TINYINT) AS test_flag,
+        CAST(COALESCE(NULLIF(TRIM(reg_time), ''), '0') AS BIGINT) AS reg_time,
+        CAST(COALESCE(NULLIF(TRIM(test_flag), ''), '0') AS TINYINT) AS test_flag,
         utm_source,
         utm_medium,
         utm_campaign,
@@ -105,7 +106,9 @@ FROM (
         advertiser_id
     FROM src_id_add_user
     WHERE user_id IS NOT NULL
+      AND TRIM(user_id) <> ''
       AND app_id IS NOT NULL
+      AND TRIM(app_id) <> ''
       AND mobile IS NOT NULL
       AND TRIM(mobile) <> ''
 ) AS t
