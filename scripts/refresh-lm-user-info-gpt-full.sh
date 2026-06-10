@@ -120,13 +120,40 @@ fi
 
 echo ">> 全量拼 GPT JSON → flink_stg_user_info_ready"
 echo ">> ${LM_MYSQL_DATABASE} @ ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
-echo ">> 开始: $(date '+%F %T')（约 10～40 分钟，视数据量）"
+echo ">> 开始: $(date '+%F %T')"
+echo ">> 【说明】此步在 MySQL 跑大 SQL（约 900 万行 × JSON），Flink Job 在下一步 Step 4 才提交"
+echo ">>        此处长时间无新日志是正常的，可用下面命令另开终端看进度："
+echo ">>        mysql ... -e \"SHOW PROCESSLIST\\G\""
+echo ">>        mysql ... -e \"SELECT COUNT(*) FROM flink_stg_user_info_ready;\""
 
+POLL_SEC="${LM_GPT_FULL_POLL_SEC:-60}"
 MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql \
   --connect-timeout=30 \
   -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" \
   -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
-  < "$PREP"
+  < "$PREP" &
+MYSQL_PID=$!
+
+prev_cnt=""
+while kill -0 "$MYSQL_PID" 2>/dev/null; do
+  sleep "$POLL_SEC"
+  proc=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=5 \
+    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
+    -N -e "SELECT ID, TIME, STATE, LEFT(INFO,120) FROM information_schema.processlist
+           WHERE USER=USER() AND COMMAND='Query' AND INFO LIKE '%flink_stg_user_info_ready%'
+           ORDER BY TIME DESC LIMIT 1;" 2>/dev/null || true)
+  cnt=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=5 \
+    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
+    -N -e "SELECT COUNT(*) FROM flink_stg_user_info_ready;" 2>/dev/null || echo "?")
+  delta=""
+  if [[ "$cnt" =~ ^[0-9]+$ && "$prev_cnt" =~ ^[0-9]+$ ]]; then
+    delta=$((cnt - prev_cnt))
+  fi
+  prev_cnt="$cnt"
+  echo "[$(date '+%F %T')] MySQL 仍在跑… ready表=${cnt} 本段+${delta:-?}  process=${proc:-(查不到)}"
+done
+
+wait "$MYSQL_PID" || { echo "ERR: MySQL 全量 INSERT 失败 exit=$?"; exit 1; }
 
 rm -f "$PREP"
 

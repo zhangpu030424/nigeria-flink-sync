@@ -54,6 +54,7 @@ fi
 
 echo ""
 echo ">> Step 3/4: MySQL 全量拼 GPT JSON（flink_stg_user_info_ready）"
+echo ">>         Flink Job 在本步完成后才提交（Step 4）"
 bash scripts/refresh-lm-user-info-gpt-full.sh
 
 echo ""
