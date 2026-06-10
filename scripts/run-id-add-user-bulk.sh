@@ -115,6 +115,67 @@ flink_records_out() {
   echo "$raw" | grep -oE '"value":"[0-9]+"' | head -1 | grep -oE '[0-9]+' || echo "n/a"
 }
 
+print_job_exception() {
+  local jid="${1:-}"
+  [[ -z "$jid" ]] && return 0
+  local raw
+  raw=$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/${jid}/exceptions?maxExceptions=5" 2>/dev/null || true)
+  [[ -z "$raw" ]] && return 0
+  log "---- Flink 异常堆栈 ----"
+  echo "$raw" | python3 -c "
+import json, sys, html, re
+raw = sys.stdin.read().strip()
+if not raw:
+    sys.exit(0)
+try:
+    d = json.loads(raw)
+except json.JSONDecodeError:
+    print(raw[:4000])
+    sys.exit(0)
+for i, item in enumerate(d.get('all-exceptions', [])[:3], 1):
+    ts = item.get('timestamp', '')
+    exc = item.get('exception', '') or ''
+    exc = html.unescape(exc)
+    exc = re.sub(r'<br/?>', '\n', exc, flags=re.I)
+    exc = re.sub(r'<[^>]+>', '', exc)
+    print(f'--- exception #{i} @ {ts} ---')
+    print(exc[:6000])
+" 2>/dev/null | tee -a "$LOG_FILE" || true
+}
+
+preflight_check() {
+  log "---- 提交前检查 ----"
+  local src_ok tgt_ok bad_cnt valid_cnt
+  src_ok=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='id_add_user';")
+  tgt_ok=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" \
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${TARGET_MYSQL_DATABASE}' AND table_name='user';")
+  bad_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM id_add_user WHERE user_id IS NULL OR app_id IS NULL OR mobile IS NULL OR TRIM(mobile)='';")
+  valid_cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
+    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
+    "SELECT COUNT(*) FROM id_add_user WHERE user_id IS NOT NULL AND app_id IS NOT NULL AND mobile IS NOT NULL AND TRIM(mobile)<>'';")
+
+  log "源表 id_add_user 存在=${src_ok}  可同步行数=${valid_cnt}  无效行=${bad_cnt}"
+  log "目标表 user 存在=${tgt_ok}  库=${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}"
+
+  if [[ "$src_ok" != "1" ]]; then
+    log "ERR: 源库找不到 id_add_user"
+    exit 1
+  fi
+  if [[ "$tgt_ok" != "1" ]]; then
+    log "ERR: 目标库找不到 user 表，请先执行 Target.sql 建表"
+    exit 1
+  fi
+  if [[ "$valid_cnt" == "0" || "$valid_cnt" == "ERR" ]]; then
+    log "ERR: 源表没有可同步的有效行（user_id/mobile 为空）"
+    exit 1
+  fi
+}
+
 print_job_diagnostics() {
   log "---- Flink 诊断 ----"
   docker exec "$JM" ./bin/flink list 2>&1 | tee -a "$LOG_FILE" || true
@@ -122,6 +183,9 @@ print_job_diagnostics() {
     log "---- sql-client 末尾 40 行 ----"
     tail -40 "$SQL_LOG" | tee -a "$LOG_FILE"
   fi
+  docker logs --tail 80 "${FLINK_TASKMANAGER_CONTAINER:-nigeria-flink-taskmanager}" 2>&1 \
+    | grep -iE 'Exception|Error|FAILED|SQLException|id_add_user|sink_user' | tail -30 \
+    | tee -a "$LOG_FILE" || true
 }
 
 monitor_loop() {
@@ -167,6 +231,10 @@ monitor_loop() {
 
     if [[ -n "$job_id" && "$job_state" =~ ^(FINISHED|FAILED|CANCELED)$ ]]; then
       log "Job 已结束 state=${job_state}"
+      if [[ "$job_state" == "FAILED" ]]; then
+        print_job_exception "$job_id"
+        print_job_diagnostics
+      fi
       break
     fi
 
@@ -184,7 +252,8 @@ fi
 
 SLOTS="${FLINK_TASK_SLOTS:-16}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
-BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+# 小表直读无分区，默认并行度 1 更稳；可 export FLINK_PARALLELISM=4 覆盖
+BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-1}}"
 
 running_n=0
 while read -r _jid; do
@@ -195,6 +264,7 @@ done < <(list_running_job_ids)
 max_bulk=$((SLOTS - running_n * INCR_PAR - 2))
 (( max_bulk < 1 )) && max_bulk=1
 (( BULK_PARALLEL > max_bulk )) && BULK_PARALLEL=$max_bulk
+(( BULK_PARALLEL > 4 )) && BULK_PARALLEL=4
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 
 log "源: ${LM_MYSQL_DATABASE:-ng_loan_market}.id_add_user @ ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
@@ -205,6 +275,8 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${JM}$"; then
   log "ERR: 容器 ${JM} 未运行"
   exit 1
 fi
+
+preflight_check
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 log "提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
@@ -229,3 +301,8 @@ if [[ -z "${JOB_ID:-}" ]]; then
 fi
 
 monitor_loop "${JOB_ID:-}"
+
+final_state=$(flink_job_state "${JOB_ID:-}")
+if [[ "$final_state" == "FAILED" ]]; then
+  exit 1
+fi

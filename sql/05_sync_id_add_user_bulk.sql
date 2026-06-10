@@ -16,7 +16,7 @@ CREATE TABLE src_id_add_user (
     closed_time BIGINT,
     reg_device_uuid STRING,
     reg_time BIGINT,
-    test_flag TINYINT,
+    test_flag BOOLEAN,
     utm_source STRING,
     utm_medium STRING,
     utm_campaign STRING,
@@ -27,14 +27,10 @@ CREATE TABLE src_id_add_user (
     advertiser_id STRING
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'id_add_user',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'scan.partition.column' = 'user_id',
-    'scan.partition.num' = '${FLINK_PARALLELISM}',
-    'scan.partition.lower-bound' = '1',
-    'scan.partition.upper-bound' = '500000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -59,7 +55,7 @@ CREATE TABLE sink_user (
     PRIMARY KEY (mobile, app_id, closed_time) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&serverTimezone=Africa/Lagos',
+    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'user',
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
@@ -72,13 +68,13 @@ INSERT INTO sink_user
 SELECT
     user_id,
     app_id,
-    COALESCE(group_user_id, user_id),
-    COALESCE(info_user_id, user_id),
-    TRIM(mobile),
-    COALESCE(closed_time, CAST(0 AS BIGINT)),
-    COALESCE(reg_device_uuid, ''),
-    COALESCE(reg_time, CAST(0 AS BIGINT)),
-    COALESCE(test_flag, CAST(0 AS TINYINT)),
+    group_user_id,
+    info_user_id,
+    mobile,
+    closed_time,
+    reg_device_uuid,
+    reg_time,
+    test_flag,
     utm_source,
     utm_medium,
     utm_campaign,
@@ -87,5 +83,29 @@ SELECT
     campaign_id,
     ad_group_id,
     advertiser_id
-FROM src_id_add_user
+FROM (
+    SELECT
+        user_id,
+        app_id,
+        COALESCE(group_user_id, user_id) AS group_user_id,
+        COALESCE(info_user_id, user_id) AS info_user_id,
+        TRIM(mobile) AS mobile,
+        COALESCE(closed_time, CAST(0 AS BIGINT)) AS closed_time,
+        COALESCE(reg_device_uuid, '') AS reg_device_uuid,
+        COALESCE(reg_time, CAST(0 AS BIGINT)) AS reg_time,
+        CAST(CASE WHEN COALESCE(test_flag, FALSE) THEN 1 ELSE 0 END AS TINYINT) AS test_flag,
+        utm_source,
+        utm_medium,
+        utm_campaign,
+        utm_content,
+        utm_term,
+        campaign_id,
+        ad_group_id,
+        advertiser_id
+    FROM src_id_add_user
+    WHERE user_id IS NOT NULL
+      AND app_id IS NOT NULL
+      AND mobile IS NOT NULL
+      AND TRIM(mobile) <> ''
+) AS t
 ${LM_MIGRATION_LIMIT_CLAUSE};
