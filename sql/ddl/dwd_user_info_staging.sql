@@ -1,6 +1,5 @@
--- DWD 中间库 ng_migration_dwd（与 platform_db 同 MySQL 实例，不同 database）
--- 库由 run-ng-user-info-gpt-dwd.sh 自动 CREATE DATABASE IF NOT EXISTS
--- 表 DDL: mysql -h... -u... -p ng_migration_dwd < sql/ddl/dwd_user_info_staging.sql
+-- DWD 中间库 ng_migration_dwd（与 ng_loan_market 同 MySQL 实例，非 platform_db 目标库）
+-- 库由 init-dwd-database.sh / run-ng-user-info-gpt-dwd.sh 在老库可写主库创建
 
 CREATE TABLE IF NOT EXISTS dwd_user_base (
     user_id BIGINT UNSIGNED NOT NULL,

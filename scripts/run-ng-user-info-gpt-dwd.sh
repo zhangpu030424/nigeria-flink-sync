@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sql.md DWD 版 user_info：老库 JDBC → DWD 表（目标库）→ Lookup → user_info
+# sql.md DWD 版 user_info：老库 JDBC → ng_migration_dwd（老库实例）→ Lookup → 目标 user_info
 # 用法: bash scripts/run-ng-user-info-gpt-dwd.sh
 # 试跑: LM_MIGRATION_LIMIT=100 bash scripts/run-ng-user-info-gpt-dwd.sh
 set -euo pipefail
@@ -22,17 +22,15 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < .env
 set +a
 
-export DWD_MYSQL_HOST="${DWD_MYSQL_HOST:-${TARGET_MYSQL_HOST:?}}"
-export DWD_MYSQL_PORT="${DWD_MYSQL_PORT:-${TARGET_MYSQL_PORT:-3306}}"
-export DWD_MYSQL_USER="${DWD_MYSQL_USER:-${TARGET_MYSQL_USER:?}}"
-export DWD_MYSQL_PASSWORD="${DWD_MYSQL_PASSWORD:-${TARGET_MYSQL_PASSWORD:?}}"
-export DWD_MYSQL_DATABASE="${DWD_MYSQL_DATABASE:-ng_migration_dwd}"
+: "${LM_MYSQL_HOST:?}"
+# shellcheck source=lib/dwd-mysql.sh
+source "$(dirname "$0")/lib/dwd-mysql.sh"
+dwd_mysql_export_env
 
 export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-20}}"
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
-: "${LM_MYSQL_HOST:?}"
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 
@@ -51,10 +49,8 @@ else
   LIMIT_DESC="全量"
 fi
 
-mysql_dwd() {
-  MYSQL_PWD="$DWD_MYSQL_PASSWORD" mysql --connect-timeout=15 \
-    -h "$DWD_MYSQL_HOST" -P "$DWD_MYSQL_PORT" -u "$DWD_MYSQL_USER" "$DWD_MYSQL_DATABASE" \
-    -N -e "$1"
+mysql_dwd_write() {
+  dwd_mysql_exec_write_sql "$DWD_MYSQL_DATABASE" -N -e "$1"
 }
 
 mysql_lm_table_exists() {
@@ -126,25 +122,25 @@ EOSQL
 }
 
 echo "========== DWD 版 user_info（sql.md）=========="
-echo "  老库读: ${LM_MYSQL_HOST}:${LM_MYSQL_PORT:-3306}/${LM_MYSQL_DATABASE}"
-echo "  DWD写:  ${DWD_MYSQL_HOST}:${DWD_MYSQL_PORT}/${DWD_MYSQL_DATABASE}"
-echo "  目标:   ${TARGET_MYSQL_DATABASE}.user_info"
+echo "  老库读: ${LM_MYSQL_HOST}:${LM_MYSQL_PORT:-3306}/${LM_MYSQL_DATABASE:-ng_loan_market}"
+echo "  DWD写:  $(dwd_mysql_write_host):$(dwd_mysql_write_port)/${DWD_MYSQL_DATABASE}（老库同实例）"
+echo "  DWD读:  ${DWD_MYSQL_HOST}:${DWD_MYSQL_PORT}（Flink JDBC）"
+echo "  目标:   ${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT:-3306}/${TARGET_MYSQL_DATABASE}.user_info"
 echo "  LIMIT:  ${LIMIT_DESC}"
 
 echo ""
-echo ">> Step 1/4: 创建 DWD 库 ${DWD_MYSQL_DATABASE}（同实例 ${DWD_MYSQL_HOST}:${DWD_MYSQL_PORT}）"
-MYSQL_PWD="$DWD_MYSQL_PASSWORD" mysql --connect-timeout=30 \
-  -h "$DWD_MYSQL_HOST" -P "$DWD_MYSQL_PORT" -u "$DWD_MYSQL_USER" \
-  -e "CREATE DATABASE IF NOT EXISTS \`${DWD_MYSQL_DATABASE}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+echo ">> Step 1/4: 创建 DWD 库 ${DWD_MYSQL_DATABASE}（老库实例 $(dwd_mysql_write_host):$(dwd_mysql_write_port)）"
+# shellcheck source=lib/lm-mysql-write.sh
+source "$(dirname "$0")/lib/lm-mysql-write.sh"
+lm_mysql_assert_writable 2>/dev/null || echo ">> WARN: 请确认 LM_MYSQL_WRITE_HOST 为可写主库"
+dwd_mysql_exec_write_sql -e "CREATE DATABASE IF NOT EXISTS \`${DWD_MYSQL_DATABASE}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 echo ">> Step 1/4: DWD 表 DDL"
-MYSQL_PWD="$DWD_MYSQL_PASSWORD" mysql --connect-timeout=30 \
-  -h "$DWD_MYSQL_HOST" -P "$DWD_MYSQL_PORT" -u "$DWD_MYSQL_USER" "$DWD_MYSQL_DATABASE" \
-  < sql/ddl/dwd_user_info_staging.sql
+dwd_mysql_exec_write_sql "$DWD_MYSQL_DATABASE" < sql/ddl/dwd_user_info_staging.sql
 
 if [[ "${DWD_TRUNCATE_BEFORE_LOAD:-1}" == "1" ]]; then
   echo ">> Step 2/4: TRUNCATE dwd_*"
-  mysql_dwd "SET FOREIGN_KEY_CHECKS=0;
+  mysql_dwd_write "SET FOREIGN_KEY_CHECKS=0;
     TRUNCATE TABLE dwd_latest_user_reg_ip;
     TRUNCATE TABLE dwd_latest_device_channel;
     TRUNCATE TABLE dwd_latest_user_password;
@@ -161,7 +157,7 @@ DWD_LOAD_SQL=$(build_dwd_load_sql)
 submit_and_wait "$DWD_LOAD_SQL" "Step 3/4 Flink 灌 DWD"
 rm -f "$DWD_LOAD_SQL"
 
-cnt=$(mysql_dwd "SELECT COUNT(*) FROM dwd_user_base;" 2>/dev/null || echo "?")
+cnt=$(mysql_dwd_write "SELECT COUNT(*) FROM dwd_user_base;" 2>/dev/null || echo "?")
 echo ">> dwd_user_base=${cnt} 行"
 
 if [[ "$(mysql_lm_table_exists "$LM_SRC_TABLE_APP_BASE")" != "1" ]]; then
