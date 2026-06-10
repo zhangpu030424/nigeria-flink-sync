@@ -164,22 +164,24 @@ base_table_exists() {
 }
 
 table_has_column() {
-  local table_name=$1 col_name=$2
-  local cnt
-  cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
-    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-    "SELECT COUNT(*) FROM information_schema.columns
-     WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}'
-       AND table_name='${table_name}' AND column_name='${col_name}';")
-  [[ "$cnt" == "1" ]]
+  local table_name=$1 col_name=$2 db="${LM_MYSQL_DATABASE:-ng_loan_market}"
+  local line
+  line=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$db" -N -e \
+    "SHOW COLUMNS FROM \`${table_name}\` LIKE '${col_name}';" 2>/dev/null | head -1 || true)
+  [[ -n "$line" ]]
+}
+
+staging_table_partition_ready() {
+  local t=$1 col=$2
+  base_table_exists "$t" && table_has_column "$t" "$col"
 }
 
 all_staging_tables_ready() {
-  local t
-  for t in flink_stg_mkt_user flink_stg_ud_latest flink_stg_lup_latest flink_stg_dac_latest; do
-    base_table_exists "$t" || return 1
-  done
-  return 0
+  staging_table_partition_ready "flink_stg_mkt_user" "id_part" \
+    && staging_table_partition_ready "flink_stg_ud_latest" "user_id_part" \
+    && staging_table_partition_ready "flink_stg_lup_latest" "id_part" \
+    && staging_table_partition_ready "flink_stg_dac_latest" "id_part"
 }
 
 resolve_source_tables() {
@@ -221,7 +223,16 @@ check_source_partition_columns() {
     col="${spec##*:}"
     if ! table_has_column "$tbl" "$col"; then
       log "ERR: ${tbl} 缺少分区列 ${col} → Flink 报 Unknown column 'id_part' in where clause"
-      if [[ "${LM_SRC_MODE:-view}" == "staging" && "$tbl" == "flink_stg_dac_latest" ]]; then
+      log "  诊断 SHOW COLUMNS:"
+      MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+        -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" \
+        "${LM_MYSQL_DATABASE:-ng_loan_market}" -e "SHOW COLUMNS FROM \`${tbl}\`;" 2>&1 | tee -a "$LOG_FILE" || true
+      if [[ "$tbl" == "flink_stg_lup_latest" || "$tbl" == "v_flink_lup_latest" ]]; then
+        log "  常见原因: 早期建的 flink_stg_lup_latest 无 id_part；主库重跑 lm_user_info_flink_staging_tables.sql 或:"
+        log "  ALTER TABLE flink_stg_lup_latest ADD COLUMN id_part DECIMAL(20,0) NOT NULL, ADD KEY idx_id_part(id_part);"
+        log "  或强制 VIEW: LM_FORCE_VIEW_SOURCE=1 bash scripts/run-ng-user-info-bulk-max.sh"
+      fi
+      if [[ "$tbl" == "flink_stg_dac_latest" ]]; then
         log "  dac 可建空表: CREATE TABLE flink_stg_dac_latest (id_part DECIMAL(20,0), deviceId VARCHAR(128), channel VARCHAR(128), KEY(id_part));"
       fi
       return 1

@@ -187,17 +187,17 @@ SELECT base.id,
        base.principal_minor,
        base.total_amount_minor,
        base.disbursed_amount_minor,
-       CASE
-           WHEN base.settled_status = 1 AND base.eff_risk IN (50, 30) THEN 27
-           WHEN base.settled_status = 1 AND base.eff_risk = 40 THEN 25
-           WHEN base.settled_status = 1 AND base.eff_risk = 20 THEN 29
-           WHEN base.eff_risk = 11 OR base.order_status = 6 THEN 23
-           WHEN base.eff_risk = 10 THEN 20
-           WHEN base.disburse_status = 1 OR base.eff_risk = 6 THEN 13
-           WHEN base.disburse_status IN (3, 4) OR base.eff_risk = 8 THEN 15
-           WHEN base.approval_result = 2 OR base.eff_risk = 4 THEN 5
-           WHEN base.approval_result = 0 OR base.eff_risk = 2 THEN 3
-           WHEN base.approval_result = 1 AND base.disburse_status = 0 THEN 11
+       CASE base.risk_order_status
+           WHEN 2 THEN 3
+           WHEN 4 THEN 5
+           WHEN 6 THEN 13
+           WHEN 8 THEN 15
+           WHEN 10 THEN 20
+           WHEN 11 THEN 23
+           WHEN 40 THEN 25
+           WHEN 20 THEN 27
+           WHEN 30 THEN 27
+           WHEN 50 THEN 27
            ELSE 1
            END AS risk_status,
        base.repayment_plan_json
@@ -238,16 +238,6 @@ FROM (
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS total_amount_minor,
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS disbursed_amount_minor,
-                COALESCE(o.risk_order_status, CASE
-                    WHEN o.settled_status = 1 AND COALESCE(inst_agg.has_overdue_inst, 0) = 1 THEN 30
-                    WHEN o.settled_status = 1 THEN 50
-                    WHEN o.disburse_status = 2 THEN 10
-                    WHEN o.disburse_status IN (3, 4) THEN 8
-                    WHEN o.approval_result IS NULL OR o.approval_result = 0 THEN 2
-                    WHEN o.approval_result = 2 THEN 4
-                    WHEN COALESCE(inst_agg.has_overdue_inst, 0) = 1 OR o.order_status = 6 THEN 11
-                    ELSE NULL
-                    END) AS eff_risk,
                 JSON_OBJECT(
                'roll_sequence', 0,
                'period', 1,
@@ -266,12 +256,6 @@ FROM (
        ) AS repayment_plan_json
          FROM user_order o
          INNER JOIN `user` u ON u.id = o.user_id
-         LEFT JOIN (
-    SELECT user_order_id,
-           MAX(CASE WHEN is_overdue = 1 THEN 1 ELSE 0 END) AS has_overdue_inst
-    FROM user_order_installment
-    GROUP BY user_order_id
-) inst_agg ON inst_agg.user_order_id = o.id
          LEFT JOIN app_config ac ON ac.app_code = o.app_code
          LEFT JOIN (
     SELECT user_id, bvn
@@ -351,28 +335,41 @@ SELECT i.id,
            + CAST(NULLIF(TRIM(i.penalty_amount), '') AS DECIMAL(20, 2))), 0), 0) AS SIGNED) AS total_amount_minor,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.repaid_amount), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS paid_amount_minor,
        CAST(0 AS SIGNED) AS roll_paid_amount_minor,
+       CAST(
+           CASE
+               WHEN ur_cb.callback_time IS NOT NULL
+                   THEN UNIX_TIMESTAMP(ur_cb.callback_time) * 1000
+               ELSE NULL
+               END AS SIGNED
+       ) AS paid_time_ms,
        DATE(o.settled_time) AS paid_off_date,
        CASE
-           WHEN o.settled_status = 1 AND o.risk_order_status = 20
-               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
-                   >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 29
-           WHEN o.settled_status = 1 AND o.risk_order_status = 40
-               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
-                   >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 25
-           WHEN o.approval_result = 2 AND COALESCE(o.disburse_status, 0) <> 2 THEN 9
-           WHEN i.repayment_time IS NOT NULL
-               AND DATE(i.repayment_time) > CURDATE()
-               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
-                   < CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 8
-           WHEN CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2))
-               >= CAST(COALESCE(NULLIF(TRIM(i.repayment), ''), '0') AS DECIMAL(20, 2)) THEN 27
-           WHEN i.is_overdue = 1 THEN 23
-           WHEN CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) > 0 THEN 24
+           WHEN o.risk_order_status = 10
+               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) = 0 THEN 20
+           WHEN o.risk_order_status = 10
+               AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) <> 0 THEN 24
+           WHEN o.risk_order_status = 11 THEN 23
+           WHEN o.risk_order_status = 40 THEN 25
+           WHEN o.risk_order_status IN (20, 30, 50) THEN 27
            ELSE 20
            END AS risk_status
 FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
-WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> '';
+         LEFT JOIN (
+    SELECT order_no,
+           current_period,
+           MAX(callback_time) AS callback_time
+    FROM user_repay
+    WHERE status = 2
+      AND callback_time IS NOT NULL
+      AND order_no IS NOT NULL
+      AND TRIM(order_no) <> ''
+    GROUP BY order_no, current_period
+) ur_cb ON ur_cb.order_no = o.order_no
+    AND ur_cb.current_period = i.current_period
+WHERE i.installment_order_no IS NOT NULL
+  AND TRIM(i.installment_order_no) <> ''
+  AND (o.risk_order_status IS NULL OR o.risk_order_status NOT IN (2, 4, 6, 8));
 
 ALTER TABLE loan_sync_staging ADD PRIMARY KEY (id);
 

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS src_loan_staging (
     start_date DATE, due_date DATE, due_date_final DATE,
     principal_minor BIGINT, interest_minor BIGINT, admin_fee_minor BIGINT, roll_fee_minor BIGINT,
     penalty_amount_minor BIGINT, reduction_amount_minor BIGINT, total_amount_minor BIGINT,
-    paid_amount_minor BIGINT, roll_paid_amount_minor BIGINT, paid_off_date DATE, risk_status INT,
+    paid_amount_minor BIGINT, roll_paid_amount_minor BIGINT, paid_time_ms BIGINT, paid_off_date DATE, risk_status INT,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
@@ -48,7 +48,7 @@ SELECT
     principal_minor, interest_minor, admin_fee_minor,
     penalty_amount_minor, reduction_amount_minor, total_amount_minor,
     paid_amount_minor,
-    CAST(NULL AS BIGINT), paid_off_date,
+    paid_time_ms, paid_off_date,
     CAST(UNIX_TIMESTAMP(CAST(start_date AS STRING)) * 1000 AS BIGINT),
     CAST(risk_status AS TINYINT)
 FROM src_loan_staging;
