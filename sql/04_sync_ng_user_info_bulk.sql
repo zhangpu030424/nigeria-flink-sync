@@ -2,17 +2,19 @@
 -- 执行: bash scripts/run-ng-user-info-bulk.sh
 -- 试跑: LM_MIGRATION_LIMIT=10000 bash scripts/run-ng-user-info-bulk.sh
 --
--- BigInteger 根因：src_mkt_user 上 DISTINCT/GROUP BY deviceId 与 JDBC Source 算子链融合 → getLong 失败
--- 修复：去掉 v_user_devices/v_user_keys 预聚合；id/userId 用 INT；deviceId 用 STRING
+-- 前置: 老库已建 VIEW v_flink_mkt_*（run-ng-user-info-bulk.sh 会自动创建）
+-- 根因: JDBC 读 MySQL BIGINT → BigInteger，与 HashAggregate getLong 冲突
+-- 修复: MySQL VIEW 侧 CAST 为 CHAR，Flink 全 STRING 读，下游再 CAST
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'pipeline.operator-chaining' = 'false';
+SET 'table.exec.resource.default-shuffle-mode' = 'ALL';
 
 CREATE TABLE src_mkt_user (
-    id INT,
-    `appId` INT,
+    id STRING,
+    `appId` STRING,
     mobile STRING,
     `deviceId` STRING,
     created TIMESTAMP(0),
@@ -21,123 +23,121 @@ CREATE TABLE src_mkt_user (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'user',
+    'table-name' = 'v_flink_mkt_user',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'driver' = 'com.mysql.cj.jdbc.Driver',
-    'scan.partition.column' = 'id',
-    'scan.partition.num' = '${LM_MYSQL_USER_PARTITION_NUM}',
-    'scan.partition.lower-bound' = '1',
-    'scan.partition.upper-bound' = '${LM_MYSQL_USER_ID_MAX}',
     'scan.fetch-size' = '${LM_JDBC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_user_data (
-    id INT,
-    `userId` INT,
+    id STRING,
+    `userId` STRING,
     bvn STRING,
     `firstName` STRING,
     `middleName` STRING,
     `lastName` STRING,
     email STRING,
-    gender TINYINT,
+    gender STRING,
     birthday STRING,
-    marital TINYINT,
+    marital STRING,
     profession STRING,
-    education TINYINT,
-    salary INT,
+    education STRING,
+    salary STRING,
     `addressState` STRING,
     `addressDistrict` STRING,
     address STRING,
     `emergencyContact` STRING,
-    `numberOfChildren` TINYINT,
-    `payCycle` TINYINT,
+    `numberOfChildren` STRING,
+    `payCycle` STRING,
     company STRING,
-    `salaryDay` TINYINT,
+    `salaryDay` STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'user_data',
+    'table-name' = 'v_flink_mkt_user_data',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'driver' = 'com.mysql.cj.jdbc.Driver',
-    'scan.partition.column' = 'id',
-    'scan.partition.num' = '${LM_MYSQL_USER_DATA_PARTITION_NUM}',
-    'scan.partition.lower-bound' = '1',
-    'scan.partition.upper-bound' = '${LM_MYSQL_USER_DATA_ID_MAX}',
     'scan.fetch-size' = '${LM_JDBC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id INT,
-    `appId` INT,
+    id STRING,
+    `appId` STRING,
     mobile STRING,
     password STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'log_user_password',
+    'table-name' = 'v_flink_mkt_log_user_password',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'driver' = 'com.mysql.cj.jdbc.Driver',
-    'scan.partition.column' = 'id',
-    'scan.partition.num' = '${LM_MYSQL_LOG_PASSWORD_PARTITION_NUM}',
-    'scan.partition.lower-bound' = '1',
-    'scan.partition.upper-bound' = '${LM_MYSQL_LOG_PASSWORD_ID_MAX}',
     'scan.fetch-size' = '${LM_JDBC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id INT,
+    id STRING,
     `deviceId` STRING,
     channel STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
-    'table-name' = 'device_ad_channel',
+    'table-name' = 'v_flink_mkt_device_ad_channel',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
     'driver' = 'com.mysql.cj.jdbc.Driver',
-    'scan.partition.column' = 'id',
-    'scan.partition.num' = '${LM_MYSQL_DEVICE_CHANNEL_PARTITION_NUM}',
-    'scan.partition.lower-bound' = '1',
-    'scan.partition.upper-bound' = '${LM_MYSQL_DEVICE_CHANNEL_ID_MAX}',
     'scan.fetch-size' = '${LM_JDBC_FETCH_SIZE}'
 );
 
 CREATE TEMPORARY VIEW v_user_batch AS
 SELECT id, `appId`, mobile, `deviceId`, created, updated
 FROM src_mkt_user
-WHERE id <= ${LM_MIGRATION_LIMIT};
+WHERE CAST(id AS BIGINT) <= ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_ud_latest AS
-SELECT `userId`, bvn, `firstName`, `middleName`, `lastName`, email, gender, birthday,
-       marital, profession, education, salary, `addressState`, `addressDistrict`, address,
-       `emergencyContact`, `numberOfChildren`, `payCycle`, company, `salaryDay`
-FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY `userId` ORDER BY id DESC) AS rn
+SELECT
+    ud.`userId`, ud.bvn, ud.`firstName`, ud.`middleName`, ud.`lastName`, ud.email,
+    CAST(COALESCE(NULLIF(TRIM(ud.gender), ''), '0') AS TINYINT) AS gender,
+    ud.birthday,
+    CAST(COALESCE(NULLIF(TRIM(ud.marital), ''), '0') AS TINYINT) AS marital,
+    ud.profession,
+    CAST(COALESCE(NULLIF(TRIM(ud.education), ''), '0') AS TINYINT) AS education,
+    CAST(COALESCE(NULLIF(TRIM(ud.salary), ''), '0') AS INT) AS salary,
+    ud.`addressState`, ud.`addressDistrict`, ud.address, ud.`emergencyContact`,
+    CAST(COALESCE(NULLIF(TRIM(ud.`numberOfChildren`), ''), '0') AS TINYINT) AS `numberOfChildren`,
+    CAST(COALESCE(NULLIF(TRIM(ud.`payCycle`), ''), '0') AS TINYINT) AS `payCycle`,
+    ud.company,
+    CAST(COALESCE(NULLIF(TRIM(ud.`salaryDay`), ''), '0') AS TINYINT) AS `salaryDay`
+FROM src_mkt_user_data ud
+INNER JOIN (
+    SELECT `userId`, MAX(CAST(id AS BIGINT)) AS max_id
     FROM src_mkt_user_data
-) t WHERE rn = 1;
+    GROUP BY `userId`
+) m ON ud.`userId` = m.`userId` AND CAST(ud.id AS BIGINT) = m.max_id;
 
--- 不再经 v_user_keys 过滤（避免 user 源表 HashAggregate）；JOIN 时按 appId+mobile 匹配
 CREATE TEMPORARY VIEW v_lup_latest AS
-SELECT `appId`, mobile, password
-FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY `appId`, mobile ORDER BY id DESC) AS rn
+SELECT l1.`appId`, l1.mobile, l1.password
+FROM src_mkt_log_user_password l1
+INNER JOIN (
+    SELECT `appId`, mobile, MAX(CAST(id AS BIGINT)) AS max_id
     FROM src_mkt_log_user_password
-) t WHERE rn = 1;
+    GROUP BY `appId`, mobile
+) l2 ON l2.`appId` = l1.`appId` AND l2.mobile = l1.mobile AND CAST(l1.id AS BIGINT) = l2.max_id;
 
--- 不再经 v_user_devices 过滤；JOIN 时按 deviceId 字符串匹配
 CREATE TEMPORARY VIEW v_dac_latest AS
-SELECT `deviceId`, channel
-FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY `deviceId` ORDER BY id DESC) AS rn
+SELECT dac1.`deviceId`, dac1.channel
+FROM src_mkt_device_ad_channel dac1
+INNER JOIN (
+    SELECT `deviceId`, MAX(CAST(id AS BIGINT)) AS max_id
     FROM src_mkt_device_ad_channel
     WHERE `deviceId` IS NOT NULL AND TRIM(`deviceId`) <> '' AND `deviceId` <> '0'
-) t WHERE rn = 1;
+    GROUP BY `deviceId`
+) m ON dac1.`deviceId` = m.`deviceId` AND CAST(dac1.id AS BIGINT) = m.max_id;
 
 CREATE TABLE sink_user_info (
     user_id BIGINT,
@@ -189,7 +189,7 @@ SELECT
         'children_num' VALUE ud.`numberOfChildren`,
         'pay_cycle' VALUE ud.`payCycle`,
         'salary_day' VALUE ud.`salaryDay`,
-        'app' VALUE JSON_OBJECT('app_id' VALUE CAST(u.`appId` AS STRING)),
+        'app' VALUE JSON_OBJECT('app_id' VALUE u.`appId`),
         'install_source' VALUE dac.channel
     )),
     CURRENT_TIMESTAMP,
