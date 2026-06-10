@@ -87,11 +87,16 @@ mysql_probe() {
 }
 
 view_in_schema() {
-  local name=$1
-  local cnt
+  local name=$1 db="${LM_MYSQL_DATABASE:-ng_loan_market}"
+  local line cnt
+  # 与手工 SHOW FULL TABLES 一致；information_schema.views 在部分只读账号下会误报不存在
+  line=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$db" -N -e \
+    "SHOW FULL TABLES LIKE '${name}';" 2>/dev/null | head -1 || true)
+  [[ "$line" == *"VIEW"* ]] && return 0
   cnt=$(mysql_count "$LM_MYSQL_HOST" "$LM_MYSQL_PORT" "$LM_MYSQL_USER" \
-    "$LM_MYSQL_PASSWORD" "${LM_MYSQL_DATABASE:-ng_loan_market}" \
-    "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${LM_MYSQL_DATABASE:-ng_loan_market}' AND table_name='${name}';")
+    "$LM_MYSQL_PASSWORD" "$db" \
+    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${db}' AND table_name='${name}' AND table_type='VIEW';")
   [[ "$cnt" == "1" ]]
 }
 
@@ -264,6 +269,11 @@ preflight_check() {
       fi
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
+      log "诊断: 用 .env 账号探测 SHOW FULL TABLES（若此处空而你在别的客户端能看到 VIEW，说明 .env 连的不是同一库/账号）"
+      MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+        -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" \
+        "${LM_MYSQL_DATABASE:-ng_loan_market}" -e \
+        "SHOW FULL TABLES LIKE 'v_flink_%'; SELECT @@hostname, @@port, DATABASE();" 2>&1 | tee -a "$LOG_FILE" || true
       log "ERR: 当前库 ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE:-ng_loan_market} 缺少 VIEW: ${missing[*]}"
       log "  从库只读时不能自己建 VIEW，请 DBA 在【主库】执行:"
       log "    mysql -h<主库> -u<写账号> -p ng_loan_market < sql/ddl/lm_user_info_flink_views.sql"

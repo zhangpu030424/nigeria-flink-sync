@@ -41,14 +41,14 @@ ORDER BY table_name, column_name;
 
 missing=0
 for v in v_flink_mkt_user v_flink_ud_latest v_flink_lup_latest v_flink_dac_latest; do
-  cnt=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+  line=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
     -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$DB" -N -e \
-    "SELECT COUNT(*) FROM information_schema.views WHERE table_schema='${DB}' AND table_name='${v}';")
-  if [[ "$cnt" != "1" ]]; then
-    echo "✗ 缺少 VIEW ${v}"
-    missing=1
-  else
+    "SHOW FULL TABLES LIKE '${v}';" 2>/dev/null | head -1 || true)
+  if [[ "$line" == *"VIEW"* ]]; then
     echo "✓ VIEW ${v}"
+  else
+    echo "✗ 缺少 VIEW ${v}（脚本探测: ${line:-连接失败或无权限}）"
+    missing=1
   fi
 done
 
