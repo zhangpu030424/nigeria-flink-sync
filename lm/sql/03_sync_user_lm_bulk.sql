@@ -6,12 +6,12 @@ SET 'table.exec.mini-batch.enabled' = 'false';
 SET 'execution.runtime-mode' = 'batch';
 
 CREATE TABLE IF NOT EXISTS src_lm_user_raw (
-    id BIGINT,
-    appid BIGINT,
+    id DECIMAL(20, 0),
+    appid DECIMAL(20, 0),
     mobile STRING,
     isCancel TINYINT,
     updated TIMESTAMP(3),
-    deviceId BIGINT,
+    deviceId DECIMAL(20, 0),
     created TIMESTAMP(3),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -28,8 +28,8 @@ CREATE TABLE IF NOT EXISTS src_lm_user_raw (
 );
 
 CREATE TABLE IF NOT EXISTS src_lm_dac_raw (
-    id BIGINT,
-    deviceId BIGINT,
+    id DECIMAL(20, 0),
+    deviceId DECIMAL(20, 0),
     channel STRING,
     google_ads_campaign_id STRING,
     fb_install_referrer_campaign_id STRING,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS src_lm_dac_raw (
 );
 
 CREATE TABLE IF NOT EXISTS src_lm_app_config (
-    id BIGINT,
+    id DECIMAL(20, 0),
     value STRING,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
