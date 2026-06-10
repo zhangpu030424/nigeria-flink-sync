@@ -1,6 +1,6 @@
--- 最新 N 条 user_info：读老库 flink_stg_user_info_ready → 目标 user_info（单表 JDBC，无 JOIN）
--- 前置: bash scripts/refresh-lm-user-info-latest100.sh
--- 执行: bash scripts/run-ng-user-info-latest100.sh
+-- flink_stg_user_info_ready → 目标 user_info（单表 JDBC，试跑/全量均可）
+-- 前置: refresh-lm-user-info-gpt-full.sh 或 refresh-lm-user-info-latest100.sh
+-- 全量: bash scripts/run-ng-user-info-gpt-bulk-max.sh
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
@@ -62,4 +62,5 @@ SELECT
     CURRENT_TIMESTAMP,
     CURRENT_TIMESTAMP
 FROM src_user_info_ready
-WHERE user_id IS NOT NULL AND TRIM(user_id) <> '';
+WHERE user_id IS NOT NULL AND TRIM(user_id) <> ''
+${LM_MIGRATION_LIMIT_CLAUSE};

@@ -55,7 +55,7 @@ REMOTE="/tmp/nigeria-flink-run.sql"
 
 echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
-if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* ]]; then
+if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
   if [[ "${FLINK_PARALLELISM:-1}" -lt 8 ]]; then
     echo ">> WARN: 全量迁移 FLINK_PARALLELISM=${FLINK_PARALLELISM} 偏低，请用 run-*-bulk.sh 或 export FLINK_PARALLELISM=30"
   fi
