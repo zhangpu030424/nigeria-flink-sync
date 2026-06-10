@@ -6,6 +6,8 @@
 -- 优化：4 表 id 分区并行读；密码/渠道先按 user 键过滤再 ROW_NUMBER；无 ALL_EXCHANGES_BLOCKING
 -- 仍慢时在 ng_loan_market 执行:
 --   ALTER TABLE log_user_password ADD INDEX idx_app_mobile (`appId`, mobile);
+--
+-- JDBC 读 MySQL BIGINT 常为 BigInteger，HashAggregate/DISTINCT 会 ClassCastException → 下游视图统一 CAST
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
@@ -86,8 +88,52 @@ CREATE TABLE src_mkt_device_ad_channel (
     'scan.fetch-size' = '${LM_JDBC_FETCH_SIZE}'
 );
 
+CREATE TEMPORARY VIEW v_src_mkt_user AS
+SELECT
+    CAST(id AS BIGINT) AS id,
+    CAST(`appId` AS INT) AS `appId`,
+    mobile,
+    CAST(`deviceId` AS BIGINT) AS `deviceId`,
+    created,
+    updated
+FROM src_mkt_user;
+
+CREATE TEMPORARY VIEW v_src_mkt_user_data AS
+SELECT
+    CAST(id AS INT) AS id,
+    CAST(`userId` AS BIGINT) AS `userId`,
+    bvn, `firstName`, `middleName`, `lastName`, email,
+    CAST(gender AS TINYINT) AS gender,
+    birthday,
+    CAST(marital AS TINYINT) AS marital,
+    profession,
+    CAST(education AS TINYINT) AS education,
+    CAST(salary AS INT) AS salary,
+    `addressState`, `addressDistrict`, address,
+    `emergencyContact`,
+    CAST(`numberOfChildren` AS TINYINT) AS `numberOfChildren`,
+    CAST(`payCycle` AS TINYINT) AS `payCycle`,
+    company,
+    CAST(`salaryDay` AS TINYINT) AS `salaryDay`
+FROM src_mkt_user_data;
+
+CREATE TEMPORARY VIEW v_src_mkt_log_user_password AS
+SELECT
+    CAST(id AS INT) AS id,
+    CAST(`appId` AS INT) AS `appId`,
+    mobile,
+    password
+FROM src_mkt_log_user_password;
+
+CREATE TEMPORARY VIEW v_src_mkt_device_ad_channel AS
+SELECT
+    CAST(id AS INT) AS id,
+    CAST(`deviceId` AS BIGINT) AS `deviceId`,
+    channel
+FROM src_mkt_device_ad_channel;
+
 CREATE TEMPORARY VIEW v_user_batch AS
-SELECT * FROM src_mkt_user
+SELECT * FROM v_src_mkt_user
 WHERE id <= ${LM_MIGRATION_LIMIT};
 
 CREATE TEMPORARY VIEW v_user_keys AS
@@ -102,14 +148,14 @@ SELECT `userId`, bvn, `firstName`, `middleName`, `lastName`, email, gender, birt
        `emergencyContact`, `numberOfChildren`, `payCycle`, company, `salaryDay`
 FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY `userId` ORDER BY id DESC) AS rn
-    FROM src_mkt_user_data
+    FROM v_src_mkt_user_data
 ) t WHERE rn = 1;
 
 CREATE TEMPORARY VIEW v_lup_latest AS
 SELECT `appId`, mobile, password
 FROM (
     SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l.`appId`, l.mobile ORDER BY l.id DESC) AS rn
-    FROM src_mkt_log_user_password l
+    FROM v_src_mkt_log_user_password l
     INNER JOIN v_user_keys k ON l.`appId` = k.`appId` AND l.mobile = k.mobile
 ) t WHERE rn = 1;
 
@@ -117,7 +163,7 @@ CREATE TEMPORARY VIEW v_dac_latest AS
 SELECT `deviceId`, channel
 FROM (
     SELECT d.*, ROW_NUMBER() OVER (PARTITION BY d.`deviceId` ORDER BY d.id DESC) AS rn
-    FROM src_mkt_device_ad_channel d
+    FROM v_src_mkt_device_ad_channel d
     INNER JOIN v_user_devices ud ON d.`deviceId` = ud.`deviceId`
     WHERE d.`deviceId` IS NOT NULL AND d.`deviceId` > 0
 ) t WHERE rn = 1;
