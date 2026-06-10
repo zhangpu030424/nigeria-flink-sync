@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # 读 flink_stg_user_info_ready → 目标 user_info（单表 JDBC，全量/限量）
-# 前置: refresh-lm-user-info-gpt-full.sh 或 refresh-lm-user-info-latest100.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,13 +35,17 @@ else
   LIMIT_DESC="全量"
 fi
 
-SLOTS="${FLINK_TASK_SLOTS:-30}"
-export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-30}}"
+SLOTS="${FLINK_TASK_SLOTS:-40}"
+MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-${SLOTS}}"
+export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-${SLOTS}}}"
+(( FLINK_PARALLELISM > MAX_PAR )) && export FLINK_PARALLELISM="${MAX_PAR}"
+(( FLINK_PARALLELISM > SLOTS )) && export FLINK_PARALLELISM="${SLOTS}"
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
 echo "[$(date '+%F %T')] Flink 写 user_info（flink_stg_user_info_ready → sink）"
-echo "  LIMIT=${LIMIT_DESC}  并行=${FLINK_PARALLELISM}"
+echo "  LIMIT=${LIMIT_DESC}  并行=${FLINK_PARALLELISM}  slots=${SLOTS}"
+echo "  提交后请在 Web UI → Job → Overview 看 Source/Sink 的 Parallelism 列是否为 ${FLINK_PARALLELISM}"
 
 while read -r jid; do
   [[ -z "$jid" ]] && continue
@@ -51,4 +54,4 @@ done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
   | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
 
 bash scripts/run-sql.sh sql/04_sync_ng_user_info_latest100.sql 2>&1 | tee "$SQL_LOG"
-echo "[$(date '+%F %T')] 已提交。Web UI 查看 Job；验证: SELECT COUNT(*) FROM user_info;"
+echo "[$(date '+%F %T')] 已提交。验证: SELECT COUNT(*) FROM user_info;"

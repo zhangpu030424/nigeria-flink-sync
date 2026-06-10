@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # GPT 版 user_info 全量独占满速：停 Job → 落地 GPT JSON → Flink 单表写目标
 #
-# 首次或源表变更:
-#   bash scripts/refresh-lm-user-info-staging.sh   # 可选，gpt-full 会自动触发
+# 40 核并行（.env 示例）:
+#   FLINK_TASK_SLOTS=40 FLINK_PARALLELISM_BULK=40 LM_USER_INFO_MAX_PARALLEL=40
+#   docker compose up -d --force-recreate taskmanager
 #
-# 全量:
-#   bash scripts/run-ng-user-info-gpt-bulk-max.sh
-#
-# 限量试跑:
-#   LM_MIGRATION_LIMIT=1000 bash scripts/run-ng-user-info-gpt-bulk-max.sh
+# 全量: bash scripts/run-ng-user-info-gpt-bulk-max.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,37 +23,40 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-# 全量：忽略 .env 里 LM_MIGRATION_LIMIT=2147483647
 export LM_MIGRATION_LIMIT="${LM_MIGRATION_LIMIT:-0}"
-if [[ "$LM_MIGRATION_LIMIT" == "2147483647" ]]; then
-  export LM_MIGRATION_LIMIT=0
-fi
+[[ "$LM_MIGRATION_LIMIT" == "2147483647" ]] && export LM_MIGRATION_LIMIT=0
 
-echo "========== GPT user_info 全量 =========="
-echo ">> Step 1/4: 释放 slot"
-bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
-
-echo ""
-echo ">> Step 2/4: 检查 TaskManager slots"
-bash scripts/check-flink-slots.sh 2>/dev/null || true
-
-SLOTS="${FLINK_TASK_SLOTS:-30}"
-export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-30}"
+SLOTS="${FLINK_TASK_SLOTS:-40}"
+MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-${SLOTS}}"
+export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-${SLOTS}}"
 export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK}"
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 export SYNC_SLOT_BUFFER=0
 
+if [[ "${FLINK_PARALLELISM}" -gt "${MAX_PAR}" ]]; then
+  echo "WARN: FLINK_PARALLELISM_BULK=${FLINK_PARALLELISM} > LM_USER_INFO_MAX_PARALLEL=${MAX_PAR}，降为 ${MAX_PAR}"
+  export FLINK_PARALLELISM="${MAX_PAR}"
+  export FLINK_PARALLELISM_BULK="${MAX_PAR}"
+fi
 if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
-  echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > slots=${SLOTS}，降为 ${SLOTS}"
+  echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > FLINK_TASK_SLOTS=${SLOTS}，降为 ${SLOTS}"
   export FLINK_PARALLELISM="${SLOTS}"
 fi
 
+echo "========== GPT user_info 全量（Flink 并行=${FLINK_PARALLELISM} / slots=${SLOTS}）=========="
+echo ">> Step 1/4: 释放 slot"
+bash scripts/cancel-flink-jobs.sh --yes 2>/dev/null || true
+
 echo ""
-echo ">> Step 3/4: MySQL 全量拼 GPT JSON（flink_stg_user_info_ready）"
-echo ">>         Flink Job 在本步完成后才提交（Step 4）"
+echo ">> Step 2/4: 确认 TaskManager slots（须 ≥ ${FLINK_PARALLELISM}）"
+bash scripts/check-flink-slots.sh 2>/dev/null || true
+
+echo ""
+echo ">> Step 3/4: MySQL 全量拼 GPT JSON（单线程 SQL，与 Flink 核数无关）"
+echo ">>         Flink ${FLINK_PARALLELISM} 路并行在 Step 4 才生效"
 bash scripts/refresh-lm-user-info-gpt-full.sh
 
 echo ""
-echo ">> Step 4/4: Flink 单表写入目标 user_info（并行=${FLINK_PARALLELISM}）"
+echo ">> Step 4/4: Flink 单表写入 user_info（parallelism.default=${FLINK_PARALLELISM}）"
 exec bash scripts/run-ng-user-info-gpt-bulk-ready.sh

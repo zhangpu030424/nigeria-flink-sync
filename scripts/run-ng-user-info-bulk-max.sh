@@ -33,8 +33,8 @@ echo ""
 echo ">> Step 2/3: 确认 TaskManager slots"
 bash scripts/check-flink-slots.sh
 
-SLOTS="${FLINK_TASK_SLOTS:-30}"
-export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-30}"
+SLOTS="${FLINK_TASK_SLOTS:-40}"
+export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-${SLOTS}}"
 # 勿用 .env 的 FLINK_PARALLELISM=1（incr）；bulk 固定用 BULK
 export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK}"
 export SYNC_SLOT_BUFFER=0

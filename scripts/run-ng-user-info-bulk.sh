@@ -445,13 +445,11 @@ if [[ "$MONITOR_ONLY" -eq 1 ]]; then
   exit 0
 fi
 
-SLOTS="${FLINK_TASK_SLOTS:-30}"
+SLOTS="${FLINK_TASK_SLOTS:-40}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
-# 32C64G 独占全量时 buffer=0 吃满 30 slot；与 incr 同跑可 export SYNC_SLOT_BUFFER=2
 SLOT_BUFFER="${SYNC_SLOT_BUFFER:-0}"
-USER_INFO_MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-30}"
-# 全量 bulk 必须用 FLINK_PARALLELISM_BULK，勿用 .env 里给 incr 的 FLINK_PARALLELISM=1
-REQ_PARALLEL="${FLINK_PARALLELISM_BULK:-30}"
+USER_INFO_MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-${SLOTS}}"
+REQ_PARALLEL="${FLINK_PARALLELISM_BULK:-${SLOTS}}"
 if [[ -n "${FLINK_PARALLELISM:-}" && "${FLINK_PARALLELISM}" =~ ^[0-9]+$ && "${FLINK_PARALLELISM}" -ge 4 ]]; then
   # 命令行显式 export FLINK_PARALLELISM=30 时优先
   REQ_PARALLEL="${FLINK_PARALLELISM}"
@@ -477,9 +475,9 @@ log "  目标: ${TARGET_MYSQL_DATABASE}.user_info @ ${TARGET_MYSQL_HOST}"
 log "  LIMIT=${LIMIT_DESC}"
 log "  JDBC并行: 请求=${REQ_PARALLEL} slots=${SLOTS} 存量Job=${running_n} 空闲≤${max_bulk} 上限=${USER_INFO_MAX_PAR} → 实际=${FLINK_PARALLELISM}"
 if [[ "$REQ_PARALLEL" != "$FLINK_PARALLELISM" ]]; then
-  log "  WARN: 并行被压低！要满 30 核: .env FLINK_TASK_SLOTS=30、停 incr Job、或 SYNC_BULK_IGNORE_SLOT_CAP=1"
+  log "  WARN: 并行被压低！要满 ${SLOTS} 核: .env FLINK_TASK_SLOTS=${SLOTS}、停 incr Job、或 SYNC_BULK_IGNORE_SLOT_CAP=1"
 fi
-if [[ "$FLINK_PARALLELISM" -lt 30 && "$REQ_PARALLEL" -ge 30 ]]; then
+if [[ "$FLINK_PARALLELISM" -lt "$REQ_PARALLEL" && "$REQ_PARALLEL" -ge "$SLOTS" ]]; then
   log "  提示: 存量 incr 占 slot 时可用≤${max_bulk}；全量迁移建议先 cancel incr 再跑"
 fi
 
@@ -504,7 +502,7 @@ except Exception as e:
 if [[ "$FLINK_PARALLELISM" -lt "$REQ_PARALLEL" && "${SYNC_BULK_IGNORE_SLOT_CAP:-0}" != "1" ]]; then
   log "ERR: 并行 ${FLINK_PARALLELISM} < 请求 ${REQ_PARALLEL}（存量 Flink Job=${running_n} 占 slot）"
   log "  列表页 Tasks=4 是 4 个算子，不是 30 核；当前只会每个算子 ${FLINK_PARALLELISM} 路 JDBC"
-  log "  解决: ① cancel 存量 incr  ② .env FLINK_TASK_SLOTS=30 + recreate TM  ③ 或 SYNC_BULK_IGNORE_SLOT_CAP=1"
+  log "  解决: ① cancel 存量 incr  ② .env FLINK_TASK_SLOTS=${SLOTS} + recreate TM  ③ 或 SYNC_BULK_IGNORE_SLOT_CAP=1"
   print_slot_status
   exit 1
 fi
