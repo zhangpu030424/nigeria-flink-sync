@@ -384,9 +384,12 @@ for v in d.get('vertices',[]):
 print(min(ps) if ps else 0)
 " 2>/dev/null || echo "0")
   if [[ "$min_par" =~ ^[0-9]+$ && "$min_par" -lt "$expect" ]]; then
-    log "WARN: 源算子并行=${min_par} < 期望${expect}！请 cancel 本 Job + 停 incr + 确认用 run-ng-user-info-bulk.sh 提交（勿直接 run-sql.sh）"
-    log "  HashJoin 显示 CREATED/-1 常因 slot 被占满，下游算子排不上队"
+    log "ERR: 源算子并行=${min_par} < 期望${expect}！已 cancel 请检查 .env：FLINK_PARALLELISM_BULK=30（勿用 FLINK_PARALLELISM=1 跑 bulk）"
+    log "  提交 SQL 应含 scan.partition.num = ${expect}"
+    docker exec "$JM" ./bin/flink cancel "$jid" 2>/dev/null || true
+    return 1
   fi
+  return 0
 }
 
 print_job_exception() {
@@ -447,7 +450,12 @@ INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
 # 32C64G 独占全量时 buffer=0 吃满 30 slot；与 incr 同跑可 export SYNC_SLOT_BUFFER=2
 SLOT_BUFFER="${SYNC_SLOT_BUFFER:-0}"
 USER_INFO_MAX_PAR="${LM_USER_INFO_MAX_PARALLEL:-30}"
-REQ_PARALLEL="${FLINK_PARALLELISM:-${FLINK_PARALLELISM_BULK:-30}}"
+# 全量 bulk 必须用 FLINK_PARALLELISM_BULK，勿用 .env 里给 incr 的 FLINK_PARALLELISM=1
+REQ_PARALLEL="${FLINK_PARALLELISM_BULK:-30}"
+if [[ -n "${FLINK_PARALLELISM:-}" && "${FLINK_PARALLELISM}" =~ ^[0-9]+$ && "${FLINK_PARALLELISM}" -ge 4 ]]; then
+  # 命令行显式 export FLINK_PARALLELISM=30 时优先
+  REQ_PARALLEL="${FLINK_PARALLELISM}"
+fi
 BULK_PARALLEL="${REQ_PARALLEL}"
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"

@@ -1,7 +1,8 @@
 -- 最新 N 条 user_info 导出（业务逻辑同 export_user_info.sql）
--- 子表 MAX(id) 仅在选中 user 范围内聚合，避免扫千万级全表
+-- 子表 MAX(id) 仅在选中 user 范围内聚合
 -- 验证: mysql -h... -u... -p ng_loan_market < sql/export_user_info_latest100.sql
 -- 可调: 改下面 LIMIT 100 中的数字
+-- 注意: 临时表在同一 SELECT 中不可重复引用，故复制 tmp_u_pick2 / tmp_u_keys2
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;
 CREATE TEMPORARY TABLE tmp_u_pick (
@@ -9,16 +10,13 @@ CREATE TEMPORARY TABLE tmp_u_pick (
 ) ENGINE = Memory;
 
 INSERT INTO tmp_u_pick (id)
-SELECT id
-FROM `user`
-ORDER BY id DESC
-LIMIT 100;
+SELECT id FROM `user` ORDER BY id DESC LIMIT 100;
 
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 CREATE TEMPORARY TABLE tmp_u_keys (
-    id       BIGINT NOT NULL PRIMARY KEY,
-    `appId`  INT    NOT NULL,
-    mobile   VARCHAR(32) NOT NULL,
+    id         BIGINT NOT NULL PRIMARY KEY,
+    `appId`    INT    NOT NULL,
+    mobile     VARCHAR(32) NOT NULL,
     `deviceId` BIGINT DEFAULT NULL,
     KEY idx_app_mobile (`appId`, mobile),
     KEY idx_device (`deviceId`)
@@ -28,6 +26,23 @@ INSERT INTO tmp_u_keys (id, `appId`, mobile, `deviceId`)
 SELECT u.id, u.`appId`, u.mobile, u.`deviceId`
 FROM `user` u
 INNER JOIN tmp_u_pick p ON p.id = u.id;
+
+DROP TEMPORARY TABLE IF EXISTS tmp_u_pick2;
+CREATE TEMPORARY TABLE tmp_u_pick2 (
+    id BIGINT NOT NULL PRIMARY KEY
+) ENGINE = Memory;
+INSERT INTO tmp_u_pick2 SELECT id FROM tmp_u_pick;
+
+DROP TEMPORARY TABLE IF EXISTS tmp_u_keys2;
+CREATE TEMPORARY TABLE tmp_u_keys2 (
+    id         BIGINT NOT NULL PRIMARY KEY,
+    `appId`    INT    NOT NULL,
+    mobile     VARCHAR(32) NOT NULL,
+    `deviceId` BIGINT DEFAULT NULL,
+    KEY idx_app_mobile (`appId`, mobile),
+    KEY idx_device (`deviceId`)
+) ENGINE = Memory;
+INSERT INTO tmp_u_keys2 SELECT id, `appId`, mobile, `deviceId` FROM tmp_u_keys;
 
 SELECT
     u.`id` AS `user_id`,
@@ -80,56 +95,55 @@ SELECT
         'credit_limit', NULL
     ) AS `info`
 FROM `user` u
-INNER JOIN tmp_u_pick p ON p.id = u.id
+INNER JOIN tmp_u_keys k ON k.id = u.id
 LEFT JOIN (
     SELECT ud1.*
     FROM `user_data` ud1
     INNER JOIN (
-        SELECT `userId`, MAX(`id`) AS `max_id`
-        FROM `user_data`
-        WHERE `userId` IN (SELECT id FROM tmp_u_pick)
-        GROUP BY `userId`
-    ) ud_max ON ud_max.`max_id` = ud1.`id`
+        SELECT ud.`userId`, MAX(ud.`id`) AS max_id
+        FROM `user_data` ud
+        INNER JOIN tmp_u_pick pick ON pick.id = ud.`userId`
+        GROUP BY ud.`userId`
+    ) ud_max ON ud_max.max_id = ud1.`id`
 ) ud ON ud.`userId` = u.`id`
 LEFT JOIN (
     SELECT l1.`appId`, l1.`mobile`, l1.`password`
     FROM `log_user_password` l1
     INNER JOIN (
-        SELECT l.`appId`, l.`mobile`, MAX(l.`id`) AS `max_id`
+        SELECT l.`appId`, l.`mobile`, MAX(l.`id`) AS max_id
         FROM `log_user_password` l
-        INNER JOIN tmp_u_keys uk
-            ON uk.`appId` = l.`appId` AND uk.mobile = l.mobile
+        INNER JOIN tmp_u_keys2 uk ON uk.`appId` = l.`appId` AND uk.mobile = l.mobile
         GROUP BY l.`appId`, l.mobile
-    ) l_max ON l_max.`max_id` = l1.`id`
+    ) l_max ON l_max.max_id = l1.`id`
 ) lup ON lup.`appId` = u.`appId` AND lup.mobile = u.mobile
 LEFT JOIN (
     SELECT dac1.`deviceId`, dac1.`channel`
     FROM `device_ad_channel` dac1
     INNER JOIN (
-        SELECT `deviceId`, MAX(`id`) AS `max_id`
-        FROM `device_ad_channel`
-        WHERE `deviceId` IN (
-            SELECT `deviceId`
-            FROM tmp_u_keys
-            WHERE `deviceId` IS NOT NULL
-              AND CAST(`deviceId` AS CHAR) <> ''
-              AND `deviceId` <> 0
-        )
-        GROUP BY `deviceId`
-    ) dac_max ON dac_max.`max_id` = dac1.`id`
+        SELECT dac.`deviceId`, MAX(dac.`id`) AS max_id
+        FROM `device_ad_channel` dac
+        INNER JOIN tmp_u_keys2 uk
+            ON uk.`deviceId` = dac.`deviceId`
+           AND uk.`deviceId` IS NOT NULL
+           AND CAST(uk.`deviceId` AS CHAR) <> ''
+           AND uk.`deviceId` <> 0
+        GROUP BY dac.`deviceId`
+    ) dac_max ON dac_max.max_id = dac1.`id`
 ) dac ON dac.`deviceId` = u.`deviceId`
 LEFT JOIN (
     SELECT r1.`userId`, r1.`ip`
     FROM `user_registration_ip` r1
     INNER JOIN (
-        SELECT `userId`, MAX(`id`) AS `max_id`
-        FROM `user_registration_ip`
-        WHERE `userId` IN (SELECT id FROM tmp_u_pick)
-        GROUP BY `userId`
-    ) r_max ON r_max.`max_id` = r1.`id`
+        SELECT r.`userId`, MAX(r.`id`) AS max_id
+        FROM `user_registration_ip` r
+        INNER JOIN tmp_u_pick2 pick ON pick.id = r.`userId`
+        GROUP BY r.`userId`
+    ) r_max ON r_max.max_id = r1.`id`
 ) uri ON uri.`userId` = u.`id`
 LEFT JOIN `app` a ON a.`id` = u.`appId`
 ORDER BY u.`id` DESC;
 
+DROP TEMPORARY TABLE IF EXISTS tmp_u_keys2;
+DROP TEMPORARY TABLE IF EXISTS tmp_u_pick2;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_keys;
 DROP TEMPORARY TABLE IF EXISTS tmp_u_pick;
