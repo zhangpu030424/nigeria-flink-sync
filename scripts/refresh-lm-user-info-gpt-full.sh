@@ -27,13 +27,14 @@ set +a
 LM_MYSQL_PORT="${LM_MYSQL_PORT:-3306}"
 LM_MYSQL_DATABASE="${LM_MYSQL_DATABASE:-ng_loan_market}"
 
-table_exists() {
+base_table_exists() {
   local tbl=$1
   local cnt
   cnt=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
     -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
     -N -e "SELECT COUNT(*) FROM information_schema.tables
-           WHERE table_schema='${LM_MYSQL_DATABASE}' AND table_name='${tbl}';" 2>/dev/null || echo 0)
+           WHERE table_schema='${LM_MYSQL_DATABASE}'
+             AND table_name='${tbl}' AND table_type='BASE TABLE';" 2>/dev/null || echo 0)
   [[ "$cnt" == "1" ]]
 }
 
@@ -46,26 +47,75 @@ if [[ ! "$stg_cnt" =~ ^[0-9]+$ ]] || [[ "$stg_cnt" -lt 1000 ]]; then
   bash scripts/refresh-lm-user-info-staging.sh
 fi
 
-echo ">> 创建 GPT 辅助 VIEW（uri / app）"
-if [[ -f sql/ddl/lm_user_info_gpt_views.sql ]]; then
-  MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=30 \
-    -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
-    < sql/ddl/lm_user_info_gpt_views.sql 2>/dev/null || true
-fi
-
 PREP="/tmp/lm_user_info_gpt_staging_full-$$.sql"
 cp sql/ddl/lm_user_info_gpt_staging_full.sql "$PREP"
 
-if ! table_exists "user_registration_ip"; then
-  echo ">> WARN: 无 user_registration_ip，registration_ip 写 NULL"
-  sed -i.bak "s/'registration_ip', uri\.ip/'registration_ip', CAST(NULL AS CHAR)/" "$PREP"
-  sed -i.bak "s/LEFT JOIN v_flink_uri_latest uri ON uri\.\`userId\` = u\.id/LEFT JOIN (SELECT CAST(NULL AS CHAR) AS userId, CAST(NULL AS CHAR) AS ip) uri ON 1=0/" "$PREP"
+patch_sql() {
+  python3 - "$PREP" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+
+def strip_uri(sql):
+    sql = sql.replace("'registration_ip', uri.ip", "'registration_ip', CAST(NULL AS CHAR)")
+    sql = re.sub(
+        r"LEFT JOIN \(\s*SELECT CAST\(r1\.`userId`.*?LEFT JOIN \(\s*SELECT CAST\(a\.id",
+        "LEFT JOIN (\n    SELECT CAST(a.id",
+        sql,
+        count=1,
+        flags=re.S,
+    )
+    return sql
+
+def strip_app(sql):
+    sql = sql.replace("'name', app.`name`", "'name', CAST(NULL AS CHAR)")
+    sql = re.sub(
+        r"LEFT JOIN \(\s*SELECT CAST\(a\.id AS CHAR\) AS id, CAST\(a\.`name` AS CHAR\) AS `name`\s*FROM `app` a\s*\) app ON app\.id = u\.`appId`;\s*",
+        "",
+        sql,
+        count=1,
+        flags=re.S,
+    )
+    return sql
+
+import os
+if os.environ.get("STRIP_URI") == "1":
+    text = strip_uri(text)
+if os.environ.get("STRIP_APP") == "1":
+    text = strip_app(text)
+open(path, "w", encoding="utf-8").write(text)
+PY
+}
+
+if ! base_table_exists "user_registration_ip"; then
+  echo ">> WARN: 无 user_registration_ip 表，registration_ip 写 NULL"
+  export STRIP_URI=1
+else
+  export STRIP_URI=0
 fi
 
-if ! table_exists "app"; then
+if ! base_table_exists "app"; then
   echo ">> WARN: 无 app 表，app.name 写 NULL"
-  sed -i.bak "s/'name', app\.\`name\`/'name', CAST(NULL AS CHAR)/" "$PREP"
-  sed -i.bak "s/LEFT JOIN v_flink_mkt_app app ON app\.id = u\.\`appId\`/LEFT JOIN (SELECT CAST(NULL AS CHAR) AS id, CAST(NULL AS CHAR) AS name) app ON 1=0/" "$PREP"
+  export STRIP_APP=1
+else
+  export STRIP_APP=0
+fi
+
+if [[ "$STRIP_URI" == "1" || "$STRIP_APP" == "1" ]]; then
+  patch_sql
+fi
+
+# Flink 05 多表路径仍可能需要 VIEW；有权限则创建，失败不阻断本脚本
+if [[ -f sql/ddl/lm_user_info_gpt_views.sql ]]; then
+  echo ">> 可选: 刷新 v_flink_uri_latest / v_flink_mkt_app（Flink 多表 Job 用）"
+  if base_table_exists "user_registration_ip" && base_table_exists "app"; then
+    MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=30 \
+      -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
+      < sql/ddl/lm_user_info_gpt_views.sql && echo ">> VIEW 已刷新" \
+      || echo ">> WARN: VIEW 创建失败（无权限可忽略，全量走 flink_stg_user_info_ready）"
+  else
+    echo ">> 跳过 VIEW（缺少 user_registration_ip 或 app 基表）"
+  fi
 fi
 
 echo ">> 全量拼 GPT JSON → flink_stg_user_info_ready"
@@ -78,7 +128,7 @@ MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql \
   -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \
   < "$PREP"
 
-rm -f "$PREP" "$PREP.bak"
+rm -f "$PREP"
 
 cnt=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
   -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" "$LM_MYSQL_DATABASE" \

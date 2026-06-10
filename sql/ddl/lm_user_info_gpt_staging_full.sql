@@ -1,4 +1,4 @@
--- 全量：从 flink_stg_* 拼 GPT 版 JSON → flink_stg_user_info_ready（Flink 单表 JDBC 读）
+-- 全量：从 flink_stg_* 拼 GPT 版 JSON → flink_stg_user_info_ready（不依赖 VIEW）
 -- 前置: bash scripts/refresh-lm-user-info-staging.sh
 -- 执行: bash scripts/refresh-lm-user-info-gpt-full.sh
 
@@ -74,5 +74,16 @@ FROM flink_stg_mkt_user u
 LEFT JOIN flink_stg_ud_latest ud ON ud.`userId` = u.id
 LEFT JOIN flink_stg_lup_latest lup ON lup.`appId` = u.`appId` AND lup.mobile = u.mobile
 LEFT JOIN flink_stg_dac_latest ldc ON ldc.`deviceId` = u.`deviceId`
-LEFT JOIN v_flink_uri_latest uri ON uri.`userId` = u.id
-LEFT JOIN v_flink_mkt_app app ON app.id = u.`appId`;
+LEFT JOIN (
+    SELECT CAST(r1.`userId` AS CHAR) AS `userId`, CAST(r1.`ip` AS CHAR) AS ip
+    FROM user_registration_ip r1
+    INNER JOIN (
+        SELECT `userId`, MAX(id) AS max_id
+        FROM user_registration_ip
+        GROUP BY `userId`
+    ) rx ON rx.max_id = r1.id
+) uri ON uri.`userId` = u.id
+LEFT JOIN (
+    SELECT CAST(a.id AS CHAR) AS id, CAST(a.`name` AS CHAR) AS `name`
+    FROM `app` a
+) app ON app.id = u.`appId`;
