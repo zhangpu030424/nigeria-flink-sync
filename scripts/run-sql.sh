@@ -33,10 +33,12 @@ done < .env
 set +a
 
 # 全量 SQL 强制用 BULK 并行（.env 里 FLINK_PARALLELISM=1 是给 incr 的，不能带进 bulk）
-if [[ "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* ]]; then
+if [[ "$SQL_FILE" == *user_info_latest100* || "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_direct* || "$SQL_FILE" == *id_add_user_bulk* ]]; then
   _BULK="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-40}}"
   export FLINK_PARALLELISM="${_BULK}"
 fi
+_JDBC_NOPART=0
+[[ "$SQL_FILE" == *user_info_direct* ]] && _JDBC_NOPART=1
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-16}"
 export USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
 export FLINK_MINI_BATCH_SIZE="${FLINK_MINI_BATCH_SIZE:-10000}"
@@ -62,7 +64,7 @@ REMOTE="/tmp/nigeria-flink-run.sql"
 echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
 if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
-  if [[ "${FLINK_PARALLELISM:-1}" -lt 8 ]]; then
+  if [[ "${FLINK_PARALLELISM:-1}" -lt 8 && "$_JDBC_NOPART" != "1" ]]; then
     echo ">> ERR: 全量 FLINK_PARALLELISM=${FLINK_PARALLELISM}（应≥8）"
     echo ">> 请在 .env 设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致（如 20）"
     rm -f "$PREPARED"
@@ -71,12 +73,16 @@ if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *id_add_user_bulk* || "$
 fi
 grep -E "^SET 'parallelism|scan.partition.num|'table-name'" "$PREPARED" 2>/dev/null | head -10 || true
 if [[ "$SQL_FILE" == *user_info_bulk* || "$SQL_FILE" == *user_info_latest100* ]]; then
-  par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
-  if [[ "${par:-0}" -lt 8 ]]; then
-    echo ">> ERR: scan.partition.num=${par}（应≥8），生成 SQL 并行度未注入"
-    echo ">> 请设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致后重跑"
-    rm -f "$PREPARED"
-    exit 1
+  if [[ "$_JDBC_NOPART" != "1" ]]; then
+    par=$(grep -oE "scan\.partition\.num' = '[0-9]+'" "$PREPARED" | head -1 | grep -oE '[0-9]+' || echo "0")
+    if [[ "${par:-0}" -lt 8 ]]; then
+      echo ">> ERR: scan.partition.num=${par}（应≥8），生成 SQL 并行度未注入"
+      echo ">> 请设 FLINK_PARALLELISM_BULK 与 FLINK_TASK_SLOTS 一致后重跑"
+      rm -f "$PREPARED"
+      exit 1
+    fi
+  else
+    echo ">> 直连模式: 无 JDBC 分区，Source 并行=1，Sink parallelism.default=${FLINK_PARALLELISM}"
   fi
 fi
 docker cp "$PREPARED" "${CONTAINER}:${REMOTE}"

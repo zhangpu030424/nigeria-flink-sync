@@ -45,42 +45,25 @@
 2. 再执行：`sql/ddl/lm_user_info_flink_views_staging.sql`
 3. 等 4 张 `flink_stg_*` 同步到从库后，Flink 可连从库读实体表（不设 `LM_MYSQL_READ_REPLICA=1` 且 4 表齐全时自动走 staging）
 
-## 方案 C：`.env` 主从分离（GPT 全量推荐）
+## 方案 C：Flink 直连 VIEW（推荐，无物化、无 JDBC 分区）
 
-`.env` 同时配置读从库 + 写主库，脚本自动走可写库做 DDL/INSERT：
+不建 `flink_stg_*`、不跑 Step3 大 INSERT，Flink 直接读 VIEW 写目标库：
 
 ```bash
-# Flink JDBC 读（从库）
-LM_MYSQL_HOST=udbha-dmtlrne5.mysql.afr-nigeria.internet.ucloudcs.com
-LM_MYSQL_PORT=34057
-
-# Step 3 落地 staging / flink_stg_user_info_ready（主库，必填若 HOST 为从库）
-LM_MYSQL_WRITE_HOST=<主库地址>
-LM_MYSQL_WRITE_PORT=34057
-# LM_MYSQL_WRITE_USER=   # 默认同 LM_MYSQL_USER
-# LM_MYSQL_WRITE_PASSWORD=
+# .env: LM_MYSQL_HOST=从库；VIEW 须在主库建好并同步
+bash scripts/run-ng-user-info-gpt-bulk-max.sh
+# 或
+bash scripts/run-ng-user-info-gpt-direct.sh
 ```
 
-流程：
+VIEW 缺失时脚本会尝试在**主库**执行 `lm_user_info_flink_views.sql`（需 `LM_MYSQL_WRITE_HOST`）。
+
+## 方案 D：`.env` 主从分离 + 物化表（旧路径，易卡住）
+
+旧路径（MySQL 物化 `flink_stg_user_info_ready`）:
 
 ```bash
-# 1. 主库落地 flink_stg_*（若还没有）
-bash scripts/refresh-lm-user-info-staging.sh
-
-# 2. 主库拼 GPT JSON → flink_stg_user_info_ready
-bash scripts/refresh-lm-user-info-gpt-full.sh
-
-# 3. 等主从同步后，在从库确认行数
-mysql -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -e "SELECT COUNT(*) FROM flink_stg_user_info_ready;"
-
-# 4. Flink 提交
-bash scripts/run-ng-user-info-gpt-bulk-ready.sh
-```
-
-进度查询请连**主库**（写入端），不要连从库查 INSERT 进度：
-
-```bash
-mysql -h "$LM_MYSQL_WRITE_HOST" -P "$LM_MYSQL_WRITE_PORT" -e "SELECT COUNT(*) FROM flink_stg_user_info_ready;"
+LM_USER_INFO_MATERIALIZE=1 bash scripts/run-ng-user-info-gpt-bulk-max.sh
 ```
 
 ## 常见错误
