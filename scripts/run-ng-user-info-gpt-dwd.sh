@@ -27,7 +27,13 @@ set +a
 source "$(dirname "$0")/lib/dwd-mysql.sh"
 dwd_mysql_export_env
 
-export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-20}}"
+export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-${FLINK_TASK_SLOTS:-20}}"
+export FLINK_PARALLELISM="${FLINK_PARALLELISM_BULK}"
+if [[ "${FLINK_PARALLELISM}" -gt "${FLINK_TASK_SLOTS:-20}" ]]; then
+  echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > FLINK_TASK_SLOTS=${FLINK_TASK_SLOTS:-20}，降为 ${FLINK_TASK_SLOTS:-20}"
+  export FLINK_PARALLELISM="${FLINK_TASK_SLOTS:-20}"
+  export FLINK_PARALLELISM_BULK="${FLINK_TASK_SLOTS:-20}"
+fi
 export FLINK_CDC_FETCH_SIZE="${FLINK_CDC_FETCH_SIZE:-50000}"
 export FLINK_SINK_BUFFER_ROWS="${FLINK_SINK_BUFFER_ROWS:-50000}"
 
@@ -148,6 +154,7 @@ echo "  DWD写:  $(dwd_mysql_write_host):$(dwd_mysql_write_port)/${DWD_MYSQL_DAT
 echo "  DWD读:  ${DWD_MYSQL_HOST}:${DWD_MYSQL_PORT}（Flink JDBC）"
 echo "  目标:   ${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT:-3306}/${TARGET_MYSQL_DATABASE}.user_info"
 echo "  LIMIT:  ${LIMIT_DESC}"
+echo "  并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（JDBC scan.partition.num，需与 slot 一致）"
 
 echo ""
 echo ">> Step 1/4: 创建 DWD 库 ${DWD_MYSQL_DATABASE}（老库实例 $(dwd_mysql_write_host):$(dwd_mysql_write_port)）"

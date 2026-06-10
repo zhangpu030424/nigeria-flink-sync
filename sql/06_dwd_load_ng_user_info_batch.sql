@@ -21,6 +21,10 @@ CREATE TABLE m_user (
     'table-name' = 'user',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -54,6 +58,10 @@ CREATE TABLE m_user_data (
     'table-name' = 'user_data',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'userId',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -69,6 +77,10 @@ CREATE TABLE m_log_user_password (
     'table-name' = 'log_user_password',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -82,6 +94,10 @@ CREATE TABLE m_device_ad_channel (
     'table-name' = 'device_ad_channel',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -96,6 +112,10 @@ CREATE TABLE m_user_reg_ip (
     'table-name' = '${LM_SRC_TABLE_URI_BASE}',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'userId',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 

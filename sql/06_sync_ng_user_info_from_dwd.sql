@@ -24,6 +24,10 @@ CREATE TABLE dwd_user_base (
     'table-name' = 'dwd_user_base',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'user_id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -58,6 +62,10 @@ CREATE TABLE dwd_latest_user_data (
     'table-name' = 'dwd_latest_user_data',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'userId',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -74,6 +82,10 @@ CREATE TABLE dwd_latest_user_password (
     'table-name' = 'dwd_latest_user_password',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -88,6 +100,10 @@ CREATE TABLE dwd_latest_device_channel (
     'table-name' = 'dwd_latest_device_channel',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
@@ -103,6 +119,10 @@ CREATE TABLE dwd_latest_user_reg_ip (
     'table-name' = 'dwd_latest_user_reg_ip',
     'username' = '${DWD_MYSQL_USER}',
     'password' = '${DWD_MYSQL_PASSWORD}',
+    'scan.partition.column' = 'userId',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '2000000000',
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
