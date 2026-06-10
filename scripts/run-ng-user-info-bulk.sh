@@ -169,21 +169,36 @@ table_has_column() {
   [[ "$cnt" == "1" ]]
 }
 
+all_staging_tables_ready() {
+  local t
+  for t in flink_stg_mkt_user flink_stg_ud_latest flink_stg_lup_latest flink_stg_dac_latest; do
+    base_table_exists "$t" || return 1
+  done
+  return 0
+}
+
 resolve_source_tables() {
-  if base_table_exists "flink_stg_mkt_user"; then
+  if [[ "${LM_FORCE_VIEW_SOURCE:-0}" == "1" || "${LM_MYSQL_READ_REPLICA:-0}" == "1" ]]; then
+    export LM_SRC_TABLE_MKT="v_flink_mkt_user"
+    export LM_SRC_TABLE_UD="v_flink_ud_latest"
+    export LM_SRC_TABLE_LUP="v_flink_lup_latest"
+    export LM_SRC_TABLE_DAC="v_flink_dac_latest"
+    export LM_SRC_MODE="view"
+    log "源表模式: v_flink_* VIEW（从库/强制 VIEW，不读 flink_stg_*）"
+  elif all_staging_tables_ready; then
     export LM_SRC_TABLE_MKT="flink_stg_mkt_user"
     export LM_SRC_TABLE_UD="flink_stg_ud_latest"
     export LM_SRC_TABLE_LUP="flink_stg_lup_latest"
     export LM_SRC_TABLE_DAC="flink_stg_dac_latest"
     export LM_SRC_MODE="staging"
-    log "源表模式: flink_stg_* 实体表（JDBC 直接读表，避免 VIEW 分区列问题）"
+    log "源表模式: flink_stg_* 实体表（4 张齐全）"
   else
     export LM_SRC_TABLE_MKT="v_flink_mkt_user"
     export LM_SRC_TABLE_UD="v_flink_ud_latest"
     export LM_SRC_TABLE_LUP="v_flink_lup_latest"
     export LM_SRC_TABLE_DAC="v_flink_dac_latest"
     export LM_SRC_MODE="view"
-    log "源表模式: v_flink_* VIEW"
+    log "源表模式: v_flink_* VIEW（flink_stg_* 未齐，常见于从库只读）"
   fi
   log "  mkt=${LM_SRC_TABLE_MKT} ud=${LM_SRC_TABLE_UD} lup=${LM_SRC_TABLE_LUP} dac=${LM_SRC_TABLE_DAC}"
 }

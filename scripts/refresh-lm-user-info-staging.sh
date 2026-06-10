@@ -29,6 +29,14 @@ LM_MYSQL_DATABASE="${LM_MYSQL_DATABASE:-ng_loan_market}"
 
 echo ">> 老库落地实体表（可能需 10～60 分钟，视数据量）"
 echo ">> ${LM_MYSQL_DATABASE} @ ${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
+ro=$(MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql --connect-timeout=10 \
+  -h "$LM_MYSQL_HOST" -P "$LM_MYSQL_PORT" -u "$LM_MYSQL_USER" -N -e "SELECT @@read_only;" 2>/dev/null || echo "?")
+if [[ "$ro" == "1" ]]; then
+  echo "ERR: 当前连的是只读从库 (read_only=1)，不能 CREATE TABLE"
+  echo "  请在主库执行 sql/ddl/lm_user_info_flink_staging_tables.sql，等同步后再让 Flink 读从库"
+  echo "  或改用 VIEW 方案，见 docs/LM_REPLICA_MIGRATION.md"
+  exit 1
+fi
 echo ">> 开始: $(date '+%F %T')"
 
 MYSQL_PWD="$LM_MYSQL_PASSWORD" mysql \

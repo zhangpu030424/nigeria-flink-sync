@@ -11,6 +11,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+if [[ -f .env ]]; then
+  set -a
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%#*}"
+    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    key="${line%%=*}"
+    [[ -n "${!key:-}" ]] && continue
+    export "$line"
+  done < .env
+  set +a
+fi
+
 echo "========== user_info 全量独占满速 =========="
 echo ">> Step 1/3: 释放 slot（cancel 所有 Running Job）"
 bash scripts/cancel-flink-jobs.sh --yes
@@ -25,6 +39,9 @@ export FLINK_PARALLELISM_BULK="${FLINK_PARALLELISM_BULK:-30}"
 export SYNC_SLOT_BUFFER=0
 export SKIP_LM_VIEW_CREATE=1
 export LM_SKIP_VIEW_PROBE=1
+if [[ "${LM_MYSQL_READ_REPLICA:-0}" == "1" ]]; then
+  echo ">> 从库只读模式: 使用 v_flink_* VIEW（DDL 须在主库执行）"
+fi
 
 if [[ "${FLINK_PARALLELISM}" -gt "${SLOTS}" ]]; then
   echo "WARN: FLINK_PARALLELISM=${FLINK_PARALLELISM} > slots=${SLOTS}，降为 ${SLOTS}"
