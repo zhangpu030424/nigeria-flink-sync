@@ -41,9 +41,9 @@ max_bulk=$((SLOTS - running_n * INCR_PAR - 2))
 (( BULK_PARALLEL > max_bulk )) && BULK_PARALLEL=$max_bulk
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 
-echo "[$(date '+%F %T')] user_info 迁移（01_user_info.sql 逻辑）"
+echo "[$(date '+%F %T')] user_info 迁移（01_user_info v2）"
 echo "  源: ${LM_MYSQL_DATABASE:-ng_loan_market}@${LM_MYSQL_HOST}:${LM_MYSQL_PORT}"
 echo "  目标: ${TARGET_MYSQL_DATABASE}@${TARGET_MYSQL_HOST}"
-echo "  LIMIT(id<=${LM_MIGRATION_LIMIT})  partition=${LM_MYSQL_USER_PARTITION_NUM:-8}  upper=${LM_MYSQL_USER_ID_MAX:-?}  并行度=${FLINK_PARALLELISM}"
+echo "  user.id<=${LM_MIGRATION_LIMIT}  fetch=${LM_JDBC_FETCH_SIZE:-20000}  并行度=${FLINK_PARALLELISM}"
 
 bash scripts/run-sql.sh sql/04_sync_ng_user_info_bulk.sql 2>&1 | tee "$SQL_LOG"
