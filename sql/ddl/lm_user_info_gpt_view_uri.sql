@@ -1,6 +1,4 @@
--- GPT 版 user_info 补充 VIEW：reg_ip + app（两表都存在时一次性执行）
--- 缺表时请用: bash scripts/refresh-lm-user-info-gpt-views.sh
-
+-- v_flink_uri_latest（需 user_registration_ip 表）
 CREATE OR REPLACE VIEW v_flink_uri_latest AS
 SELECT
     CAST(r.`userId` AS DECIMAL(20, 0)) AS user_id_part,
@@ -12,9 +10,3 @@ INNER JOIN (
     FROM user_registration_ip
     GROUP BY `userId`
 ) x ON x.max_id = r.id;
-
-CREATE OR REPLACE VIEW v_flink_mkt_app AS
-SELECT
-    CAST(id AS CHAR)     AS id,
-    CAST(`name` AS CHAR) AS `name`
-FROM `app`;

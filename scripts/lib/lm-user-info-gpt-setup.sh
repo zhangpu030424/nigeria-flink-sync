@@ -48,13 +48,19 @@ lm_gpt_ensure_views_on_write() {
     WHERE table_schema='${LM_MYSQL_DATABASE}' AND table_name='app';" || echo 0)
 
   if [[ "$uri_cnt" == "1" ]]; then
-    lm_mysql_exec_write sql/ddl/lm_user_info_gpt_views.sql || true
+    lm_mysql_exec_write sql/ddl/lm_user_info_gpt_view_uri.sql
     export STRIP_URI=0
   else
     echo ">> WARN: 无 user_registration_ip，registration_ip 写 NULL"
     export STRIP_URI=1
   fi
-  [[ "$app_cnt" == "1" ]] && export STRIP_APP=0 || { echo ">> WARN: 无 app 表"; export STRIP_APP=1; }
+  if [[ "$app_cnt" == "1" ]]; then
+    lm_mysql_exec_write sql/ddl/lm_user_info_gpt_view_app.sql
+    export STRIP_APP=0
+  else
+    echo ">> WARN: 无 app 表，app.name 写 NULL"
+    export STRIP_APP=1
+  fi
 
   cp sql/ddl/lm_user_info_gpt_view_sink.sql "$prep"
   [[ "$STRIP_URI" == "1" || "$STRIP_APP" == "1" ]] && lm_gpt_setup_patch_sink_view "$prep"
@@ -68,17 +74,28 @@ lm_gpt_view_exists_read() {
     WHERE table_schema='${LM_MYSQL_DATABASE}' AND table_name='${v}';" 2>/dev/null || echo 0)" == "1" ]]
 }
 
+lm_gpt_view_exists_write() {
+  local v=$1
+  [[ "$(lm_mysql_query_write "SELECT COUNT(*) FROM information_schema.views
+    WHERE table_schema='${LM_MYSQL_DATABASE}' AND table_name='${v}';" 2>/dev/null || echo 0)" == "1" ]]
+}
+
 lm_gpt_wait_sink_view_read() {
-  local i max="${LM_GPT_VIEW_WAIT_SEC:-120}"
-  for ((i=1; i<=max; i+=5)); do
+  local i max="${LM_GPT_VIEW_WAIT_SEC:-300}"
+  for ((i=5; i<=max; i+=5)); do
     if lm_gpt_view_exists_read "v_flink_gpt_user_info_sink"; then
-      echo ">> 从库 VIEW v_flink_gpt_user_info_sink 已就绪"
+      echo ">> 从库 VIEW v_flink_gpt_user_info_sink 已就绪（${i}s）"
       return 0
     fi
-    echo ">> 等待 VIEW 同步到从库… ${i}s"
+    echo ">> 等待 VIEW 同步到从库… ${i}s / ${max}s"
     sleep 5
   done
-  echo "ERR: 从库 ${LM_MYSQL_HOST} 仍无 v_flink_gpt_user_info_sink（请等主从同步或直接在从库可查的主库跑 Flink）"
+  echo "ERR: 从库 ${LM_MYSQL_HOST} 仍无 v_flink_gpt_user_info_sink"
+  if lm_gpt_view_exists_write "v_flink_gpt_user_info_sink"; then
+    echo "  （主库已有，仅主从延迟；可加大 LM_GPT_VIEW_WAIT_SEC 或临时 Flink 读主库）"
+  else
+    echo "  （主库也没有，请 bash scripts/refresh-lm-user-info-gpt-views.sh 看报错）"
+  fi
   return 1
 }
 
@@ -101,6 +118,10 @@ lm_gpt_ensure_ready() {
     return 1
   fi
   lm_gpt_ensure_views_on_write
+  if ! lm_gpt_view_exists_write "v_flink_gpt_user_info_sink"; then
+    echo "ERR: 主库创建 v_flink_gpt_user_info_sink 失败"
+    return 1
+  fi
   lm_gpt_wait_sink_view_read
 }
 
