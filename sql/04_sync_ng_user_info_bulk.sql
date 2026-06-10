@@ -1,20 +1,31 @@
--- 作业 1/5：user_info（来自 01_user_info.sql）
+-- 作业 1/5：user_info（来自 Downloads/01_user_info.sql）
 -- 执行: bash scripts/run-ng-user-info-bulk.sh
--- 试跑: LM_MIGRATION_LIMIT=20
+-- 试跑: LM_MIGRATION_LIMIT=20 bash scripts/run-ng-user-info-bulk.sh
+--
+-- 源: LM_MYSQL_* → ng_loan_market（user / user_data / log_user_password / device_ad_channel）
+-- 目标: TARGET_MYSQL_* → user_info
 
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.batch.shuffle-mode' = 'ALL_EXCHANGES_BLOCKING';
 
 CREATE TABLE src_mkt_user (
     id BIGINT, `appId` INT, mobile STRING, `deviceId` BIGINT,
-    created TIMESTAMP(0), updated TIMESTAMP(0)
+    created TIMESTAMP(0), updated TIMESTAMP(0),
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'user',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'user'
+    'driver' = 'com.mysql.cj.jdbc.Driver',
+    'scan.partition.column' = 'id',
+    'scan.partition.num' = '${LM_MYSQL_USER_PARTITION_NUM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '${LM_MYSQL_USER_ID_MAX}',
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_user_data (
@@ -24,34 +35,71 @@ CREATE TABLE src_mkt_user_data (
     profession STRING, education TINYINT, salary INT,
     `addressState` STRING, `addressDistrict` STRING, address STRING,
     `emergencyContact` STRING, `numberOfChildren` TINYINT,
-    `payCycle` TINYINT, company STRING, `salaryDay` TINYINT
+    `payCycle` TINYINT, company STRING, `salaryDay` TINYINT,
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'user_data',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'user_data'
+    'driver' = 'com.mysql.cj.jdbc.Driver',
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_log_user_password (
-    id INT, `appId` INT, mobile STRING, password STRING
+    id INT, `appId` INT, mobile STRING, password STRING,
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'log_user_password',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'log_user_password'
+    'driver' = 'com.mysql.cj.jdbc.Driver',
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE src_mkt_device_ad_channel (
-    id INT, `deviceId` BIGINT, channel STRING
+    id INT, `deviceId` BIGINT, channel STRING,
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${LM_MYSQL_HOST}:${LM_MYSQL_PORT}/${LM_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'device_ad_channel',
     'username' = '${LM_MYSQL_USER}',
     'password' = '${LM_MYSQL_PASSWORD}',
-    'table-name' = 'device_ad_channel'
+    'driver' = 'com.mysql.cj.jdbc.Driver',
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
+
+CREATE TEMPORARY VIEW v_user_batch AS
+SELECT * FROM src_mkt_user
+WHERE id <= ${LM_MIGRATION_LIMIT};
+
+CREATE TEMPORARY VIEW v_ud_latest AS
+SELECT id, `userId`, bvn, `firstName`, `middleName`, `lastName`, email, gender, birthday,
+       marital, profession, education, salary, `addressState`, `addressDistrict`, address,
+       `emergencyContact`, `numberOfChildren`, `payCycle`, company, `salaryDay`
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY `userId` ORDER BY id DESC) AS rn
+    FROM src_mkt_user_data
+) t WHERE rn = 1;
+
+CREATE TEMPORARY VIEW v_lup_latest AS
+SELECT `appId`, mobile, password
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY `appId`, mobile ORDER BY id DESC) AS rn
+    FROM src_mkt_log_user_password
+) t WHERE rn = 1;
+
+CREATE TEMPORARY VIEW v_dac_latest AS
+SELECT `deviceId`, channel
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY `deviceId` ORDER BY id DESC) AS rn
+    FROM src_mkt_device_ad_channel
+    WHERE `deviceId` IS NOT NULL AND `deviceId` > 0
+) t WHERE rn = 1;
 
 CREATE TABLE sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
@@ -61,34 +109,14 @@ CREATE TABLE sink_user_info (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'user_info',
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
+    'driver' = 'com.mysql.cj.jdbc.Driver',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
     'sink.buffer-flush.interval' = '500ms',
-    'sink.max-retries' = '3',
-    'table-name' = 'user_info'
+    'sink.max-retries' = '3'
 );
-
-CREATE TEMPORARY VIEW v_user_batch AS
-SELECT * FROM src_mkt_user ORDER BY id LIMIT ${LM_MIGRATION_LIMIT};
-
-CREATE TEMPORARY VIEW v_ud_latest AS
-SELECT ud.* FROM src_mkt_user_data ud
-INNER JOIN (
-    SELECT `userId`, MAX(id) AS max_id FROM src_mkt_user_data GROUP BY `userId`
-) x ON x.max_id = ud.id;
-
-CREATE TEMPORARY VIEW v_lup_latest AS
-SELECT l1.`appId`, l1.mobile, l1.password FROM src_mkt_log_user_password l1
-INNER JOIN (
-    SELECT `appId`, mobile, MAX(id) AS max_id FROM src_mkt_log_user_password GROUP BY `appId`, mobile
-) x ON x.max_id = l1.id;
-
-CREATE TEMPORARY VIEW v_dac_latest AS
-SELECT d1.* FROM src_mkt_device_ad_channel d1
-INNER JOIN (
-    SELECT `deviceId`, MAX(id) AS max_id FROM src_mkt_device_ad_channel GROUP BY `deviceId`
-) x ON x.max_id = d1.id;
 
 INSERT INTO sink_user_info
 SELECT
@@ -114,6 +142,4 @@ SELECT
 FROM v_user_batch u
 LEFT JOIN v_ud_latest ud ON ud.`userId` = u.id
 LEFT JOIN v_lup_latest lup ON lup.`appId` = u.`appId` AND lup.mobile = u.mobile
-LEFT JOIN v_dac_latest dac ON dac.`deviceId` = u.`deviceId`
-ORDER BY u.id
-LIMIT ${LM_MIGRATION_LIMIT};
+LEFT JOIN v_dac_latest dac ON dac.`deviceId` = u.`deviceId` AND u.`deviceId` > 0;
