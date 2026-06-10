@@ -7,15 +7,16 @@ SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.sink.not-null-enforcer' = 'DROP';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 
+-- MySQL unsigned bigint → JDBC BigInteger；tinyint(1) → Boolean。源表用 DECIMAL/BOOLEAN，SELECT 再 CAST。
 CREATE TABLE src_id_add_user (
-    user_id BIGINT,
+    user_id DECIMAL(20, 0),
     app_id INT,
-    group_user_id BIGINT,
-    info_user_id BIGINT,
+    group_user_id DECIMAL(20, 0),
+    info_user_id DECIMAL(20, 0),
     mobile STRING,
-    closed_time BIGINT,
+    closed_time DECIMAL(20, 0),
     reg_device_uuid STRING,
-    reg_time BIGINT,
+    reg_time DECIMAL(20, 0),
     test_flag BOOLEAN,
     utm_source STRING,
     utm_medium STRING,
@@ -85,14 +86,14 @@ SELECT
     advertiser_id
 FROM (
     SELECT
-        user_id,
-        app_id,
-        COALESCE(group_user_id, user_id) AS group_user_id,
-        COALESCE(info_user_id, user_id) AS info_user_id,
+        CAST(user_id AS BIGINT) AS user_id,
+        CAST(app_id AS INT) AS app_id,
+        CAST(COALESCE(group_user_id, user_id) AS BIGINT) AS group_user_id,
+        CAST(COALESCE(info_user_id, user_id) AS BIGINT) AS info_user_id,
         TRIM(mobile) AS mobile,
-        COALESCE(closed_time, CAST(0 AS BIGINT)) AS closed_time,
+        CAST(COALESCE(closed_time, CAST(0 AS DECIMAL(20, 0))) AS BIGINT) AS closed_time,
         COALESCE(reg_device_uuid, '') AS reg_device_uuid,
-        COALESCE(reg_time, CAST(0 AS BIGINT)) AS reg_time,
+        CAST(COALESCE(reg_time, CAST(0 AS DECIMAL(20, 0))) AS BIGINT) AS reg_time,
         CAST(CASE WHEN COALESCE(test_flag, FALSE) THEN 1 ELSE 0 END AS TINYINT) AS test_flag,
         utm_source,
         utm_medium,
