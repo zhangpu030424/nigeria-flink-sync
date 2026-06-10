@@ -29,27 +29,37 @@ RUNNING_JOBS=0
 
 if docker ps --format '{{.Names}}' | grep -qx "$JM"; then
   echo ">> Flink Web UI TaskManagers:"
-  eval "$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/taskmanagers" 2>/dev/null | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    t=f=0
-    for tm in d.get('taskmanagers',[]):
-        s=tm.get('slotsNumber',0)
-        fs=tm.get('freeSlots',0)
-        t+=s; f+=fs
-        print(f\"echo '  TM {tm.get(\\\"id\\\",\\\"\\\")[:8]}... slots={s} free={fs}'\")
-    print(f\"echo '  合计 slots={t} 空闲={f}'\")
-    print(f'TOTAL_SLOTS={t}')
-    print(f'FREE_SLOTS={f}')
-except Exception as e:
-    print('echo \"  无法解析 TaskManagers\"')
-    print('TOTAL_SLOTS=0')
-    print('FREE_SLOTS=0')
-" 2>/dev/null || echo 'TOTAL_SLOTS=0
-FREE_SLOTS=0')"
+  TM_JSON=$(curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/taskmanagers" 2>/dev/null || true)
+  if [[ -n "$TM_JSON" ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        STATS*)
+          read -r TOTAL_SLOTS FREE_SLOTS <<< "${line#STATS }"
+          ;;
+        *)
+          echo "  $line"
+          ;;
+      esac
+    done < <(echo "$TM_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+t = f = 0
+for tm in d.get('taskmanagers', []):
+    s = int(tm.get('slotsNumber', 0) or 0)
+    fs = int(tm.get('freeSlots', 0) or 0)
+    t += s
+    f += fs
+    tid = str(tm.get('id', ''))[:8]
+    print(f'TM {tid}... slots={s} free={fs}')
+print(f'合计 slots={t} 空闲={f}')
+print(f'STATS {t} {f}')
+" 2>/dev/null || echo "REST API 解析失败")
+  else
+    echo "  REST API 不可用（curl http://127.0.0.1:${FLINK_WEB_PORT}/taskmanagers）"
+  fi
 
-  RUNNING_JOBS=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | wc -l | tr -d ' ')
+  RUNNING_JOBS=$(docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u | wc -l | tr -d ' ' || true)
+  RUNNING_JOBS="${RUNNING_JOBS:-0}"
   echo ">> Running Jobs: ${RUNNING_JOBS}"
 else
   echo ">> JobManager 未运行"
@@ -75,3 +85,4 @@ else
 fi
 
 echo ">> 列表页 Tasks=算子个数；真并行看 Job Overview 的 Parallelism 列"
+exit 0

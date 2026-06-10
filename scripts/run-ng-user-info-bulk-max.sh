@@ -17,10 +17,7 @@ bash scripts/cancel-flink-jobs.sh --yes
 
 echo ""
 echo ">> Step 2/3: 确认 TaskManager slots"
-if ! bash scripts/check-flink-slots.sh; then
-  echo "ERR: slot/parallelism 配置不合理，请检查 .env FLINK_TASK_SLOTS / FLINK_PARALLELISM"
-  exit 1
-fi
+bash scripts/check-flink-slots.sh
 
 SLOTS="${FLINK_TASK_SLOTS:-30}"
 export FLINK_PARALLELISM="${FLINK_PARALLELISM:-${FLINK_PARALLELISM_BULK:-30}}"

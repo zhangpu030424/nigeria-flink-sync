@@ -65,5 +65,9 @@ FROM device_ad_channel d1
 INNER JOIN (
     SELECT `deviceId`, MAX(id) AS max_id
     FROM device_ad_channel
+    WHERE `deviceId` IS NOT NULL
+      AND TRIM(CAST(`deviceId` AS CHAR)) <> ''
+      AND CAST(`deviceId` AS CHAR) <> '0'
     GROUP BY `deviceId`
-) x ON x.max_id = d1.id;
+) x ON x.max_id = d1.id
+WHERE d1.`deviceId` IS NOT NULL;
