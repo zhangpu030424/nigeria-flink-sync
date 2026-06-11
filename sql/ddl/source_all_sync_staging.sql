@@ -477,8 +477,8 @@ CREATE TABLE loan_sync_staging AS
 SELECT i.id,
        i.installment_order_no AS loan_no,
        o.order_no AS application_no,
-       CAST(COALESCE(i.current_period, 1) AS UNSIGNED) AS period,
-       CAST(0 AS UNSIGNED) AS roll_sequence,
+       CAST(COALESCE(i.current_period, 1) AS SIGNED) AS period,
+       CAST(0 AS SIGNED) AS roll_sequence,
        COALESCE(DATE(o.disburse_time), DATE(o.order_time), DATE(i.create_time)) AS start_date,
        DATE(i.repayment_time) AS due_date,
        DATE(i.repayment_time) AS due_date_final,
@@ -501,7 +501,7 @@ SELECT i.id,
                END AS SIGNED
        ) AS paid_time_ms,
        DATE(o.settled_time) AS paid_off_date,
-       CASE
+       CAST(CASE
            WHEN o.risk_order_status = 10
                AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) = 0 THEN 20
            WHEN o.risk_order_status = 10
@@ -510,7 +510,7 @@ SELECT i.id,
            WHEN o.risk_order_status = 40 THEN 25
            WHEN o.risk_order_status IN (20, 30, 50) THEN 27
            ELSE 20
-           END AS risk_status
+           END AS SIGNED) AS risk_status
 FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
          LEFT JOIN (

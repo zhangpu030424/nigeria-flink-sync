@@ -4,7 +4,7 @@ SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
 CREATE TABLE IF NOT EXISTS src_loan_staging (
-    id BIGINT, loan_no STRING, application_no STRING, `period` TINYINT, roll_sequence TINYINT,
+    id BIGINT, loan_no STRING, application_no STRING, `period` INT, roll_sequence INT,
     start_date DATE, due_date DATE, due_date_final DATE,
     principal_minor BIGINT, interest_minor BIGINT, admin_fee_minor BIGINT, roll_fee_minor BIGINT,
     penalty_amount_minor BIGINT, reduction_amount_minor BIGINT, total_amount_minor BIGINT,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS sink_loan (
 
 INSERT INTO sink_loan
 SELECT
-    loan_no, application_no, `period`, roll_sequence,
+    loan_no, application_no, CAST(`period` AS TINYINT), CAST(roll_sequence AS TINYINT),
     start_date, due_date, due_date_final,
     principal_minor, interest_minor, admin_fee_minor,
     penalty_amount_minor, reduction_amount_minor, total_amount_minor,
