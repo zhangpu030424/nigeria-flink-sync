@@ -69,11 +69,7 @@ WHERE b.deleted = 0
 ALTER TABLE user_bankcard_sync_staging ADD PRIMARY KEY (id);
 
 -- ---------- 3. user_info_sync_staging ----------
--- info_json 键固定（见 docs/FIELD_MAPPING.md / 中台 user_info.info 契约）：
---   固定 null：loan_purpose, face_similarity, pay_cycle, salary_yearly, email, ocr,
---              salary_day, salary_fortnightly, salary_daily, religion, salary_weekly, survey, salary_type
---   固定 1：salary_monthly
---   install_source：adjust_callback_record 最新 tracker_name → InstallSourceEnum
+-- info_json：单层 JSON_OBJECT 固定全部键（勿用 JSON_MERGE_PRESERVE，同键会合并成 [null, value] 数组）
 DROP TABLE IF EXISTS user_info_sync_staging;
 
 CREATE TABLE user_info_sync_staging AS
@@ -81,99 +77,73 @@ SELECT u.id AS user_id,
        TRIM(p.bvn) AS bvn_raw,
        vt_id.token AS id_number_token,
        TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
-       JSON_MERGE_PRESERVE(
-               CAST('{
-                 "birthday": null,
-                 "job_type": null,
-                 "education": null,
-                 "gender": null,
-                 "registration_ip": null,
-                 "salary": null,
-                 "loan_purpose": null,
-                 "face_similarity": null,
-                 "pay_cycle": null,
-                 "salary_yearly": null,
-                 "credit_limit": null,
-                 "company": null,
-                 "install_source": null,
-                 "registration_time": null,
-                 "email": null,
-                 "ocr": null,
-                 "profession": null,
-                 "app": {"name": null, "version": null, "app_id": null},
-                 "emergency_contacts": [],
-                 "salary_day": null,
-                 "address": {"province": null, "city": null, "district": null, "detail": null, "village": null},
-                 "salary_fortnightly": null,
-                 "salary_daily": null,
-                 "salary_monthly": 1,
-                 "children_num": null,
-                 "religion": null,
-                 "marital": null,
-                 "full_name": null,
-                 "salary_weekly": null,
-                 "survey": null,
-                 "salary_type": null
-               }' AS JSON),
-               JSON_OBJECT(
-                       'birthday', DATE_FORMAT(p.date_of_birth, '%Y-%m-%d'),
-                       'job_type', wr.work_type,
-                       'education', p.education_level,
-                       'gender', p.gender,
-                       'registration_ip', reg_ip.ip,
-                       'salary', CASE
-                                     WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN NULL
-                                     WHEN LENGTH(REPLACE(TRIM(wr.monthly_income), ',', '')) BETWEEN 1 AND 19
-                                         AND REPLACE(TRIM(wr.monthly_income), ',', '') REGEXP '^[0-9]+$'
-                                         THEN CAST(CAST(REPLACE(TRIM(wr.monthly_income), ',', '') AS UNSIGNED) AS JSON)
-                                     ELSE NULL
-                           END,
-                       'credit_limit', CASE
-                                           WHEN cc.credit_limit IS NULL THEN NULL
-                                           WHEN CAST(cc.credit_limit AS CHAR) REGEXP '^[0-9]{1,19}$'
-                                               THEN CAST(cc.credit_limit AS UNSIGNED)
-                                           ELSE NULL
-                           END,
-                       'company', NULLIF(TRIM(wr.company_name), ''),
-                       'install_source', CASE
-                                             WHEN adj.tracker_name IS NULL OR TRIM(adj.tracker_name) = '' THEN CAST(NULL AS JSON)
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%unattributed%' THEN CAST(NULL AS JSON)
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%organic%' THEN 'ORGANIC'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%google%' THEN 'GG'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%apple%' THEN 'ASA'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%tiktok%' THEN 'TT'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%facebook%'
-                                                 OR LOWER(TRIM(adj.tracker_name)) LIKE '%instagram%'
-                                                 OR LOWER(TRIM(adj.tracker_name)) LIKE '%messenger%' THEN 'FB'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%sms%' THEN 'SMS'
-                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%kuai%' THEN 'KW'
-                                             ELSE TRIM(adj.tracker_name)
-                           END,
-                       'registration_time', UNIX_TIMESTAMP(u.create_time),
-                       'profession', wr.occupation,
-                       'app', JSON_MERGE_PRESERVE(
-                               CAST('{"name": null, "version": null, "app_id": null}' AS JSON),
-                               JSON_OBJECT(
-                                       'name', ac.app_name,
-                                       'version', ac.version,
-                                       'app_id', u.app_code
-                               )
-                              ),
-                       'emergency_contacts', COALESCE(ec.emergency_contacts, CAST('[]' AS JSON)),
-                       'address', JSON_MERGE_PRESERVE(
-                               CAST('{"province": null, "city": null, "district": null, "detail": null, "village": null}' AS JSON),
-                               JSON_OBJECT(
-                                       'province', p.living_address_state,
-                                       'city', p.living_address_city,
-                                       'detail', NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
-                                                                    COALESCE(p.living_address_second_line, ''))), '')
-                               )
-                              ),
-                       'salary_monthly', 1,
-                       'children_num', p.number_of_children,
-                       'marital', p.marriage,
-                       'full_name', NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '')
-               )
+       JSON_OBJECT(
+               'birthday', DATE_FORMAT(p.date_of_birth, '%Y-%m-%d'),
+               'job_type', wr.work_type,
+               'education', p.education_level,
+               'gender', p.gender,
+               'registration_ip', reg_ip.ip,
+               'salary', CASE
+                             WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN NULL
+                             WHEN LENGTH(REPLACE(TRIM(wr.monthly_income), ',', '')) BETWEEN 1 AND 19
+                                 AND REPLACE(TRIM(wr.monthly_income), ',', '') REGEXP '^[0-9]+$'
+                                 THEN CAST(CAST(REPLACE(TRIM(wr.monthly_income), ',', '') AS UNSIGNED) AS JSON)
+                             ELSE NULL
+                   END,
+               'loan_purpose', CAST(NULL AS JSON),
+               'face_similarity', CAST(NULL AS JSON),
+               'pay_cycle', CAST(NULL AS JSON),
+               'salary_yearly', CAST(NULL AS JSON),
+               'credit_limit', CASE
+                                   WHEN cc.credit_limit IS NULL THEN NULL
+                                   WHEN CAST(cc.credit_limit AS CHAR) REGEXP '^[0-9]{1,19}$'
+                                       THEN CAST(cc.credit_limit AS UNSIGNED)
+                                   ELSE NULL
+                   END,
+               'company', NULLIF(TRIM(wr.company_name), ''),
+               'install_source', CASE
+                                     WHEN adj.tracker_name IS NULL OR TRIM(adj.tracker_name) = '' THEN CAST(NULL AS JSON)
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%unattributed%' THEN CAST(NULL AS JSON)
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%organic%' THEN 'ORGANIC'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%google%' THEN 'GG'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%apple%' THEN 'ASA'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%tiktok%' THEN 'TT'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%facebook%'
+                                         OR LOWER(TRIM(adj.tracker_name)) LIKE '%instagram%'
+                                         OR LOWER(TRIM(adj.tracker_name)) LIKE '%messenger%' THEN 'FB'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%sms%' THEN 'SMS'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%kuai%' THEN 'KW'
+                                     ELSE TRIM(adj.tracker_name)
+                   END,
+               'registration_time', UNIX_TIMESTAMP(u.create_time),
+               'email', CAST(NULL AS JSON),
+               'ocr', CAST(NULL AS JSON),
+               'profession', wr.occupation,
+               'app', JSON_OBJECT(
+                       'name', ac.app_name,
+                       'version', ac.version,
+                       'app_id', u.app_code
+                      ),
+               'emergency_contacts', COALESCE(ec.emergency_contacts, CAST('[]' AS JSON)),
+               'salary_day', CAST(NULL AS JSON),
+               'address', JSON_OBJECT(
+                       'province', p.living_address_state,
+                       'city', p.living_address_city,
+                       'district', CAST(NULL AS JSON),
+                       'detail', NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
+                                                    COALESCE(p.living_address_second_line, ''))), ''),
+                       'village', CAST(NULL AS JSON)
+                      ),
+               'salary_fortnightly', CAST(NULL AS JSON),
+               'salary_daily', CAST(NULL AS JSON),
+               'salary_monthly', 1,
+               'children_num', p.number_of_children,
+               'religion', CAST(NULL AS JSON),
+               'marital', p.marriage,
+               'full_name', NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), ''),
+               'salary_weekly', CAST(NULL AS JSON),
+               'survey', CAST(NULL AS JSON),
+               'salary_type', CAST(NULL AS JSON)
        ) AS info_json
 FROM `user` u
          LEFT JOIN (
@@ -255,21 +225,18 @@ FROM `user` u
          LEFT JOIN (
     SELECT user_id,
            JSON_ARRAYAGG(
-                   JSON_MERGE_PRESERVE(
-                           CAST('{"name": null, "mobile": null, "relation": null}' AS JSON),
-                           JSON_OBJECT(
-                                   'name', NULLIF(TRIM(contact_name), ''),
-                                   'mobile', CASE
-                                                 WHEN contact_number IS NULL OR TRIM(contact_number) = '' THEN CAST(NULL AS JSON)
-                                                 WHEN TRIM(contact_number) LIKE '+234%' THEN SUBSTRING(TRIM(contact_number), 5)
-                                                 WHEN TRIM(contact_number) LIKE '234%' AND CHAR_LENGTH(TRIM(contact_number)) > 3
-                                                     THEN SUBSTRING(TRIM(contact_number), 4)
-                                                 WHEN TRIM(contact_number) LIKE '0%' AND CHAR_LENGTH(TRIM(contact_number)) = 11
-                                                     THEN SUBSTRING(TRIM(contact_number), 2)
-                                                 ELSE TRIM(contact_number)
-                                       END,
-                                   'relation', contact_relationship
-                           )
+                   JSON_OBJECT(
+                           'name', NULLIF(TRIM(contact_name), ''),
+                           'mobile', CASE
+                                         WHEN contact_number IS NULL OR TRIM(contact_number) = '' THEN CAST(NULL AS JSON)
+                                         WHEN TRIM(contact_number) LIKE '+234%' THEN SUBSTRING(TRIM(contact_number), 5)
+                                         WHEN TRIM(contact_number) LIKE '234%' AND CHAR_LENGTH(TRIM(contact_number)) > 3
+                                             THEN SUBSTRING(TRIM(contact_number), 4)
+                                         WHEN TRIM(contact_number) LIKE '0%' AND CHAR_LENGTH(TRIM(contact_number)) = 11
+                                             THEN SUBSTRING(TRIM(contact_number), 2)
+                                         ELSE TRIM(contact_number)
+                               END,
+                           'relation', contact_relationship
                    )
            ) AS emergency_contacts
     FROM user_emergency_contact
