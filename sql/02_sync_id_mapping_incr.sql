@@ -8,7 +8,7 @@ SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 CREATE TABLE IF NOT EXISTS src_id_mapping_staging (
     row_id BIGINT,
     id STRING,
-    app_id INT,
+    app_id BIGINT,
     mapping_id STRING,
     type STRING,
     event_time BIGINT,
@@ -47,5 +47,5 @@ CREATE TABLE IF NOT EXISTS sink_id_mapping (
 );
 
 INSERT INTO sink_id_mapping
-SELECT id, app_id, mapping_id, type, event_time
+SELECT id, CAST(app_id AS INT), mapping_id, type, event_time
 FROM src_id_mapping_staging;
