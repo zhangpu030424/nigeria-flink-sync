@@ -127,7 +127,16 @@ cancel_all_jobs() {
 
 cancel_job_id() {
   local job_id="${1:-}"
+  local protected_ids="${2:-}"
   [[ -z "$job_id" ]] && return 0
+  if echo " $protected_ids " | grep -q " $job_id "; then
+    log "WARN: ${job_id} 属于存量 Job（增量等），跳过 cancel"
+    return 0
+  fi
+  if ! list_running_job_ids | grep -qx "$job_id"; then
+    log "全量 Job ${job_id} 已结束，跳过 cancel"
+    return 0
+  fi
   log "取消本 Job 全量: $job_id"
   docker exec "$JM" ./bin/flink cancel "$job_id" 2>/dev/null || true
   sleep 3
@@ -135,16 +144,21 @@ cancel_job_id() {
 
 capture_new_job_id() {
   local before="$1"
-  sleep 8
-  local after
-  after=$(list_running_job_ids | tr '\n' ' ')
-  for id in $after; do
-    if ! echo " $before " | grep -q " $id "; then
-      echo "$id"
-      return 0
-    fi
+  local id=""
+  local i
+  # 短任务（如 VT miss）可能在单次 sleep 8 内已结束；逐秒轮询，且不用 tail -1 回退
+  for i in $(seq 1 20); do
+    sleep 1
+    while read -r id; do
+      [[ -z "$id" ]] && continue
+      if ! echo " $before " | grep -q " $id "; then
+        echo "$id"
+        return 0
+      fi
+    done < <(list_running_job_ids)
   done
-  list_running_job_ids | tail -1
+  echo ""
+  return 1
 }
 
 start_incr() {
@@ -261,7 +275,7 @@ run_vt_bulk_two_phase() {
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
   monitor_bulk_until_stable "${JOB_KEY}-vt-hit" "$VT_SRC_HAS_TOKEN_SQL"
-  cancel_job_id "$BULK_JOB_ID"
+  cancel_job_id "$BULK_JOB_ID" "$BEFORE_JOBS"
 
   local miss_cnt
   miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
@@ -277,7 +291,7 @@ run_vt_bulk_two_phase() {
     BULK_JOB_ID=$(capture_new_job_id "$before_vt")
     log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
     monitor_bulk_until_stable "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL"
-    cancel_job_id "$BULK_JOB_ID"
+    cancel_job_id "$BULK_JOB_ID" "$before_vt"
   else
     log "无待 VT 补全记录，跳过阶段 2"
     BULK_JOB_ID=""
@@ -343,7 +357,7 @@ else
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE}..."
   monitor_bulk_until_stable "bulk" "$SRC_CNT_SQL"
-  cancel_job_id "$BULK_JOB_ID"
+  cancel_job_id "$BULK_JOB_ID" "$BEFORE_JOBS"
 fi
 
 log "========== 切增量 ${INCR_SQL} =========="
