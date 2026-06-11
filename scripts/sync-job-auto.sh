@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
-SYNC_SCRIPT_VERSION="monitor-v2-stable5-exact-retry"
+SYNC_SCRIPT_VERSION="monitor-v2-user-pk-dedup"
 
 JOB_KEY="${1:-}"
 shift || true
@@ -377,7 +377,8 @@ resolve_vt_two_phase() {
   VT_SRC_MISS_SQL=""
   case "$JOB_KEY" in
     user)
-      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
+      # 目标 PK=(mobile_token,app_id)：同 token+app 多 id 合并为 1 行，计数按去重口径
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM (SELECT DISTINCT mobile_token,app_code FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND mobile_token IS NOT NULL AND TRIM(mobile_token)<>'') d"
       VT_SRC_PHASE1_SQL="$VT_SRC_HAS_TOKEN_SQL"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
       VT_MISS_RUNNER="run-user-fast-vt-miss.sh"
