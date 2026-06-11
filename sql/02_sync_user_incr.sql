@@ -148,7 +148,7 @@ FROM (
         ) AS mobile_token,
         CAST(0 AS BIGINT) AS closed_time,
         COALESCE(u.device_id, '') AS reg_device_uuid,
-        UNIX_TIMESTAMP(DATE_FORMAT(u.create_time, 'yyyy-MM-dd HH:mm:ss')) * 1000 AS reg_time,
+        CAST(UNIX_TIMESTAMP(u.create_time) * 1000 AS BIGINT) AS reg_time,
         CAST(0 AS TINYINT) AS test_flag,
         CASE
             WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL
