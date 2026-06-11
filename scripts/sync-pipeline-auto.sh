@@ -63,7 +63,7 @@ echo "=========================================="
 echo "流水线同步"
 echo "  bulk-start-ms=${SHARED_MS}"
 echo "  bulk并行=${BULK_PAR}  incr并行=${INCR_PAR}  slots=${SLOTS}"
-echo "  增量模式: CDC timestamp（从此时间点起补 binlog）"
+echo "  增量模式: CDC initial（先快照补全量漏写，再追 binlog）"
 echo "=========================================="
 
 ENABLED_JOBS=()

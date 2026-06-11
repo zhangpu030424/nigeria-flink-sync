@@ -4,6 +4,7 @@
 -- 执行: ./scripts/run-user-bankcard-fast.sh
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
 CREATE TABLE IF NOT EXISTS src_bankcard_staging (

@@ -1,5 +1,6 @@
 -- 全量 user_product（预聚合宽表）
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
 CREATE TABLE IF NOT EXISTS src_user_product_staging (

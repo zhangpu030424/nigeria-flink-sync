@@ -69,10 +69,15 @@ WHERE b.deleted = 0
 ALTER TABLE user_bankcard_sync_staging ADD PRIMARY KEY (id);
 
 -- ---------- 3. user_info_sync_staging ----------
+-- info_json 键固定（见 docs/FIELD_MAPPING.md / 中台 user_info.info 契约）：
+--   固定 null：loan_purpose, face_similarity, pay_cycle, salary_yearly, email, ocr,
+--              salary_day, salary_fortnightly, salary_daily, religion, salary_weekly, survey, salary_type
+--   固定 1：salary_monthly
+--   install_source：adjust_callback_record 最新 tracker_name → InstallSourceEnum
 DROP TABLE IF EXISTS user_info_sync_staging;
 
 CREATE TABLE user_info_sync_staging AS
-SELECT p.user_id,
+SELECT u.id AS user_id,
        TRIM(p.bvn) AS bvn_raw,
        vt_id.token AS id_number_token,
        TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
@@ -96,7 +101,7 @@ SELECT p.user_id,
                  "ocr": null,
                  "profession": null,
                  "app": {"name": null, "version": null, "app_id": null},
-                 "emergency_contacts": null,
+                 "emergency_contacts": [],
                  "salary_day": null,
                  "address": {"province": null, "city": null, "district": null, "detail": null, "village": null},
                  "salary_fortnightly": null,
@@ -126,32 +131,23 @@ SELECT p.user_id,
                        'credit_limit', CASE
                                            WHEN cc.credit_limit IS NULL THEN NULL
                                            WHEN CAST(cc.credit_limit AS CHAR) REGEXP '^[0-9]{1,19}$'
-                                               THEN cc.credit_limit
+                                               THEN CAST(cc.credit_limit AS UNSIGNED)
                                            ELSE NULL
                            END,
                        'company', NULLIF(TRIM(wr.company_name), ''),
                        'install_source', CASE
-                                             WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL
-                                                 THEN CAST(NULL AS JSON)
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%unattributed%'
-                                                 THEN CAST(NULL AS JSON)
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%organic%'
-                                                 THEN 'ORGANIC'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%google%'
-                                                 THEN 'GG'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%apple%'
-                                                 THEN 'ASA'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%tiktok%'
-                                                 THEN 'TT'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%facebook%'
-                                                 OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%instagram%'
-                                                 OR LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%messenger%'
-                                                 THEN 'FB'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%sms%'
-                                                 THEN 'SMS'
-                                             WHEN LOWER(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), ''))) LIKE '%kuai%'
-                                                 THEN 'KW'
-                                             ELSE TRIM(COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')))
+                                             WHEN adj.tracker_name IS NULL OR TRIM(adj.tracker_name) = '' THEN CAST(NULL AS JSON)
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%unattributed%' THEN CAST(NULL AS JSON)
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%organic%' THEN 'ORGANIC'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%google%' THEN 'GG'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%apple%' THEN 'ASA'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%tiktok%' THEN 'TT'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%facebook%'
+                                                 OR LOWER(TRIM(adj.tracker_name)) LIKE '%instagram%'
+                                                 OR LOWER(TRIM(adj.tracker_name)) LIKE '%messenger%' THEN 'FB'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%sms%' THEN 'SMS'
+                                             WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%kuai%' THEN 'KW'
+                                             ELSE TRIM(adj.tracker_name)
                            END,
                        'registration_time', UNIX_TIMESTAMP(u.create_time),
                        'profession', wr.occupation,
@@ -163,7 +159,7 @@ SELECT p.user_id,
                                        'app_id', u.app_code
                                )
                               ),
-                       'emergency_contacts', ec.emergency_contacts,
+                       'emergency_contacts', COALESCE(ec.emergency_contacts, CAST('[]' AS JSON)),
                        'address', JSON_MERGE_PRESERVE(
                                CAST('{"province": null, "city": null, "district": null, "detail": null, "village": null}' AS JSON),
                                JSON_OBJECT(
@@ -179,9 +175,41 @@ SELECT p.user_id,
                        'full_name', NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '')
                )
        ) AS info_json
-FROM user_personal_info p
-         INNER JOIN `user` u ON u.id = p.user_id
-         LEFT JOIN user_work_related wr ON wr.user_id = p.user_id
+FROM `user` u
+         LEFT JOIN (
+    SELECT user_id,
+           bvn,
+           first_name,
+           sur_name,
+           date_of_birth,
+           education_level,
+           gender,
+           living_address_state,
+           living_address_city,
+           living_address_first_line,
+           living_address_second_line,
+           number_of_children,
+           marriage
+    FROM (
+             SELECT user_id,
+                    bvn,
+                    first_name,
+                    sur_name,
+                    date_of_birth,
+                    education_level,
+                    gender,
+                    living_address_state,
+                    living_address_city,
+                    living_address_first_line,
+                    living_address_second_line,
+                    number_of_children,
+                    marriage,
+                    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+             FROM user_personal_info
+         ) t
+    WHERE rn = 1
+) p ON p.user_id = u.id
+         LEFT JOIN user_work_related wr ON wr.user_id = u.id
          LEFT JOIN app_config ac ON ac.app_code = u.app_code
          LEFT JOIN vt_token_cache vt_id
                    ON vt_id.vt_type = 'id_number' AND vt_id.status = 1
@@ -194,16 +222,16 @@ FROM user_personal_info p
              FROM risk_user_credit_callback
          ) t
     WHERE rn = 1
-) cc ON cc.user_id = p.user_id
+) cc ON cc.user_id = u.id
          LEFT JOIN adjust_latest_by_adid adj
                    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
          LEFT JOIN (
     SELECT user_id, ip
     FROM (
-             SELECT u.id AS user_id,
+             SELECT u2.id AS user_id,
                     dn.ip,
-                    ROW_NUMBER() OVER (PARTITION BY u.id ORDER BY dn.create_time DESC) AS rn
-             FROM `user` u
+                    ROW_NUMBER() OVER (PARTITION BY u2.id ORDER BY dn.create_time DESC) AS rn
+             FROM `user` u2
                       LEFT JOIN (
                  SELECT device_uuid, session_uuid
                  FROM (
@@ -213,17 +241,17 @@ FROM user_personal_info p
                           WHERE device_uuid IS NOT NULL AND TRIM(device_uuid) <> ''
                       ) di0
                  WHERE di_rn = 1
-             ) di ON di.device_uuid = u.device_id
+             ) di ON di.device_uuid = u2.device_id
                       INNER JOIN device_network dn
                                  ON dn.ip IS NOT NULL AND TRIM(dn.ip) <> ''
                                      AND (
-                                        (u.device_id IS NOT NULL AND TRIM(u.device_id) <> '' AND dn.device_uuid = u.device_id)
+                                        (u2.device_id IS NOT NULL AND TRIM(u2.device_id) <> '' AND dn.device_uuid = u2.device_id)
                                             OR (di.session_uuid IS NOT NULL AND TRIM(di.session_uuid) <> ''
                                             AND dn.session_uuid = di.session_uuid)
                                         )
          ) rip
     WHERE rn = 1
-) reg_ip ON reg_ip.user_id = p.user_id
+) reg_ip ON reg_ip.user_id = u.id
          LEFT JOIN (
     SELECT user_id,
            JSON_ARRAYAGG(
@@ -246,7 +274,7 @@ FROM user_personal_info p
            ) AS emergency_contacts
     FROM user_emergency_contact
     GROUP BY user_id
-) ec ON ec.user_id = p.user_id;
+) ec ON ec.user_id = u.id;
 
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 

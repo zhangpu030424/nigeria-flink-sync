@@ -2,8 +2,9 @@
 -- 全量: ./scripts/run-user-fast.sh
 --
 -- CDC_STARTUP_MODE（run-sql / sync-job-auto 注入）:
---   timestamp        — 从 BULK_START_MS 起补 binlog（推荐）
---   latest-offset    — 仅从提交时刻起（会漏全量窗口内变更）
+--   initial          — 先并行快照全表补全量漏写，再追 binlog（默认）
+--   timestamp        — 仅从 BULK_START_MS 起追 binlog（不补历史漏写）
+--   latest-offset    — 仅从提交时刻起（会漏历史）
 -- incremental.snapshot + schema_only：先加载表结构再追 binlog，避免 schema isn't known
 --
 -- 执行: ./scripts/run-sql.sh sql/02_sync_user_incr.sql

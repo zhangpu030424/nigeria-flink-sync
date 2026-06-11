@@ -1,5 +1,6 @@
 -- 全量阶段 1 application：mobile/id_number/bank 均有 token；缺 token 见 02_sync_application_fast_vt_miss.sql
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
 CREATE TABLE IF NOT EXISTS src_application_staging (

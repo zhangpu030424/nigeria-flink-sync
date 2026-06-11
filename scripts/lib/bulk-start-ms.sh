@@ -72,9 +72,9 @@ record_bulk_start_ms() {
   BULK_START_ISO_UTC="$(bulk_start_iso_from_ms "$BULK_START_MS" "utc" "UTC")"
   BULK_START_ISO_HOST="$(bulk_start_iso_from_ms "$BULK_START_MS" "host" "$(date +%Z 2>/dev/null || echo HOST)")"
   cat > "$f" <<EOF
-# 流水线锁定时刻（毫秒 Unix epoch）。CDC scan.startup.timestamp-millis 用此值。
+# 流水线锁定时刻（毫秒 Unix epoch），用于日志对齐与 CDC_STARTUP_MODE=timestamp 时注入。
+# 默认增量为 initial（先快照补漏写再追 binlog）；bulk-start-ms 记录宽表重建起点供排查。
 # 优先 source_mysql：源库 NOW() @ Africa/Lagos → UNIX_TIMESTAMP，与 binlog 时间轴对齐。
-# 宽表重建 / 全量耗时期间产生的 binlog，在切增量时从此时间点补读，不会丢。
 BULK_START_MS=${BULK_START_MS}
 BULK_START_SOURCE=${BULK_START_SOURCE}
 BULK_START_ISO_NG=${BULK_START_ISO_NG}

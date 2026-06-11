@@ -99,6 +99,8 @@ SYNC_THRESHOLD_PCT="${SYNC_THRESHOLD_PCT:-95.5}"
 POLL_SEC="${SYNC_POLL_SEC:-3}"
 STABLE_ROUNDS="${SYNC_STABLE_ROUNDS:-3}"
 MIN_RATE_TO_STABLE="${SYNC_MIN_RATE:-200}"
+BULK_JOB_WAIT_SEC="${BULK_JOB_WAIT_SEC:-7200}"
+BULK_JOB_POLL_SEC="${BULK_JOB_POLL_SEC:-5}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 
@@ -166,7 +168,9 @@ start_incr() {
   local bulk_parallel="${FLINK_PARALLELISM:-8}"
   local incr_parallel="${FLINK_PARALLELISM_INCR:-1}"
 
-  export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-timestamp}"
+  # initial：增量 Job 首次启动先并行快照全表（补全量漏写），再追 binlog；有 checkpoint 后重启从位点恢复
+  # 仅追 binlog 可用 CDC_STARTUP_MODE=timestamp（需配合 bulk-start-ms）
+  export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-initial}"
   export CDC_STARTUP_TIMESTAMP_MILLIS="${bulk_start_ms:-$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || date +%s000)}"
   if [[ "$CDC_STARTUP_MODE" == "latest-offset" ]]; then
     export CDC_STARTUP_TIMESTAMP_MILLIS="0"
@@ -174,7 +178,7 @@ start_incr() {
 
   export FLINK_PARALLELISM="${incr_parallel}"
   log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}"
-  log "增量 SQL: ${INCR_SQL} mode=${CDC_STARTUP_MODE} ts=${CDC_STARTUP_TIMESTAMP_MILLIS}"
+  log "增量 SQL: ${INCR_SQL} mode=${CDC_STARTUP_MODE} bulk-start-ms=${CDC_STARTUP_TIMESTAMP_MILLIS}"
   ./scripts/run-sql.sh "$INCR_SQL"
   log "增量 Job 已提交。监控: ./scripts/monitor-sync.sh ${MONITOR_TABLE} 60"
 }
@@ -189,7 +193,48 @@ submit_bulk() {
   fi
 }
 
-# 监控全量进度直至达标（进度≥阈值 且 低速稳定 SYNC_STABLE_ROUNDS 轮）
+# 全量 batch Job 跑完自然 FINISHED（不再按目标库计数达标后 cancel）
+wait_for_bulk_job() {
+  local job_id="$1"
+  local phase_label="$2"
+  local src_sql="${3:-}"
+  local waited=0
+  local prev_target=""
+
+  [[ -z "$job_id" ]] && { log "[$phase_label] 无 Job id，跳过等待"; return 0; }
+
+  while (( waited < BULK_JOB_WAIT_SEC )); do
+    if ! list_running_job_ids | grep -qx "$job_id"; then
+      log "[$phase_label] Job ${job_id} 已结束（FINISHED/CANCELED/FAILED）"
+      return 0
+    fi
+    if [[ -n "$src_sql" ]]; then
+      src_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+        "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$src_sql")
+      tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+        "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+      progress="n/a"
+      rate="n/a"
+      if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
+        progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+      fi
+      if [[ "$tgt_cnt" =~ ^[0-9]+$ && "$prev_target" =~ ^[0-9]+$ ]]; then
+        delta=$((tgt_cnt - prev_target))
+        rate=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $BULK_JOB_POLL_SEC}")
+      fi
+      log "[$phase_label] 等待 Job ${job_id} … 目标=${tgt_cnt} 源=${src_cnt} 进度=${progress}% 速率≈${rate}/min (${waited}s)"
+      prev_target="$tgt_cnt"
+    else
+      log "[$phase_label] 等待 Job ${job_id} … (${waited}s)"
+    fi
+    sleep "$BULK_JOB_POLL_SEC"
+    waited=$((waited + BULK_JOB_POLL_SEC))
+  done
+  log "[$phase_label] ✗ 等待 Job ${job_id} 超时 ${BULK_JOB_WAIT_SEC}s"
+  return 1
+}
+
+# 监控全量进度直至达标（进度≥阈值 且 低速稳定 SYNC_STABLE_ROUNDS 轮）— 已弃用，保留供手工调试
 monitor_bulk_until_stable() {
   local phase_label="$1"
   local src_sql="$2"
@@ -274,8 +319,7 @@ run_vt_bulk_two_phase() {
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
-  monitor_bulk_until_stable "${JOB_KEY}-vt-hit" "$VT_SRC_HAS_TOKEN_SQL"
-  cancel_job_id "$BULK_JOB_ID" "$BEFORE_JOBS"
+  wait_for_bulk_job "$BULK_JOB_ID" "${JOB_KEY}-vt-hit" "$VT_SRC_HAS_TOKEN_SQL"
 
   local miss_cnt
   miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
@@ -290,8 +334,7 @@ run_vt_bulk_two_phase() {
     "./scripts/${VT_MISS_RUNNER}"
     BULK_JOB_ID=$(capture_new_job_id "$before_vt")
     log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
-    monitor_bulk_until_stable "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL"
-    cancel_job_id "$BULK_JOB_ID" "$before_vt"
+    wait_for_bulk_job "$BULK_JOB_ID" "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL"
   else
     log "无待 VT 补全记录，跳过阶段 2"
     BULK_JOB_ID=""
@@ -355,9 +398,8 @@ if [[ -n "$VT_MISS_RUNNER" ]]; then
 else
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
-  log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE}..."
-  monitor_bulk_until_stable "bulk" "$SRC_CNT_SQL"
-  cancel_job_id "$BULK_JOB_ID" "$BEFORE_JOBS"
+  log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，等待 batch 完成 ${MONITOR_TABLE}..."
+  wait_for_bulk_job "$BULK_JOB_ID" "bulk" "$SRC_CNT_SQL"
 fi
 
 log "========== 切增量 ${INCR_SQL} =========="

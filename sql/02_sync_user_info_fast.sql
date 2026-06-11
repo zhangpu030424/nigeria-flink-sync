@@ -1,6 +1,7 @@
 -- 全量阶段 1 user_info：宽表已有 id_number_token；无 token 见 02_sync_user_info_fast_vt_miss.sql
 -- 原始 bvn 为空 → id_number 写 NULL（无需 VT）；有 bvn 无 token → 阶段 2 补
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
 CREATE TABLE IF NOT EXISTS src_user_info_staging (
