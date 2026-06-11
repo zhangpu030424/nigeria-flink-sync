@@ -57,9 +57,9 @@ SELECT
 FROM (
     SELECT
         s.user_id + 100000000 AS user_id,
-        vt_tokenize(s.bvn_raw) AS id_number,
+        COALESCE(vt_tokenize(s.bvn_raw), '') AS id_number,
         COALESCE(s.full_name, '') AS full_name,
-        s.info_json
+        COALESCE(CAST(s.info_json AS STRING), '{}') AS info_json
     FROM src_user_info_staging_miss s
     WHERE (s.id_number_token IS NULL OR TRIM(s.id_number_token) = '')
       AND s.bvn_raw IS NOT NULL

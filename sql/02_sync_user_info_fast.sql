@@ -1,5 +1,5 @@
 -- 全量阶段 1 user_info：宽表已有 id_number_token；无 token 见 02_sync_user_info_fast_vt_miss.sql
--- 原始 bvn 为空 → id_number 写 NULL（无需 VT）；有 bvn 无 token → 阶段 2 补
+-- 原始 bvn 为空 → id_number 写 ''（目标列 NOT NULL）；有 bvn 无 token → 阶段 2 补
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
@@ -48,14 +48,14 @@ INSERT INTO sink_user_info
 SELECT
     user_id + 100000000,
     CASE
-        WHEN bvn_raw IS NULL OR TRIM(bvn_raw) = '' THEN CAST(NULL AS STRING)
-        ELSE id_number_token
+        WHEN bvn_raw IS NULL OR TRIM(bvn_raw) = '' THEN CAST('' AS STRING)
+        ELSE COALESCE(id_number_token, '')
     END,
     COALESCE(full_name, ''),
     CAST('' AS STRING),
     CAST('' AS STRING),
     CAST('' AS STRING),
-    info_json
+    COALESCE(CAST(info_json AS STRING), '{}')
 FROM src_user_info_staging
 WHERE (bvn_raw IS NULL OR TRIM(bvn_raw) = '')
    OR (id_number_token IS NOT NULL AND TRIM(id_number_token) <> '');
