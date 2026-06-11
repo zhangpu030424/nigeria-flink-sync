@@ -1,4 +1,4 @@
--- 增量 user_info：Lookup id_number VT，miss 则 vt_tokenize；原始 bvn 为空 → id_number 写 ''
+-- 增量 user_info：CDC user_info_sync_staging（宽表需先重建；info_json 在宽表内已组装完整）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -6,21 +6,12 @@ SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '1s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
-CREATE TABLE IF NOT EXISTS src_personal (
+CREATE TABLE IF NOT EXISTS src_user_info_staging (
     user_id BIGINT,
-    bvn STRING,
-    first_name STRING,
-    sur_name STRING,
-    date_of_birth DATE,
-    gender INT,
-    education_level INT,
-    marriage INT,
-    number_of_children INT,
-    living_address_state STRING,
-    living_address_city STRING,
-    living_address_first_line STRING,
-    living_address_second_line STRING,
-    proc_time AS PROCTIME(),
+    bvn_raw STRING,
+    id_number_token STRING,
+    full_name STRING,
+    info_json STRING,
     PRIMARY KEY (user_id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
@@ -29,25 +20,12 @@ CREATE TABLE IF NOT EXISTS src_personal (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_personal_info',
+    'table-name' = 'user_info_sync_staging',
     'server-time-zone' = 'Africa/Lagos',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only'
-);
-
-CREATE TABLE IF NOT EXISTS dim_vt_id_number (
-    vt_type STRING, raw_value STRING, token STRING, status INT,
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
@@ -66,18 +44,24 @@ CREATE TABLE IF NOT EXISTS sink_user_info (
 );
 
 INSERT INTO sink_user_info
-SELECT e.user_id, e.id_number, e.full_name, '', '', '', e.info_json
+SELECT
+    e.user_id,
+    e.id_number,
+    e.full_name,
+    CAST('' AS STRING),
+    CAST('' AS STRING),
+    CAST('' AS STRING),
+    e.info_json
 FROM (
     SELECT
-        p.user_id + 100000000 AS user_id,
+        s.user_id + 100000000 AS user_id,
         CASE
-            WHEN p.bvn IS NULL OR TRIM(p.bvn) = '' THEN CAST('' AS STRING)
-            ELSE COALESCE(NULLIF(TRIM(vt.token), ''), vt_tokenize(TRIM(p.bvn)))
+            WHEN s.bvn_raw IS NULL OR TRIM(s.bvn_raw) = '' THEN CAST('' AS STRING)
+            WHEN s.id_number_token IS NOT NULL AND TRIM(s.id_number_token) <> '' THEN s.id_number_token
+            ELSE vt_tokenize(TRIM(s.bvn_raw))
         END AS id_number,
-        TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
-        CONCAT('{"birthday":"', CAST(p.date_of_birth AS STRING), '","gender":', CAST(COALESCE(p.gender, 0) AS STRING), '}') AS info_json
-    FROM src_personal p
-    LEFT JOIN dim_vt_id_number FOR SYSTEM_TIME AS OF p.proc_time vt
-        ON vt.vt_type = 'id_number' AND vt.status = 1 AND vt.raw_value = TRIM(p.bvn)
+        COALESCE(s.full_name, '') AS full_name,
+        s.info_json
+    FROM src_user_info_staging s
 ) e
 WHERE e.id_number IS NOT NULL;
