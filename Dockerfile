@@ -26,4 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY --from=udf-build /build/udf/target/flink-sync-udf.jar /opt/flink/lib/flink-sync-udf.jar
 RUN chown flink:flink /opt/flink/lib/flink-sync-udf.jar
 
-USER flink
+COPY scripts/flink-docker-entrypoint.sh /docker-entrypoint.d/00-fix-checkpoints.sh
+RUN chmod +x /docker-entrypoint.d/00-fix-checkpoints.sh
+
+USER root
+ENTRYPOINT ["/docker-entrypoint.d/00-fix-checkpoints.sh"]
