@@ -256,7 +256,6 @@ FROM (
                 o.amount_max,
                 ROW_NUMBER() OVER (PARTITION BY o.user_id, o.product_id ORDER BY o.order_time DESC) AS rn
          FROM user_order o
-         WHERE o.product_id IS NOT NULL AND TRIM(o.product_id) <> ''
      ) t
 WHERE t.rn = 1;
 

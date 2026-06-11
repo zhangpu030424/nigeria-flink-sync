@@ -51,5 +51,4 @@ SELECT
     CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
     CAST(0 AS BIGINT),
     CAST(0 AS BIGINT)
-FROM src_user_order_product
-WHERE product_id IS NOT NULL AND TRIM(product_id) <> '';
+FROM src_user_order_product;

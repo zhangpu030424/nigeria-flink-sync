@@ -56,12 +56,11 @@ FROM (
     SELECT
         s.user_id + 100000000 AS user_id,
         CASE
-            WHEN s.bvn_raw IS NULL OR TRIM(s.bvn_raw) = '' THEN CAST('' AS STRING)
+            WHEN s.bvn_raw IS NULL OR TRIM(s.bvn_raw) = '' THEN CAST(NULL AS STRING)
             WHEN s.id_number_token IS NOT NULL AND TRIM(s.id_number_token) <> '' THEN s.id_number_token
             ELSE vt_tokenize(TRIM(s.bvn_raw))
         END AS id_number,
         COALESCE(s.full_name, '') AS full_name,
         s.info_json
     FROM src_user_info_staging s
-) e
-WHERE e.id_number IS NOT NULL;
+) e;

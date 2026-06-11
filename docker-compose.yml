@@ -23,6 +23,9 @@ services:
         rest.bind-port: 8089
         jobmanager.memory.process.size: 2048m
         state.backend: rocksdb
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        state.savepoints.dir: file:///tmp/flink-savepoints
+        state.checkpoint-storage: filesystem
         execution.checkpointing.interval: 120s
         execution.checkpointing.mode: EXACTLY_ONCE
         table.local-time-zone: Africa/Lagos
@@ -54,6 +57,9 @@ services:
         taskmanager.memory.process.size: ${FLINK_TM_MEMORY:-40960m}
         state.backend: rocksdb
         state.backend.rocksdb.memory.managed: true
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        state.savepoints.dir: file:///tmp/flink-savepoints
+        state.checkpoint-storage: filesystem
         table.local-time-zone: Africa/Lagos
     volumes:
       - flink_checkpoints:/tmp/flink-checkpoints
