@@ -52,7 +52,8 @@ SELECT
     principal_minor, interest_minor, admin_fee_minor,
     penalty_amount_minor, reduction_amount_minor, total_amount_minor,
     paid_amount_minor,
-    paid_time_ms, paid_off_date,
-    CAST(UNIX_TIMESTAMP(CAST(start_date AS STRING)) * 1000 AS BIGINT),
+    CASE WHEN paid_time_ms IS NOT NULL AND paid_time_ms >= 0 THEN paid_time_ms ELSE CAST(NULL AS BIGINT) END,
+    paid_off_date,
+    GREATEST(CAST(COALESCE(UNIX_TIMESTAMP(CAST(start_date AS STRING)), 0) * 1000 AS BIGINT), CAST(0 AS BIGINT)),
     CAST(risk_status AS TINYINT)
 FROM src_loan_staging;

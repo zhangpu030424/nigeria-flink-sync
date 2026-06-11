@@ -355,6 +355,7 @@ SELECT i.id,
        CAST(
            CASE
                WHEN ur_cb.callback_time IS NOT NULL
+                   AND UNIX_TIMESTAMP(ur_cb.callback_time) > 0
                    THEN UNIX_TIMESTAMP(ur_cb.callback_time) * 1000
                ELSE NULL
                END AS SIGNED
