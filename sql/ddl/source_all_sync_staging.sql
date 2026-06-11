@@ -471,10 +471,35 @@ FROM (
 ALTER TABLE application_sync_staging ADD PRIMARY KEY (id);
 
 -- ---------- 6. loan_sync_staging ----------
+-- 显式列类型，避免 CTAS 推断 UNSIGNED 导致 Flink JDBC 读成 BigInteger
 DROP TABLE IF EXISTS loan_sync_staging;
 
-CREATE TABLE loan_sync_staging AS
-SELECT i.id,
+CREATE TABLE loan_sync_staging (
+    id                   BIGINT       NOT NULL,
+    loan_no              VARCHAR(128) NOT NULL,
+    application_no       VARCHAR(128) NOT NULL,
+    period               INT          NOT NULL,
+    roll_sequence        INT          NOT NULL,
+    start_date           DATE         NULL,
+    due_date             DATE         NULL,
+    due_date_final       DATE         NULL,
+    principal_minor      BIGINT       NOT NULL DEFAULT 0,
+    interest_minor       BIGINT       NOT NULL DEFAULT 0,
+    admin_fee_minor      BIGINT       NOT NULL DEFAULT 0,
+    roll_fee_minor       BIGINT       NOT NULL DEFAULT 0,
+    penalty_amount_minor BIGINT       NOT NULL DEFAULT 0,
+    reduction_amount_minor BIGINT     NOT NULL DEFAULT 0,
+    total_amount_minor   BIGINT       NOT NULL DEFAULT 0,
+    paid_amount_minor    BIGINT       NOT NULL DEFAULT 0,
+    roll_paid_amount_minor BIGINT     NOT NULL DEFAULT 0,
+    paid_time_ms         BIGINT       NULL,
+    paid_off_date        DATE         NULL,
+    risk_status          INT          NOT NULL,
+    PRIMARY KEY (id)
+);
+
+INSERT INTO loan_sync_staging
+SELECT CAST(i.id AS SIGNED),
        i.installment_order_no AS loan_no,
        o.order_no AS application_no,
        CAST(COALESCE(i.current_period, 1) AS SIGNED) AS period,
@@ -503,6 +528,8 @@ SELECT i.id,
        DATE(o.settled_time) AS paid_off_date,
        CAST(CASE
            WHEN o.risk_order_status = 10
+               AND COALESCE(i.is_overdue, 0) = 1 THEN 23
+           WHEN o.risk_order_status = 10
                AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) = 0 THEN 20
            WHEN o.risk_order_status = 10
                AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) <> 0 THEN 24
@@ -530,7 +557,7 @@ WHERE i.installment_order_no IS NOT NULL
   AND o.risk_order_status IS NOT NULL
   AND o.risk_order_status NOT IN (0, 2, 4, 6, 8);
 
-ALTER TABLE loan_sync_staging ADD PRIMARY KEY (id);
+-- PK 已在 CREATE TABLE 中声明
 
 -- ---------- 校验 ----------
 SELECT 'user' AS tbl, COUNT(*) AS missing_token

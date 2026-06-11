@@ -79,7 +79,10 @@ CREATE TABLE IF NOT EXISTS sink_application (
 
 INSERT INTO sink_application
 SELECT
-    e.application_no, e.mobile_token, 'ng01', CAST(e.app_code AS INT), '',
+    e.application_no, e.mobile_token,
+     'ng01',
+    CAST(e.app_code AS INT),
+     '1',
     e.user_id, e.group_user_id, e.sn,
     CAST(0 AS TINYINT),
     CAST(e.re_loan AS TINYINT),

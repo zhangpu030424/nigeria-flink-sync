@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS sink_application (
 
 INSERT INTO sink_application
 SELECT
-    application_no, mobile_token, 'ng01', CAST(app_code AS INT), '',
+    application_no, mobile_token, 'ng01', CAST(app_code AS INT), '1',
     user_id + 100000000, user_id + 100000000, sn,
     CAST(0 AS TINYINT), CAST(re_loan AS TINYINT), CAST(0 AS TINYINT),
     CASE
