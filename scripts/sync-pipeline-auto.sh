@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# 一键流水线：重建全部宽表 → 按序全量(打满核) → 各表自动切增量
+# 一键全自动：锁定起始时间戳 → 重建宽表 → 顺序全量(含 VT 两阶段) → 各表切增量
 #
-# 规则:
-#   - 每个表全量用 FLINK_PARALLELISM_BULK（默认=FLINK_PARALLELISM）打满 slot
-#   - 全量达标后切增量（FLINK_PARALLELISM_INCR，默认 1），仅 cancel 本表全量 Job
-#   - 下一表全量开始时，上一表及更早的增量 Job 保持 RUNNING（--keep-other-jobs）
+# 增量 binlog 起点 = 本脚本开头锁定的 bulk-start-ms（宽表重建期间变更也会补）
 #
 # 用法:
-#   ./scripts/sync-pipeline-auto.sh                 # 重建宽表 + 顺序同步 6 表
-#   ./scripts/sync-pipeline-auto.sh --skip-staging  # 宽表已建好，直接同步
-#   ./scripts/sync-pipeline-auto.sh --jobs user,user_bankcard  # 只跑指定 Job
-#
-# Slot 建议: FLINK_TASK_SLOTS >= FLINK_PARALLELISM_BULK + N表 * FLINK_PARALLELISM_INCR
-#   例: slots=25, bulk=20, incr=1, 6表 → 20+6=26 略紧，可 bulk=18 或 slots=30
+#   ./scripts/sync-pipeline-auto.sh
+#   ./scripts/sync-pipeline-auto.sh --skip-staging     # 宽表已建好，仍用已存 bulk-start-ms
+#   ./scripts/sync-pipeline-auto.sh --jobs user,user_info
+#   ./scripts/sync-pipeline-auto.sh --incr-only      # 仅提交增量（读 logs/bulk-start-ms.env）
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SKIP_STAGING=0
+INCR_ONLY=0
 JOBS_FILTER=""
 for arg in "$@"; do
   [[ "$arg" == "--skip-staging" ]] && SKIP_STAGING=1
+  [[ "$arg" == "--incr-only" ]] && INCR_ONLY=1
   [[ "$arg" == --jobs=* ]] && JOBS_FILTER="${arg#--jobs=}"
 done
 
@@ -39,15 +36,34 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < .env
 set +a
 
+# shellcheck source=scripts/lib/bulk-start-ms.sh
+source scripts/lib/bulk-start-ms.sh
+
+LOG_DIR="logs"
+mkdir -p "$LOG_DIR"
+
+if [[ "$INCR_ONLY" -eq 1 ]]; then
+  if ! load_bulk_start_ms "${LOG_DIR}/bulk-start-ms.env"; then
+    echo "ERR: --incr-only 需要 logs/bulk-start-ms.env（先跑过一次完整流水线）"
+    exit 1
+  fi
+else
+  echo "=========================================="
+  echo "步骤 0: 锁定增量 binlog 起始时刻（早于宽表重建）"
+  record_bulk_start_ms "$LOG_DIR"
+fi
+
+SHARED_MS="${BULK_START_MS}"
+
 BULK_PAR="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
 SLOTS="${FLINK_TASK_SLOTS:-16}"
-SHARED_MS=$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo "$(($(date +%s)*1000))")
 
 echo "=========================================="
 echo "流水线同步"
+echo "  bulk-start-ms=${SHARED_MS}"
 echo "  bulk并行=${BULK_PAR}  incr并行=${INCR_PAR}  slots=${SLOTS}"
-echo "  共享 bulk-start-ms=${SHARED_MS}"
+echo "  增量模式: CDC timestamp（从此时间点起补 binlog）"
 echo "=========================================="
 
 ENABLED_JOBS=()
@@ -69,15 +85,29 @@ if [[ ${#ENABLED_JOBS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+if [[ "$INCR_ONLY" -eq 1 ]]; then
+  echo ">> --incr-only：跳过宽表/全量，提交增量 Job: ${ENABLED_JOBS[*]}"
+  first=1
+  for job in "${ENABLED_JOBS[@]}"; do
+    if [[ "$first" -eq 1 ]]; then
+      ./scripts/sync-job-auto.sh "$job" --incr-only --bulk-start-ms "$SHARED_MS"
+      first=0
+    else
+      ./scripts/sync-job-auto.sh "$job" --incr-only --bulk-start-ms "$SHARED_MS" --keep-other-jobs
+    fi
+  done
+  exit 0
+fi
+
 need_slots=$((BULK_PAR + ${#ENABLED_JOBS[@]} * INCR_PAR))
 if [[ "$need_slots" -gt "$SLOTS" ]]; then
   echo "WARN: 预估峰值 slot 需求 ${need_slots} > FLINK_TASK_SLOTS=${SLOTS}"
-  echo "      末段可能排队；建议增大 slots 或降低 FLINK_PARALLELISM_BULK"
 fi
 
 if [[ "$SKIP_STAGING" -eq 0 ]]; then
   echo ""
-  echo ">> [1/2] 重建全部宽表 sql/ddl/source_all_sync_staging.sql"
+  echo ">> [1/2] 重建全部宽表（source_all_sync_staging.sql）"
+  echo ">>       起始时刻已锁定，此期间源库 binlog 由后续增量补"
   ./scripts/rebuild-all-staging.sh
 else
   echo ">> 跳过宽表重建（--skip-staging）"
@@ -107,7 +137,9 @@ done
 
 echo ""
 echo "=========================================="
-echo "流水线完成。当前 RUNNING Job（应为 ${#ENABLED_JOBS[@]} 个增量）:"
+echo "流水线完成。bulk-start-ms=${SHARED_MS}"
+echo "增量 Job 数（预期 ${#ENABLED_JOBS[@]}）:"
 docker exec "${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}" ./bin/flink list 2>/dev/null || true
 echo "监控: ./scripts/monitor-sync.sh <表名> 60"
 echo "日志: logs/sync-<job>-auto.log"
+echo "恢复增量: ./scripts/sync-pipeline-auto.sh --incr-only"

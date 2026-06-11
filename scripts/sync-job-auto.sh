@@ -222,49 +222,84 @@ monitor_bulk_until_stable() {
   done
 }
 
-run_user_bulk_two_phase() {
-  local user_src_has_vt="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
-  local user_src_miss="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
+# VT 两阶段全量：阶段 1 已有 token；阶段 2 无 token 行 UDF 调 /v2t
+VT_MISS_RUNNER=""
+VT_SRC_HAS_TOKEN_SQL=""
+VT_SRC_MISS_SQL=""
 
-  log "========== user 全量阶段 1/2：已有 VT token（不调 /v2t）=========="
+resolve_vt_two_phase() {
+  VT_MISS_RUNNER=""
+  VT_SRC_HAS_TOKEN_SQL=""
+  VT_SRC_MISS_SQL=""
+  case "$JOB_KEY" in
+    user)
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
+      VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
+      VT_MISS_RUNNER="run-user-fast-vt-miss.sh"
+      ;;
+    user_info)
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_info_sync_staging WHERE id_number_token IS NOT NULL AND TRIM(id_number_token)<>''"
+      VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_info_sync_staging WHERE bvn_raw IS NOT NULL AND TRIM(bvn_raw)<>'' AND (id_number_token IS NULL OR TRIM(id_number_token)='')"
+      VT_MISS_RUNNER="run-user-info-fast-vt-miss.sh"
+      ;;
+    user_bankcard)
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>''"
+      VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_raw IS NOT NULL AND TRIM(bank_account_raw)<>'' AND (bank_account_token IS NULL OR TRIM(bank_account_token)='')"
+      VT_MISS_RUNNER="run-user-bankcard-fast-vt-miss.sh"
+      ;;
+    application)
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM application_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>'' AND id_number_token IS NOT NULL AND TRIM(id_number_token)<>'' AND bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>''"
+      VT_SRC_MISS_SQL="SELECT COUNT(*) FROM application_sync_staging WHERE ((mobile_token IS NULL OR TRIM(mobile_token)='') AND mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'') OR ((id_number_token IS NULL OR TRIM(id_number_token)='') AND bvn_raw IS NOT NULL AND TRIM(bvn_raw)<>'') OR ((bank_account_token IS NULL OR TRIM(bank_account_token)='') AND bank_account_raw IS NOT NULL AND TRIM(bank_account_raw)<>'')"
+      VT_MISS_RUNNER="run-application-fast-vt-miss.sh"
+      ;;
+  esac
+}
+
+run_vt_bulk_two_phase() {
+  log "========== ${JOB_KEY} 全量阶段 1/2：已有 VT token（不调 /v2t）=========="
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
-  monitor_bulk_until_stable "user-vt-hit" "$user_src_has_vt"
+  monitor_bulk_until_stable "${JOB_KEY}-vt-hit" "$VT_SRC_HAS_TOKEN_SQL"
   cancel_job_id "$BULK_JOB_ID"
 
   local miss_cnt
   miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
-    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$user_src_miss")
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$VT_SRC_MISS_SQL")
   if [[ "$miss_cnt" =~ ^[0-9]+$ && "$miss_cnt" -gt 0 ]]; then
-    log "========== user 全量阶段 2/2：无 VT 用户 ${miss_cnt} 条，运行时 UDF 调 /v2t =========="
+    log "========== ${JOB_KEY} 全量阶段 2/2：待 VT 补全 ${miss_cnt} 条，运行时 UDF 调 /v2t =========="
     local vt_miss_par="${FLINK_PARALLELISM_VT_MISS:-2}"
-    log "VT 补全并行度: FLINK_PARALLELISM=${vt_miss_par}（勿过大，避免打满 VT 接口）"
+    log "VT 补全并行度: FLINK_PARALLELISM=${vt_miss_par}"
     local before_vt
     before_vt=$(list_running_job_ids | tr '\n' ' ')
     export FLINK_PARALLELISM="${vt_miss_par}"
-    ./scripts/run-user-fast-vt-miss.sh
+    "./scripts/${VT_MISS_RUNNER}"
     BULK_JOB_ID=$(capture_new_job_id "$before_vt")
     log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
-    monitor_bulk_until_stable "user-vt-miss" "$SRC_CNT_SQL"
+    monitor_bulk_until_stable "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL"
     cancel_job_id "$BULK_JOB_ID"
   else
-    log "无待 VT 补全用户，跳过阶段 2"
+    log "无待 VT 补全记录，跳过阶段 2"
     BULK_JOB_ID=""
   fi
 }
 
+# shellcheck source=scripts/lib/bulk-start-ms.sh
+source "$(dirname "$0")/lib/bulk-start-ms.sh"
+
 if [[ "$INCR_ONLY" -eq 1 ]]; then
+  resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
   if [[ "$KEEP_OTHER" -eq 0 ]]; then
     cancel_all_jobs
   fi
-  start_incr "${BULK_START_MS_ARG:-}"
+  start_incr "$BULK_START_MS"
   exit 0
 fi
 
-BULK_START_MS="${BULK_START_MS_ARG:-$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo "$(($(date +%s)*1000))")}"
-log "========== 阶段 1/2：全量 ${FULL_SQL} =========="
-log "全量起始时间戳(ms): ${BULK_START_MS}"
+resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
+BULK_START_MS_ARG="$BULK_START_MS"
+log "========== 全量 ${FULL_SQL} =========="
+log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
 
 if [[ "$KEEP_OTHER" -eq 0 ]]; then
   if ! ./scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE"; then
@@ -300,8 +335,9 @@ fi
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（slots=${SLOTS}）"
 
-if [[ "$JOB_KEY" == "user" ]]; then
-  run_user_bulk_two_phase
+resolve_vt_two_phase
+if [[ -n "$VT_MISS_RUNNER" ]]; then
+  run_vt_bulk_two_phase
 else
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")

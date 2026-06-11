@@ -5,21 +5,35 @@
 ## 一键执行（推荐）
 
 ```bash
-# VT 已灌满后：
 ./scripts/sync-pipeline-auto.sh
+# 或同义入口
+./scripts/sync-all-auto.sh
 ```
 
-流程：
-1. `sql/ddl/source_all_sync_staging.sql` — **一个文件**重建 6 张宽表
-2. 按 `config/sync-jobs.conf` **顺序**跑 6 个 Job：
-   - `user` → `user_info` → `user_bankcard` → `user_product` → `application` → `loan`
-3. 每表：**全量打满核** → 达标后 **只 cancel 本表全量** → 提交 **增量（低并行）**
-4. 下一表全量时，**已完成的增量 Job 不停止**（`--keep-other-jobs`）
+**全自动顺序（勿拆开手动执行）：**
 
-宽表已建好：
+| 步骤 | 动作 |
+|------|------|
+| 0 | **锁定** `bulk-start-ms` → `logs/bulk-start-ms.env`（增量 CDC 从此刻起补 binlog） |
+| 1 | 重建 6 张宽表 `source_all_sync_staging.sql` |
+| 2 | 按 `config/sync-jobs.conf` 顺序全量 → 切增量 |
+
+宽表重建可能耗时很久；期间源库 binlog **不会丢**，因增量 Job 使用步骤 0 的时间戳（`scan.startup.mode=timestamp`），而非「切增量那一刻」。
+
+各 Job 顺序：`user` → `user_info` → `user_bankcard` → `user_product` → `application` → `loan`
+
+VT 表全量两阶段：先有 token → 无 token 运行时 `/v2t` → 增量 Lookup+UDF。
+
+仅宽表已建好、且 **沿用同一次** `bulk-start-ms`：
 
 ```bash
 ./scripts/sync-pipeline-auto.sh --skip-staging
+```
+
+全量已完成、只补提交增量：
+
+```bash
+./scripts/sync-pipeline-auto.sh --incr-only
 ```
 
 只跑部分表：

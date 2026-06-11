@@ -1,4 +1,4 @@
--- 全量 user_info（预 VT 宽表）
+-- 全量阶段 1 user_info：宽表已有 id_number_token；无 token 见 02_sync_user_info_fast_vt_miss.sql
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'false';
 

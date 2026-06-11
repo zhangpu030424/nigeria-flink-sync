@@ -28,4 +28,6 @@ echo ">> 源库: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/
 MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT}" \
   -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" < "$SQL"
 
-echo ">> 完成。请确认各表 missing_token_cnt=0 后再跑 ./scripts/sync-pipeline-auto.sh"
+echo ">> 完成。missing_token 行由全量阶段 2（vt_tokenize）补全，无需手工 preload 到 0"
+echo ">> 若单独执行本脚本，请紧接: ./scripts/sync-pipeline-auto.sh --skip-staging"
+echo ">> （勿分两次跑；完整一键请直接: ./scripts/sync-pipeline-auto.sh）"

@@ -73,6 +73,7 @@ DROP TABLE IF EXISTS user_info_sync_staging;
 
 CREATE TABLE user_info_sync_staging AS
 SELECT p.user_id,
+       TRIM(p.bvn) AS bvn_raw,
        vt_id.token AS id_number_token,
        TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
        JSON_OBJECT(
@@ -160,6 +161,10 @@ SELECT base.id,
        base.app_id_num,
        base.device_uuid,
        base.session_id,
+       base.mobile_norm,
+       base.bvn_raw,
+       base.bank_account_raw,
+       base.gaid_idfa_raw,
        base.mobile_token,
        base.id_number_token,
        base.gaid_idfa_token,
@@ -211,6 +216,18 @@ FROM (
                 ac.id AS app_id_num,
                 u.device_id AS device_uuid,
                 di.session_uuid AS session_id,
+                (CASE
+                     WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                     WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                     WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                     WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                     ELSE CONCAT('+234', TRIM(u.mobile))
+                 END) AS mobile_norm,
+                TRIM(p.bvn) AS bvn_raw,
+                TRIM(ub.bank_account) AS bank_account_raw,
+                TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''),
+                              NULLIF(TRIM(u.idfa), ''),
+                              NULLIF(TRIM(di.aaid), ''))) AS gaid_idfa_raw,
                 vt_m.token AS mobile_token,
                 vt_id.token AS id_number_token,
                 vt_g.token AS gaid_idfa_token,
@@ -384,7 +401,8 @@ WHERE bank_account_raw IS NOT NULL AND (bank_account_token IS NULL OR bank_accou
 UNION ALL
 SELECT 'user_info', COUNT(*)
 FROM user_info_sync_staging
-WHERE id_number_token IS NULL OR id_number_token = ''
+WHERE bvn_raw IS NOT NULL AND TRIM(bvn_raw) <> ''
+  AND (id_number_token IS NULL OR id_number_token = '')
 UNION ALL
 SELECT 'application_mobile', COUNT(*)
 FROM application_sync_staging

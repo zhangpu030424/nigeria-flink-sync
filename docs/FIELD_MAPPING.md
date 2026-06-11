@@ -42,10 +42,15 @@ INNER JOIN user u ON acr.adid = u.adid
 
 实现：`sql/02_sync_user_test.sql` + Java `AdjustCallbackUtmAssembler#mapUtmSource` 同逻辑。
 
-### mobile VT（两阶段全量 + 增量兜底）
+### VT 字段（统一：两阶段全量 + 增量 Lookup/UDF 兜底）
 
-1. **阶段 1** `02_sync_user_fast.sql`：宽表已有 `mobile_token` 的用户直写（不调 `/v2t`）
-2. **阶段 2** `02_sync_user_fast_vt_miss.sql`：无 token 用户，Flink UDF `vt_tokenize(mobile_norm)` 运行时调 `/v2t`
-3. **增量** `02_sync_user_incr.sql`：Lookup `vt_token_cache` 优先，miss 再 `vt_tokenize`
-4. 编排：`sync-job-auto.sh user` / `sync-all-auto.sh` 自动两阶段全量后切增量
-5. 可选预加载 `vt-preload.sh` 可扩大阶段 1 覆盖、减少阶段 2 VT 调用量
+| 表 | VT 字段 | 阶段 1（有 token） | 阶段 2（运行时 /v2t） | 增量 |
+|----|---------|-------------------|------------------------|------|
+| `user` | mobile | `02_sync_user_fast` | `02_sync_user_fast_vt_miss` | `02_sync_user_incr` |
+| `user_info` | id_number | `02_sync_user_info_fast` | `02_sync_user_info_fast_vt_miss` | `02_sync_user_info_incr` |
+| `user_bankcard` | bank_account | `02_sync_user_bankcard_fast` | `02_sync_user_bankcard_fast_vt_miss` | `02_sync_user_bankcard_incr` |
+| `application` | mobile/id_number/bank/gaid | `02_sync_application_fast` | `02_sync_application_fast_vt_miss` | CDC 宽表（新单需重建宽表段） |
+
+编排：`sync-all-auto.sh` / `sync-pipeline-auto.sh` → `sync-job-auto.sh` 对上述 4 表 **自动阶段 1→2→增量**。  
+`user_product` / `loan` 无 VT，仍单阶段全量。  
+可选 `vt-preload.sh` 扩大阶段 1、减少阶段 2 对 VT 接口压力。

@@ -1,6 +1,5 @@
--- 全量：CDC user_bankcard_sync_staging → 目标 user_bankcard
+-- 全量阶段 1：已有 bank_account_token；无 token 见 02_sync_user_bankcard_fast_vt_miss.sql
 -- 映射: id=user_bank_info.id+1亿, group_user_id=user_id+1亿, bank_account_number=VT token
--- 前置: source_user_bankcard_sync_staging.sql + vt-preload bank_account 完成
 --
 -- 执行: ./scripts/run-user-bankcard-fast.sh
 
