@@ -42,9 +42,10 @@ INNER JOIN user u ON acr.adid = u.adid
 
 实现：`sql/02_sync_user_test.sql` + Java `AdjustCallbackUtmAssembler#mapUtmSource` 同逻辑。
 
-### mobile VT（预加载）
+### mobile VT（两阶段全量 + 增量兜底）
 
-1. 脚本 `vt-preload.sh` 批量 `/v2t` 写入 `vt_token_cache`
-2. 宽表 `source_user_sync_staging.sql` JOIN 得 `mobile_token`
-3. Flink `02_sync_user_fast.sql` / `02_sync_user_incr.sql` 直接读 token
-4. 调试 UDF `vt_tokenize()` 仅用于 `02_sync_user_test.sql`
+1. **阶段 1** `02_sync_user_fast.sql`：宽表已有 `mobile_token` 的用户直写（不调 `/v2t`）
+2. **阶段 2** `02_sync_user_fast_vt_miss.sql`：无 token 用户，Flink UDF `vt_tokenize(mobile_norm)` 运行时调 `/v2t`
+3. **增量** `02_sync_user_incr.sql`：Lookup `vt_token_cache` 优先，miss 再 `vt_tokenize`
+4. 编排：`sync-job-auto.sh user` / `sync-all-auto.sh` 自动两阶段全量后切增量
+5. 可选预加载 `vt-preload.sh` 可扩大阶段 1 覆盖、减少阶段 2 VT 调用量

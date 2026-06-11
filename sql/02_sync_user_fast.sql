@@ -1,5 +1,6 @@
--- 全量高速（预 VT）：CDC user_sync_staging.mobile_token → 目标 user.mobile
--- 前置: vt_token_cache 已灌满 + source_user_sync_staging.sql 已重建
+-- 全量阶段 1（有 VT）：CDC user_sync_staging.mobile_token → 目标 user.mobile
+-- 无 token 用户由阶段 2（02_sync_user_fast_vt_miss.sql）运行时调 /v2t
+-- 前置: user_sync_staging 已重建（source_user_sync_staging.sql）；vt_token_cache 预加载可选（阶段 1 覆盖已有 token）
 --
 -- 执行: ./scripts/run-user-fast.sh
 

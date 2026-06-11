@@ -175,6 +175,85 @@ submit_bulk() {
   fi
 }
 
+# 监控全量进度直至达标（进度≥阈值 且 低速稳定 SYNC_STABLE_ROUNDS 轮）
+monitor_bulk_until_stable() {
+  local phase_label="$1"
+  local src_sql="$2"
+  local prev_target=""
+  local stable=0
+  local round=0
+
+  while true; do
+    round=$((round + 1))
+    src_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+      "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$src_sql")
+    tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+      "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+
+    progress="n/a"
+    rate="n/a"
+    if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
+      progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+    fi
+    if [[ "$tgt_cnt" =~ ^[0-9]+$ && "$prev_target" =~ ^[0-9]+$ ]]; then
+      delta=$((tgt_cnt - prev_target))
+      rate=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $POLL_SEC}")
+    fi
+
+    log "[${phase_label}] #${round} 目标=${tgt_cnt} 源=${src_cnt} 进度=${progress}% 速率≈${rate}/min 阈值=${SYNC_THRESHOLD_PCT}%"
+
+    switch=0
+    if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
+      reached=$(awk "BEGIN {print ($tgt_cnt * 100 / $src_cnt) >= $SYNC_THRESHOLD_PCT}")
+      if [[ "$reached" == "1" ]]; then
+        if [[ "$rate" == "n/a" ]] || [[ "$rate" -lt "$MIN_RATE_TO_STABLE" ]]; then
+          stable=$((stable + 1))
+          log "[${phase_label}] 进度已达阈值，稳定 ${stable}/${STABLE_ROUNDS}"
+          [[ "$stable" -ge "$STABLE_ROUNDS" ]] && switch=1
+        else
+          stable=0
+        fi
+      fi
+    fi
+
+    [[ "$switch" -eq 1 ]] && return 0
+    prev_target="$tgt_cnt"
+    sleep "$POLL_SEC"
+  done
+}
+
+run_user_bulk_two_phase() {
+  local user_src_has_vt="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
+  local user_src_miss="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
+
+  log "========== user 全量阶段 1/2：已有 VT token（不调 /v2t）=========="
+  submit_bulk
+  BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
+  log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
+  monitor_bulk_until_stable "user-vt-hit" "$user_src_has_vt"
+  cancel_job_id "$BULK_JOB_ID"
+
+  local miss_cnt
+  miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$user_src_miss")
+  if [[ "$miss_cnt" =~ ^[0-9]+$ && "$miss_cnt" -gt 0 ]]; then
+    log "========== user 全量阶段 2/2：无 VT 用户 ${miss_cnt} 条，运行时 UDF 调 /v2t =========="
+    local vt_miss_par="${FLINK_PARALLELISM_VT_MISS:-2}"
+    log "VT 补全并行度: FLINK_PARALLELISM=${vt_miss_par}（勿过大，避免打满 VT 接口）"
+    local before_vt
+    before_vt=$(list_running_job_ids | tr '\n' ' ')
+    export FLINK_PARALLELISM="${vt_miss_par}"
+    ./scripts/run-user-fast-vt-miss.sh
+    BULK_JOB_ID=$(capture_new_job_id "$before_vt")
+    log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
+    monitor_bulk_until_stable "user-vt-miss" "$SRC_CNT_SQL"
+    cancel_job_id "$BULK_JOB_ID"
+  else
+    log "无待 VT 补全用户，跳过阶段 2"
+    BULK_JOB_ID=""
+  fi
+}
+
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   if [[ "$KEEP_OTHER" -eq 0 ]]; then
     cancel_all_jobs
@@ -221,53 +300,16 @@ fi
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
 log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（slots=${SLOTS}）"
 
-submit_bulk
-BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
-log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE}..."
+if [[ "$JOB_KEY" == "user" ]]; then
+  run_user_bulk_two_phase
+else
+  submit_bulk
+  BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
+  log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE}..."
+  monitor_bulk_until_stable "bulk" "$SRC_CNT_SQL"
+  cancel_job_id "$BULK_JOB_ID"
+fi
 
-prev_target=""
-stable=0
-round=0
-
-while true; do
-  round=$((round + 1))
-  src_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
-    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$SRC_CNT_SQL")
-  tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
-    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
-
-  progress="n/a"
-  rate="n/a"
-  if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-    progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
-  fi
-  if [[ "$tgt_cnt" =~ ^[0-9]+$ && "$prev_target" =~ ^[0-9]+$ ]]; then
-    delta=$((tgt_cnt - prev_target))
-    rate=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $POLL_SEC}")
-  fi
-
-  log "#${round} 目标=${tgt_cnt} 源=${src_cnt} 进度=${progress}% 速率≈${rate}/min 阈值=${SYNC_THRESHOLD_PCT}%"
-
-  switch=0
-  if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-    reached=$(awk "BEGIN {print ($tgt_cnt * 100 / $src_cnt) >= $SYNC_THRESHOLD_PCT}")
-    if [[ "$reached" == "1" ]]; then
-      if [[ "$rate" == "n/a" ]] || [[ "$rate" -lt "$MIN_RATE_TO_STABLE" ]]; then
-        stable=$((stable + 1))
-        log "进度已达阈值，稳定 ${stable}/${STABLE_ROUNDS}"
-        [[ "$stable" -ge "$STABLE_ROUNDS" ]] && switch=1
-      else
-        stable=0
-      fi
-    fi
-  fi
-
-  [[ "$switch" -eq 1 ]] && break
-  prev_target="$tgt_cnt"
-  sleep "$POLL_SEC"
-done
-
-log "========== 阶段 2/2：增量 ${INCR_SQL} =========="
-cancel_job_id "$BULK_JOB_ID"
+log "========== 切增量 ${INCR_SQL} =========="
 start_incr "$BULK_START_MS"
 log "[$JOB_KEY] 自动切换完成。日志: ${LOG_FILE}"

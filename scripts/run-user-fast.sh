@@ -9,6 +9,6 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-echo ">> 提交全量 Job（sql/02_sync_user_fast.sql）"
-echo ">> 前置: vt_token_cache 已灌满 + user_sync_staging 已重建（source_user_sync_staging.sql）"
+echo ">> 提交全量阶段 1 Job（sql/02_sync_user_fast.sql，仅有 mobile_token 的用户）"
+echo ">> 前置: user_sync_staging 已重建；无 token 用户由 sync-job-auto 阶段 2 或 run-user-fast-vt-miss.sh 补全"
 ./scripts/run-sql.sh sql/02_sync_user_fast.sql

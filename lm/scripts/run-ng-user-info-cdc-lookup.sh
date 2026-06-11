@@ -48,16 +48,58 @@ list_running_job_ids() {
   docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true
 }
 
+jobs_overview_json() {
+  curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/overview" 2>/dev/null || true
+}
+
 latest_job_id() {
-  curl -sf "http://127.0.0.1:${FLINK_WEB_PORT}/jobs/overview" 2>/dev/null \
-    | grep -oE '"jid":"[a-f0-9]{32}"' | tail -1 | cut -d'"' -f4 || true
+  jobs_overview_json | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    jobs=d.get('jobs') or []
+    if not jobs:
+        sys.exit(0)
+    jobs=sorted(jobs, key=lambda x: x.get('start-time') or 0)
+    print(jobs[-1].get('jid',''))
+except Exception:
+    pass
+" 2>/dev/null || true
+}
+
+find_job_by_name() {
+  local name="$1"
+  jobs_overview_json | python3 -c "
+import json,sys
+name=sys.argv[1]
+try:
+    d=json.load(sys.stdin)
+    for j in d.get('jobs') or []:
+        if name in (j.get('name') or ''):
+            print(j.get('jid',''))
+            break
+except Exception:
+    pass
+" "$name" 2>/dev/null || true
 }
 
 print_job_hint() {
-  echo "[$(date '+%F %T')] 最近 Job（含 FINISHED/FAILED）:"
-  docker exec "$JM" ./bin/flink list -a 2>/dev/null | tail -20 || true
+  echo "[$(date '+%F %T')] REST jobs/overview:"
+  jobs_overview_json | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    jobs=d.get('jobs') or []
+    if not jobs:
+        print('  (empty)')
+    for j in jobs[-8:]:
+        print(f\"  {j.get('jid','?')[:8]}... state={j.get('state','?')} name={j.get('name','')}\")
+except Exception as e:
+    print('  (parse failed)', e)
+" 2>/dev/null || true
+  docker exec "$JM" ./bin/flink list 2>/dev/null | tail -10 || true
   local jid
-  jid=$(latest_job_id || true)
+  jid=$(find_job_by_name "sink_user_info_cdc" || latest_job_id || true)
   [[ -n "${jid:-}" ]] && echo "[$(date '+%F %T')] Web UI: http://127.0.0.1:${FLINK_WEB_PORT}/#/job/${jid}/overview"
 }
 
@@ -159,10 +201,28 @@ while read -r jid; do
   [[ -z "$jid" ]] && continue
   docker exec "$JM" ./bin/flink cancel "$jid" 2>/dev/null || true
 done < <(docker exec "$JM" ./bin/flink list 2>/dev/null \
-  | grep -i 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
+  | grep -iE 'sink_user_info' -B1 | grep -oE '[a-f0-9]{32}' | sort -u || true)
+# 也取消同名 pipeline（如有）
+while read -r jid; do
+  [[ -z "$jid" ]] && continue
+  docker exec "$JM" ./bin/flink cancel "$jid" 2>/dev/null || true
+done < <(jobs_overview_json | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for j in d.get('jobs') or []:
+        if j.get('state') in ('RUNNING','RESTARTING','CREATED') and 'sink_user_info' in (j.get('name') or ''):
+            print(j.get('jid',''))
+except Exception:
+    pass
+" 2>/dev/null || true)
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
 echo "[$(date '+%F %T')] 提交前 RUNNING: ${BEFORE_JOBS:-<无>}"
+
+PREP_SAVE="${LOG_DIR}/sync-ng-user-info-cdc-lookup-prepared.sql"
+cp "$PREP" "$PREP_SAVE"
+echo "[$(date '+%F %T')] 已保存 prepared SQL: ${PREP_SAVE}"
 
 set +e
 bash scripts/run-sql.sh "$PREP" 2>&1 | tee "$SQL_LOG"
@@ -170,20 +230,26 @@ SQL_RC=${PIPESTATUS[0]}
 set -e
 rm -f "$PREP"
 
-if grep -qiE 'Exception|ERROR|ValidationException|TableException|SqlParserException' "$SQL_LOG" 2>/dev/null; then
-  echo "[$(date '+%F %T')] ERR: sql 日志含异常，请查看 ${SQL_LOG}"
-  grep -iE 'Exception|ERROR|ValidationException|TableException|SqlParserException' "$SQL_LOG" | tail -15 || true
+SQL_FAIL=0
+if grep -qiE 'Exception|ERROR|ValidationException|TableException|SqlParserException|Could not execute SQL statement' "$SQL_LOG" 2>/dev/null; then
+  SQL_FAIL=1
+  echo "[$(date '+%F %T')] ERR: sql 日志含异常:"
+  grep -iE 'Exception|ERROR|ValidationException|TableException|SqlParserException|Could not execute SQL statement' "$SQL_LOG" | tail -20 || true
+  echo "[$(date '+%F %T')] sql-client 末尾 30 行:"
+  tail -30 "$SQL_LOG" || true
 fi
 
 echo "[$(date '+%F %T')] sql-client 退出码=${SQL_RC}"
-if [[ "$SQL_RC" -ne 0 ]]; then
+if [[ "$SQL_RC" -ne 0 || "$SQL_FAIL" -ne 0 ]]; then
   print_job_hint
-  exit "$SQL_RC"
+  exit 1
 fi
 
 JOB_ID=""
-for _ in 1 2 3 4 5; do
-  sleep 1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 2
+  JOB_ID=$(find_job_by_name "sink_user_info_cdc" || true)
+  [[ -n "${JOB_ID:-}" ]] && break
   for jid in $(list_running_job_ids); do
     if ! echo " $BEFORE_JOBS " | grep -q " $jid "; then
       JOB_ID="$jid"
@@ -194,11 +260,12 @@ done
 JOB_ID="${JOB_ID:-$(latest_job_id || true)}"
 
 if [[ -z "${JOB_ID:-}" ]]; then
-  echo "[$(date '+%F %T')] WARN: 未发现 Job。Batch+CDC 若 planning 失败通常此处为空；请查 ${SQL_LOG}"
+  echo "[$(date '+%F %T')] ERR: 未发现 Job（REST 与 flink list 均为空）"
+  echo "[$(date '+%F %T')] 请检查: grep -i insert ${PREP_SAVE}; tail -50 ${SQL_LOG}"
   print_job_hint
   exit 1
 fi
 
-echo "[$(date '+%F %T')] Job=${JOB_ID}（Batch 模式跑完即 FINISHED，不一定在 Running 里）"
+echo "[$(date '+%F %T')] Job=${JOB_ID}（snapshot 跑完会 FINISHED，Web UI 可查）"
 print_job_hint
 echo "[$(date '+%F %T')] 完成。验证: SELECT COUNT(*) FROM user_info;"

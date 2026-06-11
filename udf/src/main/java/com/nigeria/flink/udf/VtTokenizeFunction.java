@@ -8,8 +8,9 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * Lookup miss 时兜底：单条调用 VT POST /v2t。
- * 主路径仍是 vt_token_cache 预加载；本 UDF 仅用于增量 SQL 的 COALESCE 兜底。
+ * Lookup miss 或全量阶段 2 兜底：单条调用 VT POST /v2t。
+ * 主路径仍是 vt_token_cache 预加载 + 阶段 1 宽表 mobile_token；
+ * 阶段 2 见 sql/02_sync_user_fast_vt_miss.sql；增量见 02_sync_user_incr.sql COALESCE 兜底。
  * 环境变量 VT_BASE_URL（TaskManager 容器内需可访问）。
  */
 public class VtTokenizeFunction extends ScalarFunction {

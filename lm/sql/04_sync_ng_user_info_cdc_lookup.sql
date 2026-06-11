@@ -3,12 +3,13 @@
 -- 试跑: LM_MIGRATION_LIMIT=20 bash lm/scripts/run-ng-user-info-cdc-lookup.sh
 -- 全量: LM_MIGRATION_LIMIT=2147483647 FLINK_PARALLELISM=8 bash lm/scripts/run-ng-user-info-cdc-lookup.sh
 -- 前置: LM_MYSQL_USER 需 REPLICATION SLAVE/CLIENT 权限（CDC binlog 快照）
+-- 说明: 用 Streaming + scan.startup.mode=snapshot（有界快照），与项目内 02_sync_user_* CDC 一致；
+--       Batch+多路 CDC 在本环境 planning 失败且 sql-client 仍 exit 0，故不用 batch。
 
-SET 'execution.runtime-mode' = 'batch';
-SET 'table.dml-sync' = 'true';
-SET 'table.exec.sink.not-null-enforcer' = 'DROP';
-SET 'table.optimizer.dim-lookup-join.batch.enabled' = 'true';
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
+SET 'execution.checkpointing.interval' = '120s';
+SET 'table.exec.sink.not-null-enforcer' = 'DROP';
+SET 'pipeline.name' = 'sink_user_info_cdc';
 
 CREATE TABLE cdc_mkt_user (
     id              DECIMAL(20, 0),
