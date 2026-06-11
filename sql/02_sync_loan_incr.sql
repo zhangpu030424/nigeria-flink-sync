@@ -5,11 +5,11 @@ SET 'table.exec.mini-batch.allow-latency' = '2s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
 CREATE TABLE IF NOT EXISTS src_loan_staging (
-    id BIGINT, loan_no STRING, application_no STRING, `period` BIGINT, roll_sequence BIGINT,
+    id BIGINT, loan_no STRING, application_no STRING, `period` INT, roll_sequence INT,
     start_date DATE, due_date DATE, due_date_final DATE,
     principal_minor BIGINT, interest_minor BIGINT, admin_fee_minor BIGINT, roll_fee_minor BIGINT,
     penalty_amount_minor BIGINT, reduction_amount_minor BIGINT, total_amount_minor BIGINT,
-    paid_amount_minor BIGINT, roll_paid_amount_minor BIGINT, paid_time_ms BIGINT, paid_off_date DATE, risk_status BIGINT,
+    paid_amount_minor BIGINT, roll_paid_amount_minor BIGINT, paid_time_ms BIGINT, paid_off_date DATE, risk_status INT,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
