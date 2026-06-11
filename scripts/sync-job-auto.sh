@@ -11,6 +11,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
+SYNC_SCRIPT_VERSION="monitor-v2-stable5-exact"
+
 JOB_KEY="${1:-}"
 shift || true
 [[ -z "$JOB_KEY" ]] && { echo "用法: $0 <job_key> [--incr-only] [--no-vt] [--keep-other-jobs] [--bulk-start-ms MS]"; exit 1; }
@@ -290,19 +293,16 @@ monitor_bulk_until_stable() {
       return 0
     fi
 
-    if [[ "$job_running" -eq 0 ]]; then
-      if [[ "$reached" == "1" ]]; then
-        log "[${phase_label}] ✓ Job 已结束且宽表=${src_cnt} 目标=${tgt_cnt} 数量一致"
-        return 0
-      fi
+    if [[ "$job_running" -eq 0 && "$reached" != "1" ]]; then
       grace=$((grace + 1))
       if [[ "$grace" -le "$BULK_GRACE_ROUNDS" ]]; then
         log "[${phase_label}] Job 已结束，宽表=${src_cnt} 目标=${tgt_cnt} 未一致，等待刷盘 ${grace}/${BULK_GRACE_ROUNDS}"
+        stable=0
         prev_target="$tgt_cnt"
         sleep "$POLL_SEC"
         continue
       fi
-      log "[${phase_label}] ✗ Job 已结束但宽表=${src_cnt} 目标=${tgt_cnt} 数量不一致（进度 ${progress}%）"
+      log "[${phase_label}] ✗ Job 已结束但宽表=${src_cnt} 目标=${tgt_cnt} 数量不一致（进度 ${progress}%），不切增量"
       return 1
     fi
 
@@ -392,6 +392,7 @@ fi
 resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
 BULK_START_MS_ARG="$BULK_START_MS"
 log "========== 全量 ${FULL_SQL} =========="
+log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 宽表=目标一致=${SYNC_REQUIRE_EXACT_COUNT}"
 log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
 
 if [[ "$KEEP_OTHER" -eq 0 ]]; then
