@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
-SYNC_SCRIPT_VERSION="monitor-v2-stable5-exact"
+SYNC_SCRIPT_VERSION="monitor-v2-stable5-exact-retry"
 
 JOB_KEY="${1:-}"
 shift || true
@@ -104,6 +104,7 @@ POLL_SEC="${SYNC_POLL_SEC:-3}"
 STABLE_ROUNDS="${SYNC_STABLE_ROUNDS:-5}"
 MIN_RATE_TO_STABLE="${SYNC_MIN_RATE:-200}"
 BULK_GRACE_ROUNDS="${BULK_GRACE_ROUNDS:-10}"
+BULK_SHORT_RETRY_MAX="${BULK_SHORT_RETRY_MAX:-2}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 
@@ -311,6 +312,58 @@ monitor_bulk_until_stable() {
   done
 }
 
+log_bulk_sync_counts() {
+  local phase_label="${1:-}"
+  local hit_cnt miss_cnt total_cnt tgt_cnt
+  hit_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "${VT_SRC_HAS_TOKEN_SQL:-SELECT 0}")
+  miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "${VT_SRC_MISS_SQL:-SELECT 0}")
+  total_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$SRC_CNT_SQL")
+  tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+  log "[${phase_label}] 计数快照: 有token=${hit_cnt} 待VT=${miss_cnt} 宽表总量=${total_cnt} 目标=${tgt_cnt}"
+}
+
+# 未达标时重提 batch（upsert 幂等）；返回 0=达标，1=彻底失败
+monitor_bulk_with_retry() {
+  local phase_label="$1"
+  local src_sql="$2"
+  local job_id="$3"
+  local attempt=0
+
+  while (( attempt <= BULK_SHORT_RETRY_MAX )); do
+    if [[ "$attempt" -gt 0 ]]; then
+      log "[${phase_label}] 未达标，重提 batch Job (${attempt}/${BULK_SHORT_RETRY_MAX})"
+      submit_bulk
+      job_id=$(capture_new_job_id "$(list_running_job_ids | tr '\n' ' ')")
+      [[ -z "$job_id" ]] && { log "[${phase_label}] ✗ 重试后未捕获 Job id"; return 1; }
+      log "[${phase_label}] 重试 Job id=${job_id}"
+    fi
+    if monitor_bulk_until_stable "$phase_label" "$src_sql" "$job_id"; then
+      BULK_JOB_ID="$job_id"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# 阶段 1 未达标但「目标=有token数」且仍有待 VT → 允许进阶段 2
+phase1_done_with_miss_pending() {
+  local hit_cnt miss_cnt tgt_cnt
+  [[ -z "$VT_SRC_HAS_TOKEN_SQL" || -z "$VT_SRC_MISS_SQL" ]] && return 1
+  hit_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$VT_SRC_HAS_TOKEN_SQL")
+  miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$VT_SRC_MISS_SQL")
+  tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+  [[ "$hit_cnt" =~ ^[0-9]+$ && "$miss_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ ]] || return 1
+  [[ "$miss_cnt" -gt 0 && "$tgt_cnt" -eq "$hit_cnt" ]]
+}
+
 # VT 两阶段全量：阶段 1 已有 token；阶段 2 无 token 行 UDF 调 /v2t
 VT_MISS_RUNNER=""
 VT_SRC_HAS_TOKEN_SQL=""
@@ -324,7 +377,7 @@ resolve_vt_two_phase() {
   VT_SRC_MISS_SQL=""
   case "$JOB_KEY" in
     user)
-      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
       VT_SRC_PHASE1_SQL="$VT_SRC_HAS_TOKEN_SQL"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
       VT_MISS_RUNNER="run-user-fast-vt-miss.sh"
@@ -352,16 +405,27 @@ resolve_vt_two_phase() {
 
 run_vt_bulk_two_phase() {
   log "========== ${JOB_KEY} 全量阶段 1/2：已有 VT token（不调 /v2t）=========="
+  log_bulk_sync_counts "phase1-before"
+  log "阶段 1 监控口径: ${VT_SRC_PHASE1_SQL:-$VT_SRC_HAS_TOKEN_SQL}"
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
-  monitor_bulk_until_stable "${JOB_KEY}-vt-hit" "${VT_SRC_PHASE1_SQL:-$VT_SRC_HAS_TOKEN_SQL}" "$BULK_JOB_ID"
+  if ! monitor_bulk_with_retry "${JOB_KEY}-vt-hit" "${VT_SRC_PHASE1_SQL:-$VT_SRC_HAS_TOKEN_SQL}" "$BULK_JOB_ID"; then
+    if phase1_done_with_miss_pending; then
+      log "WARN: 阶段 1 监控未过终检，但目标=有token数且仍有待VT，进入阶段 2"
+      log_bulk_sync_counts "phase1-fallback"
+    else
+      log "✗ 阶段 1 未达标且无法进入阶段 2"
+      exit 1
+    fi
+  fi
 
   local miss_cnt
   miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
     "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$VT_SRC_MISS_SQL")
   if [[ "$miss_cnt" =~ ^[0-9]+$ && "$miss_cnt" -gt 0 ]]; then
     log "========== ${JOB_KEY} 全量阶段 2/2：待 VT 补全 ${miss_cnt} 条，运行时 UDF 调 /v2t =========="
+    log_bulk_sync_counts "phase2-before"
     local vt_miss_par="${FLINK_PARALLELISM_VT_MISS:-2}"
     log "VT 补全并行度: FLINK_PARALLELISM=${vt_miss_par}"
     local before_vt
@@ -370,7 +434,7 @@ run_vt_bulk_two_phase() {
     "./scripts/${VT_MISS_RUNNER}"
     BULK_JOB_ID=$(capture_new_job_id "$before_vt")
     log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
-    monitor_bulk_until_stable "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL" "$BULK_JOB_ID"
+    monitor_bulk_with_retry "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL" "$BULK_JOB_ID"
   else
     log "无待 VT 补全记录，跳过阶段 2"
     BULK_JOB_ID=""
@@ -436,7 +500,7 @@ else
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE} 达标后 cancel..."
-  monitor_bulk_until_stable "bulk" "$SRC_CNT_SQL" "$BULK_JOB_ID"
+  monitor_bulk_with_retry "bulk" "$SRC_CNT_SQL" "$BULK_JOB_ID"
 fi
 
 log "========== 全量终检：宽表 vs 目标 =========="
