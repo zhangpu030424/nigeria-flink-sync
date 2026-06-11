@@ -55,6 +55,6 @@ SELECT
     mobile,
     CAST(0 AS BIGINT),
     COALESCE(device_id, ''),
-    CAST(UNIX_TIMESTAMP(create_time) * 1000 AS BIGINT),
+    CAST(UNIX_TIMESTAMP(CAST(create_time AS STRING)) * 1000 AS BIGINT),
     CAST(0 AS TINYINT)
 FROM src_user_min;

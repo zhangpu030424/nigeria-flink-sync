@@ -93,7 +93,7 @@ SELECT
     u.mobile,
     CAST(0 AS BIGINT),
     COALESCE(u.device_id, ''),
-    CAST(UNIX_TIMESTAMP(u.create_time) * 1000 AS BIGINT),
+    CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) * 1000 AS BIGINT),
     CAST(0 AS TINYINT),
     CASE
         WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL

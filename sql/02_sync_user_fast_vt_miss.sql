@@ -97,7 +97,7 @@ FROM (
         vt_tokenize(s.mobile_norm) AS mobile_token,
         CAST(0 AS BIGINT) AS closed_time,
         COALESCE(s.device_id, '') AS reg_device_uuid,
-        CAST(UNIX_TIMESTAMP(s.create_time) * 1000 AS BIGINT) AS reg_time,
+        CAST(UNIX_TIMESTAMP(CAST(s.create_time AS STRING)) * 1000 AS BIGINT) AS reg_time,
         CAST(0 AS TINYINT) AS test_flag,
         CASE
             WHEN COALESCE(NULLIF(TRIM(s.network_name), ''), NULLIF(TRIM(s.tracker_name), '')) IS NULL
