@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS src_user_staging_miss (
     app_code STRING,
     mobile STRING,
     device_id STRING,
-    create_time TIMESTAMP(3),
+    reg_time BIGINT,
     network_name STRING,
     tracker_name STRING,
     campaign_tracker STRING,
@@ -97,7 +97,7 @@ FROM (
         vt_tokenize(s.mobile_norm) AS mobile_token,
         CAST(0 AS BIGINT) AS closed_time,
         COALESCE(s.device_id, '') AS reg_device_uuid,
-        CAST(UNIX_TIMESTAMP(CAST(s.create_time AS STRING)) * 1000 AS BIGINT) AS reg_time,
+        COALESCE(s.reg_time, CAST(0 AS BIGINT)) AS reg_time,
         CAST(0 AS TINYINT) AS test_flag,
         CASE
             WHEN COALESCE(NULLIF(TRIM(s.network_name), ''), NULLIF(TRIM(s.tracker_name), '')) IS NULL

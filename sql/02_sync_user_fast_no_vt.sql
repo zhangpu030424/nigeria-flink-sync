@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS src_user_staging (
     app_code STRING,
     mobile STRING,
     device_id STRING,
-    create_time TIMESTAMP(3),
+    reg_time BIGINT,
     network_name STRING,
     tracker_name STRING,
     campaign_tracker STRING,
@@ -74,7 +74,7 @@ SELECT
     mobile,
     CAST(0 AS BIGINT),
     COALESCE(device_id, ''),
-    CAST(UNIX_TIMESTAMP(CAST(create_time AS STRING)) * 1000 AS BIGINT),
+    COALESCE(reg_time, CAST(0 AS BIGINT)),
     CAST(0 AS TINYINT),
     CASE
         WHEN COALESCE(NULLIF(TRIM(network_name), ''), NULLIF(TRIM(tracker_name), '')) IS NULL

@@ -95,12 +95,12 @@ LOG_DIR="logs"
 LOG_FILE="${LOG_DIR}/sync-${JOB_KEY}-auto.log"
 mkdir -p "$LOG_DIR"
 
-SYNC_THRESHOLD_PCT="${SYNC_THRESHOLD_PCT:-95.5}"
+SYNC_THRESHOLD_PCT="${SYNC_THRESHOLD_PCT:-100}"
+SYNC_REQUIRE_EXACT_COUNT="${SYNC_REQUIRE_EXACT_COUNT:-1}"
 POLL_SEC="${SYNC_POLL_SEC:-3}"
-STABLE_ROUNDS="${SYNC_STABLE_ROUNDS:-3}"
+STABLE_ROUNDS="${SYNC_STABLE_ROUNDS:-5}"
 MIN_RATE_TO_STABLE="${SYNC_MIN_RATE:-200}"
-BULK_JOB_WAIT_SEC="${BULK_JOB_WAIT_SEC:-7200}"
-BULK_JOB_POLL_SEC="${BULK_JOB_POLL_SEC:-5}"
+BULK_GRACE_ROUNDS="${BULK_GRACE_ROUNDS:-10}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 
@@ -111,6 +111,36 @@ log() {
 mysql_count() {
   local host=$1 port=$2 user=$3 pass=$4 db=$5 sql=$6
   MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
+}
+
+# 全量达标：默认要求宽表计数 == 目标表计数；SYNC_REQUIRE_EXACT_COUNT=0 时按 SYNC_THRESHOLD_PCT 百分比
+bulk_count_reached() {
+  local src="$1"
+  local tgt="$2"
+  [[ "$src" =~ ^[0-9]+$ && "$tgt" =~ ^[0-9]+$ && "$src" -gt 0 ]] || return 1
+  if [[ "$SYNC_REQUIRE_EXACT_COUNT" == "1" ]]; then
+    [[ "$tgt" -eq "$src" ]]
+  else
+    awk "BEGIN {exit !(($tgt * 100 / $src) >= $SYNC_THRESHOLD_PCT)}"
+  fi
+}
+
+verify_staging_target_count() {
+  local src_cnt tgt_cnt
+  src_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$SRC_CNT_SQL")
+  tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+  if [[ ! "$src_cnt" =~ ^[0-9]+$ || ! "$tgt_cnt" =~ ^[0-9]+$ ]]; then
+    log "✗ 无法读取宽表/目标计数（宽表=${src_cnt} 目标=${tgt_cnt}）"
+    return 1
+  fi
+  if [[ "$src_cnt" -ne "$tgt_cnt" ]]; then
+    log "✗ 宽表与目标表数量不一致：宽表=${src_cnt} 目标=${tgt_cnt} 差=$((tgt_cnt - src_cnt))"
+    return 1
+  fi
+  log "✓ 宽表与目标表数量一致：${src_cnt}"
+  return 0
 }
 
 list_running_job_ids() {
@@ -193,54 +223,18 @@ submit_bulk() {
   fi
 }
 
-# 全量 batch Job 跑完自然 FINISHED（不再按目标库计数达标后 cancel）
-wait_for_bulk_job() {
-  local job_id="$1"
-  local phase_label="$2"
-  local src_sql="${3:-}"
-  local waited=0
-  local prev_target=""
-
-  [[ -z "$job_id" ]] && { log "[$phase_label] 无 Job id，跳过等待"; return 0; }
-
-  while (( waited < BULK_JOB_WAIT_SEC )); do
-    if ! list_running_job_ids | grep -qx "$job_id"; then
-      log "[$phase_label] Job ${job_id} 已结束（FINISHED/CANCELED/FAILED）"
-      return 0
-    fi
-    if [[ -n "$src_sql" ]]; then
-      src_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
-        "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$src_sql")
-      tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
-        "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
-      progress="n/a"
-      rate="n/a"
-      if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-        progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
-      fi
-      if [[ "$tgt_cnt" =~ ^[0-9]+$ && "$prev_target" =~ ^[0-9]+$ ]]; then
-        delta=$((tgt_cnt - prev_target))
-        rate=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $BULK_JOB_POLL_SEC}")
-      fi
-      log "[$phase_label] 等待 Job ${job_id} … 目标=${tgt_cnt} 源=${src_cnt} 进度=${progress}% 速率≈${rate}/min (${waited}s)"
-      prev_target="$tgt_cnt"
-    else
-      log "[$phase_label] 等待 Job ${job_id} … (${waited}s)"
-    fi
-    sleep "$BULK_JOB_POLL_SEC"
-    waited=$((waited + BULK_JOB_POLL_SEC))
-  done
-  log "[$phase_label] ✗ 等待 Job ${job_id} 超时 ${BULK_JOB_WAIT_SEC}s"
-  return 1
-}
-
-# 监控全量进度直至达标（进度≥阈值 且 低速稳定 SYNC_STABLE_ROUNDS 轮）— 已弃用，保留供手工调试
+# 全量：进度≥阈值 且 低速稳定 STABLE_ROUNDS 轮 → cancel Job → 切增量
+# batch Job 提前 FINISHED 且未达标：再等 BULK_GRACE_ROUNDS 轮刷盘，仍不足则失败
 monitor_bulk_until_stable() {
   local phase_label="$1"
   local src_sql="$2"
+  local job_id="${3:-}"
   local prev_target=""
   local stable=0
   local round=0
+  local grace=0
+
+  [[ -z "$job_id" ]] && { log "[${phase_label}] ✗ 无 Job id，无法监控全量"; return 1; }
 
   while true; do
     round=$((round + 1))
@@ -251,31 +245,67 @@ monitor_bulk_until_stable() {
 
     progress="n/a"
     rate="n/a"
+    reached=0
     if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
       progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+      if bulk_count_reached "$src_cnt" "$tgt_cnt"; then
+        reached=1
+      fi
     fi
     if [[ "$tgt_cnt" =~ ^[0-9]+$ && "$prev_target" =~ ^[0-9]+$ ]]; then
       delta=$((tgt_cnt - prev_target))
       rate=$(awk "BEGIN {printf \"%.0f\", $delta * 60 / $POLL_SEC}")
     fi
 
-    log "[${phase_label}] #${round} 目标=${tgt_cnt} 源=${src_cnt} 进度=${progress}% 速率≈${rate}/min 阈值=${SYNC_THRESHOLD_PCT}%"
+    job_running=0
+    if list_running_job_ids | grep -qx "$job_id"; then
+      job_running=1
+    fi
+    job_state="DONE"
+    [[ "$job_running" -eq 1 ]] && job_state="RUNNING"
+
+    local match_hint="需一致"
+    [[ "$SYNC_REQUIRE_EXACT_COUNT" != "1" ]] && match_hint="≥${SYNC_THRESHOLD_PCT}%"
+    log "[${phase_label}] #${round} 宽表=${src_cnt} 目标=${tgt_cnt} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
 
     switch=0
-    if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-      reached=$(awk "BEGIN {print ($tgt_cnt * 100 / $src_cnt) >= $SYNC_THRESHOLD_PCT}")
-      if [[ "$reached" == "1" ]]; then
-        if [[ "$rate" == "n/a" ]] || [[ "$rate" -lt "$MIN_RATE_TO_STABLE" ]]; then
-          stable=$((stable + 1))
-          log "[${phase_label}] 进度已达阈值，稳定 ${stable}/${STABLE_ROUNDS}"
-          [[ "$stable" -ge "$STABLE_ROUNDS" ]] && switch=1
-        else
-          stable=0
-        fi
+    if [[ "$reached" == "1" ]]; then
+      if [[ "$rate" == "n/a" ]] || [[ "$rate" -lt "$MIN_RATE_TO_STABLE" ]]; then
+        stable=$((stable + 1))
+        log "[${phase_label}] 宽表与目标数量达标，稳定 ${stable}/${STABLE_ROUNDS}"
+        [[ "$stable" -ge "$STABLE_ROUNDS" ]] && switch=1
+      else
+        stable=0
       fi
+    else
+      stable=0
     fi
 
-    [[ "$switch" -eq 1 ]] && return 0
+    if [[ "$switch" -eq 1 ]]; then
+      if [[ "$job_running" -eq 1 ]]; then
+        log "[${phase_label}] 达标且稳定，cancel 全量 Job ${job_id}"
+        cancel_job_id "$job_id" ""
+      fi
+      log "[${phase_label}] ✓ 全量完成（宽表=${src_cnt} 目标=${tgt_cnt}）"
+      return 0
+    fi
+
+    if [[ "$job_running" -eq 0 ]]; then
+      if [[ "$reached" == "1" ]]; then
+        log "[${phase_label}] ✓ Job 已结束且宽表=${src_cnt} 目标=${tgt_cnt} 数量一致"
+        return 0
+      fi
+      grace=$((grace + 1))
+      if [[ "$grace" -le "$BULK_GRACE_ROUNDS" ]]; then
+        log "[${phase_label}] Job 已结束，宽表=${src_cnt} 目标=${tgt_cnt} 未一致，等待刷盘 ${grace}/${BULK_GRACE_ROUNDS}"
+        prev_target="$tgt_cnt"
+        sleep "$POLL_SEC"
+        continue
+      fi
+      log "[${phase_label}] ✗ Job 已结束但宽表=${src_cnt} 目标=${tgt_cnt} 数量不一致（进度 ${progress}%）"
+      return 1
+    fi
+
     prev_target="$tgt_cnt"
     sleep "$POLL_SEC"
   done
@@ -284,30 +314,36 @@ monitor_bulk_until_stable() {
 # VT 两阶段全量：阶段 1 已有 token；阶段 2 无 token 行 UDF 调 /v2t
 VT_MISS_RUNNER=""
 VT_SRC_HAS_TOKEN_SQL=""
+VT_SRC_PHASE1_SQL=""
 VT_SRC_MISS_SQL=""
 
 resolve_vt_two_phase() {
   VT_MISS_RUNNER=""
   VT_SRC_HAS_TOKEN_SQL=""
+  VT_SRC_PHASE1_SQL=""
   VT_SRC_MISS_SQL=""
   case "$JOB_KEY" in
     user)
       VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>''"
+      VT_SRC_PHASE1_SQL="$VT_SRC_HAS_TOKEN_SQL"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_sync_staging WHERE mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'' AND (mobile_token IS NULL OR TRIM(mobile_token)='')"
       VT_MISS_RUNNER="run-user-fast-vt-miss.sh"
       ;;
     user_info)
       VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_info_sync_staging WHERE id_number_token IS NOT NULL AND TRIM(id_number_token)<>''"
+      VT_SRC_PHASE1_SQL="SELECT COUNT(*) FROM user_info_sync_staging WHERE (bvn_raw IS NULL OR TRIM(bvn_raw)='') OR (id_number_token IS NOT NULL AND TRIM(id_number_token)<>'')"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_info_sync_staging WHERE bvn_raw IS NOT NULL AND TRIM(bvn_raw)<>'' AND (id_number_token IS NULL OR TRIM(id_number_token)='')"
       VT_MISS_RUNNER="run-user-info-fast-vt-miss.sh"
       ;;
     user_bankcard)
       VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>''"
+      VT_SRC_PHASE1_SQL="$VT_SRC_HAS_TOKEN_SQL"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_raw IS NOT NULL AND TRIM(bank_account_raw)<>'' AND (bank_account_token IS NULL OR TRIM(bank_account_token)='')"
       VT_MISS_RUNNER="run-user-bankcard-fast-vt-miss.sh"
       ;;
     application)
       VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM application_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>'' AND id_number_token IS NOT NULL AND TRIM(id_number_token)<>'' AND bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>''"
+      VT_SRC_PHASE1_SQL="SELECT COUNT(*) FROM application_sync_staging WHERE mobile_token IS NOT NULL AND TRIM(mobile_token)<>'' AND bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>'' AND ((bvn_raw IS NULL OR TRIM(bvn_raw)='') OR (id_number_token IS NOT NULL AND TRIM(id_number_token)<>''))"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM application_sync_staging WHERE ((mobile_token IS NULL OR TRIM(mobile_token)='') AND mobile_norm IS NOT NULL AND TRIM(mobile_norm)<>'') OR ((id_number_token IS NULL OR TRIM(id_number_token)='') AND bvn_raw IS NOT NULL AND TRIM(bvn_raw)<>'') OR ((bank_account_token IS NULL OR TRIM(bank_account_token)='') AND bank_account_raw IS NOT NULL AND TRIM(bank_account_raw)<>'')"
       VT_MISS_RUNNER="run-application-fast-vt-miss.sh"
       ;;
@@ -319,7 +355,7 @@ run_vt_bulk_two_phase() {
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
   log "阶段 1 Job id=${BULK_JOB_ID:-unknown}"
-  wait_for_bulk_job "$BULK_JOB_ID" "${JOB_KEY}-vt-hit" "$VT_SRC_HAS_TOKEN_SQL"
+  monitor_bulk_until_stable "${JOB_KEY}-vt-hit" "${VT_SRC_PHASE1_SQL:-$VT_SRC_HAS_TOKEN_SQL}" "$BULK_JOB_ID"
 
   local miss_cnt
   miss_cnt=$(mysql_count "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
@@ -334,7 +370,7 @@ run_vt_bulk_two_phase() {
     "./scripts/${VT_MISS_RUNNER}"
     BULK_JOB_ID=$(capture_new_job_id "$before_vt")
     log "阶段 2 Job id=${BULK_JOB_ID:-unknown}"
-    wait_for_bulk_job "$BULK_JOB_ID" "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL"
+    monitor_bulk_until_stable "${JOB_KEY}-vt-miss" "$SRC_CNT_SQL" "$BULK_JOB_ID"
   else
     log "无待 VT 补全记录，跳过阶段 2"
     BULK_JOB_ID=""
@@ -398,9 +434,12 @@ if [[ -n "$VT_MISS_RUNNER" ]]; then
 else
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
-  log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，等待 batch 完成 ${MONITOR_TABLE}..."
-  wait_for_bulk_job "$BULK_JOB_ID" "bulk" "$SRC_CNT_SQL"
+  log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE} 达标后 cancel..."
+  monitor_bulk_until_stable "bulk" "$SRC_CNT_SQL" "$BULK_JOB_ID"
 fi
+
+log "========== 全量终检：宽表 vs 目标 =========="
+verify_staging_target_count
 
 log "========== 切增量 ${INCR_SQL} =========="
 start_incr "$BULK_START_MS"
