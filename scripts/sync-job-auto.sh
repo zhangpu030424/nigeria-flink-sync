@@ -4,6 +4,7 @@
 # 用法:
 #   ./scripts/sync-job-auto.sh user
 #   ./scripts/sync-job-auto.sh user --incr-only
+#   ./scripts/sync-job-auto.sh user --bulk-only    # 只全量，不切增量
 #   ./scripts/sync-job-auto.sh user --no-vt
 #   ./scripts/sync-job-auto.sh user --keep-other-jobs    # 不取消其他 RUNNING Job（多 Job 串联用）
 #   ./scripts/sync-job-auto.sh user --bulk-start-ms 1710000000000
@@ -16,15 +17,17 @@ SYNC_SCRIPT_VERSION="monitor-v2-user-pk-dedup"
 
 JOB_KEY="${1:-}"
 shift || true
-[[ -z "$JOB_KEY" ]] && { echo "用法: $0 <job_key> [--incr-only] [--no-vt] [--keep-other-jobs] [--bulk-start-ms MS]"; exit 1; }
+[[ -z "$JOB_KEY" ]] && { echo "用法: $0 <job_key> [--incr-only|--bulk-only] [--no-vt] [--keep-other-jobs] [--bulk-start-ms MS]"; exit 1; }
 
 INCR_ONLY=0
+BULK_ONLY=0
 NO_VT=0
 KEEP_OTHER=0
 BULK_START_MS_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --incr-only) INCR_ONLY=1 ;;
+    --bulk-only) BULK_ONLY=1 ;;
     --no-vt) NO_VT=1 ;;
     --keep-other-jobs) KEEP_OTHER=1 ;;
     --bulk-start-ms=*) BULK_START_MS_ARG="${1#--bulk-start-ms=}" ;;
@@ -445,6 +448,11 @@ run_vt_bulk_two_phase() {
 # shellcheck source=scripts/lib/bulk-start-ms.sh
 source "$(dirname "$0")/lib/bulk-start-ms.sh"
 
+if [[ "$INCR_ONLY" -eq 1 && "$BULK_ONLY" -eq 1 ]]; then
+  echo "ERR: --incr-only 与 --bulk-only 不能同时使用"
+  exit 1
+fi
+
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
   if [[ "$KEEP_OTHER" -eq 0 ]]; then
@@ -506,6 +514,11 @@ fi
 
 log "========== 全量终检：宽表 vs 目标 =========="
 verify_staging_target_count
+
+if [[ "$BULK_ONLY" -eq 1 ]]; then
+  log "[$JOB_KEY] --bulk-only：全量完成，未切增量。日志: ${LOG_FILE}"
+  exit 0
+fi
 
 log "========== 切增量 ${INCR_SQL} =========="
 start_incr "$BULK_START_MS"
