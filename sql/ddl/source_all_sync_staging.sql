@@ -117,10 +117,18 @@ SELECT p.user_id,
                        'gender', p.gender,
                        'registration_ip', reg_ip.ip,
                        'salary', CASE
-                                     WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS JSON)
-                                     ELSE CAST(REPLACE(TRIM(wr.monthly_income), ',', '') AS UNSIGNED)
+                                     WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN NULL
+                                     WHEN LENGTH(REPLACE(TRIM(wr.monthly_income), ',', '')) BETWEEN 1 AND 19
+                                         AND REPLACE(TRIM(wr.monthly_income), ',', '') REGEXP '^[0-9]+$'
+                                         THEN CAST(CAST(REPLACE(TRIM(wr.monthly_income), ',', '') AS UNSIGNED) AS JSON)
+                                     ELSE NULL
                            END,
-                       'credit_limit', cc.credit_limit,
+                       'credit_limit', CASE
+                                           WHEN cc.credit_limit IS NULL THEN NULL
+                                           WHEN CAST(cc.credit_limit AS CHAR) REGEXP '^[0-9]{1,19}$'
+                                               THEN cc.credit_limit
+                                           ELSE NULL
+                           END,
                        'company', NULLIF(TRIM(wr.company_name), ''),
                        'install_source', CASE
                                              WHEN COALESCE(NULLIF(TRIM(adj.network_name), ''), NULLIF(TRIM(adj.tracker_name), '')) IS NULL
