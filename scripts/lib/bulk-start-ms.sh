@@ -33,26 +33,44 @@ bulk_start_ms_now() {
     ms=$(bulk_start_ms_from_host)
     echo ">> WARN: 无法从源库取时间戳，回退本机 epoch（请检查 SOURCE_MYSQL_* 与 mysql 客户端）" >&2
   fi
+  BULK_START_MS="$ms"
   BULK_START_SOURCE="$src"
-  echo "$ms"
 }
 
-bulk_start_iso_ng() {
-  # 源库 / Flink 业务时区（与 SQL 中 server-time-zone=Africa/Lagos 一致）
-  TZ=Africa/Lagos date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null \
-    || python3 -c "from datetime import datetime, timezone, timedelta; print(datetime.fromtimestamp(${BULK_START_MS}/1000, timezone(timedelta(hours=1))).strftime('%Y-%m-%d %H:%M:%S WAT'))"
+bulk_start_iso_from_ms() {
+  # mode: wat | utc | host — 把同一 Unix epoch 毫秒格式化成可读时刻
+  local ms="$1"
+  local mode="$2"
+  local label="$3"
+  python3 -c "
+from datetime import datetime, timezone, timedelta
+ms = int('${ms}')
+mode = '${mode}'
+label = '${label}'
+dt_utc = datetime.fromtimestamp(ms / 1000, timezone.utc)
+if mode == 'wat':
+    try:
+        from zoneinfo import ZoneInfo
+        dt = dt_utc.astimezone(ZoneInfo('Africa/Lagos'))
+    except Exception:
+        dt = dt_utc.astimezone(timezone(timedelta(hours=1)))
+elif mode == 'utc':
+    dt = dt_utc
+else:
+    dt = datetime.fromtimestamp(ms / 1000).astimezone()
+print(dt.strftime('%Y-%m-%d %H:%M:%S') + ' ' + label)
+" 2>/dev/null || echo "${ms}ms"
 }
 
 record_bulk_start_ms() {
   local log_dir="${1:-logs}"
   mkdir -p "$log_dir"
   local f="${log_dir}/bulk-start-ms.env"
-  export BULK_START_MS
-  BULK_START_MS="$(bulk_start_ms_now)"
-  BULK_START_ISO_HOST="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  BULK_START_ISO_NG="$(bulk_start_iso_ng)"
-  BULK_START_ISO_UTC="$(TZ=UTC date '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date -u '+%Y-%m-%d %H:%M:%SZ')"
-  BULK_START_SOURCE="${BULK_START_SOURCE:-host}"
+  bulk_start_ms_now
+  export BULK_START_MS BULK_START_SOURCE
+  BULK_START_ISO_NG="$(bulk_start_iso_from_ms "$BULK_START_MS" "wat" "WAT")"
+  BULK_START_ISO_UTC="$(bulk_start_iso_from_ms "$BULK_START_MS" "utc" "UTC")"
+  BULK_START_ISO_HOST="$(bulk_start_iso_from_ms "$BULK_START_MS" "host" "$(date +%Z 2>/dev/null || echo HOST)")"
   cat > "$f" <<EOF
 # 流水线锁定时刻（毫秒 Unix epoch）。CDC scan.startup.timestamp-millis 用此值。
 # 优先 source_mysql：源库 NOW() @ Africa/Lagos → UNIX_TIMESTAMP，与 binlog 时间轴对齐。
@@ -64,9 +82,11 @@ BULK_START_ISO_UTC=${BULK_START_ISO_UTC}
 BULK_START_ISO_HOST=${BULK_START_ISO_HOST}
 EOF
   echo ">> 锁定 bulk-start-ms=${BULK_START_MS}（来源: ${BULK_START_SOURCE}）"
-  echo ">>   尼日利亚(WAT): ${BULK_START_ISO_NG}"
+  echo ">>   尼日利亚(WAT): ${BULK_START_ISO_NG}  ← CDC/binlog 对齐看这一行"
   echo ">>   UTC:           ${BULK_START_ISO_UTC}"
-  echo ">>   本机显示:      ${BULK_START_ISO_HOST}"
+  if [[ "${BULK_START_SOURCE}" == "host" ]]; then
+    echo ">>   运维机时钟:    ${BULK_START_ISO_HOST}（仅 epoch 来源为 host 时的参考，非 CDC 时区）"
+  fi
   echo ">> 已写入 ${f}"
 }
 
@@ -94,7 +114,7 @@ resolve_bulk_start_ms() {
   if load_bulk_start_ms; then
     return 0
   fi
-  export BULK_START_MS
-  BULK_START_MS="$(bulk_start_ms_now)"
-  echo ">> WARN: 无 logs/bulk-start-ms.env，临时使用 bulk-start-ms=${BULK_START_MS}"
+  bulk_start_ms_now
+  export BULK_START_MS BULK_START_SOURCE
+  echo ">> WARN: 无 logs/bulk-start-ms.env，临时使用 bulk-start-ms=${BULK_START_MS}（来源: ${BULK_START_SOURCE}）"
 }
