@@ -6,6 +6,7 @@
 # 用法:
 #   ./scripts/sync-pipeline-auto.sh
 #   ./scripts/sync-pipeline-auto.sh --skip-staging     # 宽表已建好，仍用已存 bulk-start-ms
+#   ./scripts/sync-pipeline-auto.sh --skip-vt          # 重建宽表时跳过 vt_seed + vt-preload
 #   ./scripts/sync-pipeline-auto.sh --jobs user,user_info
 #   ./scripts/sync-pipeline-auto.sh --incr-only      # 仅提交增量（读 logs/bulk-start-ms.env）
 #
@@ -13,10 +14,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SKIP_STAGING=0
+SKIP_VT=0
 INCR_ONLY=0
 JOBS_FILTER=""
 for arg in "$@"; do
   [[ "$arg" == "--skip-staging" ]] && SKIP_STAGING=1
+  [[ "$arg" == "--skip-vt" ]] && SKIP_VT=1
   [[ "$arg" == "--incr-only" ]] && INCR_ONLY=1
   [[ "$arg" == --jobs=* ]] && JOBS_FILTER="${arg#--jobs=}"
 done
@@ -106,9 +109,11 @@ fi
 
 if [[ "$SKIP_STAGING" -eq 0 ]]; then
   echo ""
-  echo ">> [1/2] 重建全部宽表（source_all_sync_staging.sql）"
+  echo ">> [1/2] VT 补灌 + 重建全部宽表（vt_seed_all → vt-preload → source_all_sync_staging）"
   echo ">>       起始时刻已锁定，此期间源库 binlog 由后续增量补"
-  ./scripts/rebuild-all-staging.sh
+  REBUILD_ARGS=()
+  [[ "$SKIP_VT" -eq 1 ]] && REBUILD_ARGS+=(--skip-vt)
+  ./scripts/rebuild-all-staging.sh "${REBUILD_ARGS[@]}"
 else
   echo ">> 跳过宽表重建（--skip-staging）"
 fi

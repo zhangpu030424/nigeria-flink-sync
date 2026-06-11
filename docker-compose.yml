@@ -30,8 +30,8 @@ services:
         execution.checkpointing.mode: EXACTLY_ONCE
         table.local-time-zone: Africa/Lagos
     volumes:
-      - flink_checkpoints:/tmp/flink-checkpoints
-      - flink_savepoints:/tmp/flink-savepoints
+      - ./data/flink-checkpoints:/tmp/flink-checkpoints
+      - ./data/flink-savepoints:/tmp/flink-savepoints
       - ./sql:/opt/flink/sql:ro
     networks:
       - flink-network
@@ -62,15 +62,11 @@ services:
         state.checkpoint-storage: filesystem
         table.local-time-zone: Africa/Lagos
     volumes:
-      - flink_checkpoints:/tmp/flink-checkpoints
-      - flink_savepoints:/tmp/flink-savepoints
+      - ./data/flink-checkpoints:/tmp/flink-checkpoints
+      - ./data/flink-savepoints:/tmp/flink-savepoints
       - ./sql:/opt/flink/sql:ro
     networks:
       - flink-network
-
-volumes:
-  flink_checkpoints:
-  flink_savepoints:
 
 networks:
   flink-network:
