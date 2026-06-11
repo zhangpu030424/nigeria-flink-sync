@@ -130,5 +130,7 @@ FROM (
     )
 ) e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''
-  AND e.id_number_token IS NOT NULL AND TRIM(e.id_number_token) <> ''
-  AND e.bank_account_token IS NOT NULL AND TRIM(e.bank_account_token) <> '';
+  AND e.bank_account_token IS NOT NULL AND TRIM(e.bank_account_token) <> ''
+  AND (
+      e.id_number_token IS NOT NULL AND TRIM(e.id_number_token) <> ''
+  );

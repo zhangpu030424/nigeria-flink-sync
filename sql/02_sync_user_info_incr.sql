@@ -1,4 +1,4 @@
--- 增量 user_info：Lookup id_number VT，miss 则 vt_tokenize
+-- 增量 user_info：Lookup id_number VT，miss 则 vt_tokenize；原始 bvn 为空 → id_number 写 ''
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -70,12 +70,14 @@ SELECT e.user_id, e.id_number, e.full_name, '', '', '', e.info_json
 FROM (
     SELECT
         p.user_id + 100000000 AS user_id,
-        COALESCE(NULLIF(TRIM(vt.token), ''), vt_tokenize(TRIM(p.bvn))) AS id_number,
+        CASE
+            WHEN p.bvn IS NULL OR TRIM(p.bvn) = '' THEN CAST('' AS STRING)
+            ELSE COALESCE(NULLIF(TRIM(vt.token), ''), vt_tokenize(TRIM(p.bvn)))
+        END AS id_number,
         TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))) AS full_name,
         CONCAT('{"birthday":"', CAST(p.date_of_birth AS STRING), '","gender":', CAST(COALESCE(p.gender, 0) AS STRING), '}') AS info_json
     FROM src_personal p
     LEFT JOIN dim_vt_id_number FOR SYSTEM_TIME AS OF p.proc_time vt
         ON vt.vt_type = 'id_number' AND vt.status = 1 AND vt.raw_value = TRIM(p.bvn)
-    WHERE p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
 ) e
-WHERE e.id_number IS NOT NULL AND TRIM(e.id_number) <> '';
+WHERE e.id_number IS NOT NULL;

@@ -8,8 +8,9 @@ SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
 CREATE TABLE IF NOT EXISTS src_application_staging (
     id BIGINT, application_no STRING, sn STRING, user_id BIGINT, app_id_num BIGINT,
-    device_uuid STRING, session_id STRING, mobile_token STRING, id_number_token STRING,
-    gaid_idfa_token STRING, bank_code STRING, bank_account_name STRING, bank_account_token STRING,
+    device_uuid STRING, session_id STRING, bvn_raw STRING, gaid_idfa_raw STRING,
+    mobile_token STRING, id_number_token STRING, gaid_idfa_token STRING,
+    bank_code STRING, bank_account_name STRING, bank_account_token STRING,
     product_id STRING, period_days INT, period_count INT, re_loan INT,
     order_time TIMESTAMP(3), disburse_time TIMESTAMP(3), settled_time TIMESTAMP(3),
     last_repayment_time TIMESTAMP(3), credit_limit_minor BIGINT, loan_amount_minor BIGINT,
@@ -59,7 +60,15 @@ SELECT
     application_no, mobile_token, 'ng01', CAST(app_id_num AS INT), '',
     user_id + 100000000, user_id + 100000000, sn,
     CAST(0 AS TINYINT), CAST(CASE WHEN re_loan = 0 THEN 1 ELSE 0 END AS TINYINT), CAST(0 AS TINYINT),
-    id_number_token, gaid_idfa_token, COALESCE(device_uuid, ''), session_id,
+    CASE
+        WHEN bvn_raw IS NULL OR TRIM(bvn_raw) = '' THEN CAST('' AS STRING)
+        ELSE id_number_token
+    END,
+    CASE
+        WHEN gaid_idfa_raw IS NULL OR TRIM(gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
+        ELSE gaid_idfa_token
+    END,
+    COALESCE(device_uuid, ''), session_id,
     COALESCE(bank_code, ''), COALESCE(bank_account_name, ''), bank_account_token,
     product_id, 'PROD-002-D7', '1.0',
     '{"penalty_rate":0.05,"upfront_rate":0.35,"interest_rate":0,"post_paid_rate":0.05}',
@@ -74,4 +83,9 @@ SELECT
     (UNIX_TIMESTAMP(CAST(order_time AS STRING)) + 7 * 86400) * 1000,
     CAST(last_repayment_time AS DATE), CAST(last_repayment_time AS DATE), CAST(risk_status AS TINYINT)
 FROM src_application_staging
-WHERE mobile_token IS NOT NULL AND id_number_token IS NOT NULL AND bank_account_token IS NOT NULL;
+WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> ''
+  AND bank_account_token IS NOT NULL AND TRIM(bank_account_token) <> ''
+  AND (
+      bvn_raw IS NULL OR TRIM(bvn_raw) = ''
+      OR (id_number_token IS NOT NULL AND TRIM(id_number_token) <> '')
+  );

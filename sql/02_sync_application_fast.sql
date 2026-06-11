@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS src_application_staging (
     app_id_num BIGINT,
     device_uuid STRING,
     session_id STRING,
+    bvn_raw STRING,
+    gaid_idfa_raw STRING,
     mobile_token STRING,
     id_number_token STRING,
     gaid_idfa_token STRING,
@@ -75,7 +77,14 @@ SELECT
     CAST(0 AS TINYINT),
     CAST(CASE WHEN re_loan = 0 THEN 1 ELSE 0 END AS TINYINT),
     CAST(0 AS TINYINT),
-    id_number_token, gaid_idfa_token,
+    CASE
+        WHEN bvn_raw IS NULL OR TRIM(bvn_raw) = '' THEN CAST('' AS STRING)
+        ELSE id_number_token
+    END,
+    CASE
+        WHEN gaid_idfa_raw IS NULL OR TRIM(gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
+        ELSE gaid_idfa_token
+    END,
     COALESCE(device_uuid, ''), session_id,
     COALESCE(bank_code, ''), COALESCE(bank_account_name, ''), bank_account_token,
     product_id, 'PROD-002-D7', '1.0',
@@ -95,5 +104,8 @@ SELECT
     CAST(risk_status AS TINYINT)
 FROM src_application_staging
 WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> ''
-  AND id_number_token IS NOT NULL AND TRIM(id_number_token) <> ''
-  AND bank_account_token IS NOT NULL AND TRIM(bank_account_token) <> '';
+  AND bank_account_token IS NOT NULL AND TRIM(bank_account_token) <> ''
+  AND (
+      bvn_raw IS NULL OR TRIM(bvn_raw) = ''
+      OR (id_number_token IS NOT NULL AND TRIM(id_number_token) <> '')
+  );

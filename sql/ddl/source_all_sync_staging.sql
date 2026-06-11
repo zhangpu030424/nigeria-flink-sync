@@ -123,8 +123,7 @@ FROM user_personal_info p
              FROM risk_user_credit_callback
          ) t
     WHERE rn = 1
-) cc ON cc.user_id = p.user_id
-WHERE p.bvn IS NOT NULL AND TRIM(p.bvn) <> '';
+) cc ON cc.user_id = p.user_id;
 
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 
