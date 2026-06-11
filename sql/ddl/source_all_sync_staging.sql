@@ -527,7 +527,8 @@ FROM user_order_installment i
     AND ur_cb.current_period = i.current_period
 WHERE i.installment_order_no IS NOT NULL
   AND TRIM(i.installment_order_no) <> ''
-  AND (o.risk_order_status IS NULL OR o.risk_order_status NOT IN (2, 4, 6, 8));
+  AND o.risk_order_status IS NOT NULL
+  AND o.risk_order_status NOT IN (0, 2, 4, 6, 8);
 
 ALTER TABLE loan_sync_staging ADD PRIMARY KEY (id);
 
