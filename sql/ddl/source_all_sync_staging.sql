@@ -316,7 +316,7 @@ SELECT base.id,
            WHEN 4 THEN 5
            WHEN 6 THEN 13
            WHEN 8 THEN 15
-           WHEN 10 THEN 20
+           WHEN 10 THEN CASE WHEN base.is_overdue = 1 THEN 23 ELSE 20 END
            WHEN 11 THEN 23
            WHEN 40 THEN 25
            WHEN 20 THEN 27
@@ -371,6 +371,7 @@ FROM (
                 o.disburse_status,
                 o.risk_order_status,
                 o.settled_status,
+                COALESCE(inst.is_overdue, 0) AS is_overdue,
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_limit_minor,
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS loan_amount_minor,
                 CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
@@ -465,6 +466,12 @@ FROM (
       AND TRIM(order_no) <> ''
     GROUP BY order_no
 ) ur_lp ON ur_lp.order_no = o.order_no
+         LEFT JOIN (
+    SELECT user_order_id,
+           MAX(COALESCE(is_overdue, 0)) AS is_overdue
+    FROM user_order_installment
+    GROUP BY user_order_id
+) inst ON inst.user_order_id = o.id
          WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
      ) base;
 
