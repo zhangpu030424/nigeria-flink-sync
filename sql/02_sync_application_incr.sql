@@ -7,13 +7,13 @@ SET 'table.exec.mini-batch.allow-latency' = '2s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
 CREATE TABLE IF NOT EXISTS src_application_staging (
-    id BIGINT, application_no STRING, sn STRING, user_id BIGINT, app_id_num BIGINT,
+    id BIGINT, application_no STRING, sn STRING, user_id BIGINT, app_code STRING,
     device_uuid STRING, session_id STRING, bvn_raw STRING, gaid_idfa_raw STRING,
     mobile_token STRING, id_number_token STRING, gaid_idfa_token STRING,
     bank_code STRING, bank_account_name STRING, bank_account_token STRING,
     product_id STRING, period_days INT, period_count INT, re_loan INT,
-    order_time TIMESTAMP(3), disburse_time TIMESTAMP(3), settled_time TIMESTAMP(3),
-    last_repayment_time TIMESTAMP(3), credit_limit_minor BIGINT, loan_amount_minor BIGINT,
+    order_time TIMESTAMP(3), reviewed_time TIMESTAMP(3), disburse_time TIMESTAMP(3), settled_time TIMESTAMP(3),
+    last_paid_time TIMESTAMP(3), last_repayment_time TIMESTAMP(3), credit_limit_minor BIGINT, loan_amount_minor BIGINT,
     principal_minor BIGINT, total_amount_minor BIGINT, disbursed_amount_minor BIGINT,
     risk_status INT, repayment_plan_json STRING,
     PRIMARY KEY (id) NOT ENFORCED
@@ -57,9 +57,9 @@ CREATE TABLE IF NOT EXISTS sink_application (
 
 INSERT INTO sink_application
 SELECT
-    application_no, mobile_token, 'ng01', CAST(app_id_num AS INT), '',
+    application_no, mobile_token, 'ng01', CAST(app_code AS INT), '',
     user_id + 100000000, user_id + 100000000, sn,
-    CAST(0 AS TINYINT), CAST(CASE WHEN re_loan = 0 THEN 1 ELSE 0 END AS TINYINT), CAST(0 AS TINYINT),
+    CAST(0 AS TINYINT), CAST(re_loan AS TINYINT), CAST(0 AS TINYINT),
     CASE
         WHEN bvn_raw IS NULL OR TRIM(bvn_raw) = '' THEN CAST('' AS STRING)
         ELSE id_number_token
@@ -76,9 +76,9 @@ SELECT
     credit_limit_minor, loan_amount_minor, principal_minor, total_amount_minor, disbursed_amount_minor,
     UNIX_TIMESTAMP(CAST(order_time AS STRING)) * 1000,
     UNIX_TIMESTAMP(CAST(order_time AS STRING)) * 1000,
-    CAST(NULL AS BIGINT),
+    CASE WHEN reviewed_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(reviewed_time AS STRING)) * 1000 END,
     CASE WHEN disburse_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(disburse_time AS STRING)) * 1000 END,
-    CAST(NULL AS BIGINT),
+    CASE WHEN last_paid_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(last_paid_time AS STRING)) * 1000 END,
     CASE WHEN settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(settled_time AS STRING)) * 1000 END,
     (UNIX_TIMESTAMP(CAST(order_time AS STRING)) + 7 * 86400) * 1000,
     CAST(last_repayment_time AS DATE), CAST(last_repayment_time AS DATE), CAST(risk_status AS TINYINT)

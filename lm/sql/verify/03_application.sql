@@ -26,7 +26,7 @@ SELECT
     ) AS `group_user_id`,
     a.`applicationNo` AS `sn`,
     0 AS `is_test`,
-    CASE WHEN a.`repeatLoan` = 0 THEN 1 ELSE 0 END AS `is_first_apply`,
+    a.`repeatLoan` AS `is_first_apply`,
     0 AS `is_auto_apply`,
     IFNULL(ud.`bvn`, '') AS `id_number`,
     IFNULL(a.`gaid`, '') AS `gaid_idfa`,

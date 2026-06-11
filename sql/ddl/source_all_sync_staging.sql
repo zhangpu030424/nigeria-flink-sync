@@ -297,8 +297,10 @@ SELECT base.id,
        base.repayment,
        base.amt_due,
        base.order_time,
+       base.reviewed_time,
        base.disburse_time,
        base.settled_time,
+       base.last_paid_time,
        base.last_repayment_time,
        base.approval_result,
        base.disburse_status,
@@ -330,7 +332,7 @@ FROM (
                 o.user_id,
                 o.app_code,
                 o.order_status,
-                ac.id AS app_id_num,
+                ac.id AS app_id_num,  -- 备查；目标 application.app_id 同步用 o.app_code
                 u.device_id AS device_uuid,
                 di.session_uuid AS session_id,
                 (CASE
@@ -360,8 +362,10 @@ FROM (
                 o.repayment,
                 o.amt_due,
                 o.order_time,
+                ruac.callback_time AS reviewed_time,
                 o.disburse_time,
                 o.settled_time,
+                ur_lp.callback_time AS last_paid_time,
                 o.last_repayment_time,
                 o.approval_result,
                 o.disburse_status,
@@ -442,6 +446,25 @@ FROM (
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 'bank_account' AND vt_ba.status = 1
                        AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
+         LEFT JOIN (
+    SELECT order_no,
+           MAX(callback_time) AS callback_time
+    FROM risk_user_approval_callback
+    WHERE callback_time IS NOT NULL
+      AND order_no IS NOT NULL
+      AND TRIM(order_no) <> ''
+    GROUP BY order_no
+) ruac ON ruac.order_no = o.order_no
+         LEFT JOIN (
+    SELECT order_no,
+           MAX(callback_time) AS callback_time
+    FROM user_repay
+    WHERE status = 2
+      AND callback_time IS NOT NULL
+      AND order_no IS NOT NULL
+      AND TRIM(order_no) <> ''
+    GROUP BY order_no
+) ur_lp ON ur_lp.order_no = o.order_no
          WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
      ) base;
 

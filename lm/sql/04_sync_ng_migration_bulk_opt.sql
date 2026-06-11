@@ -627,7 +627,7 @@ SELECT
     CAST(COALESCE(g.group_user_id, a.`userId`) AS BIGINT),
     a.`applicationNo`,
     CAST(0 AS TINYINT),
-    CASE WHEN a.`repeatLoan` = 0 THEN CAST(1 AS TINYINT) ELSE CAST(0 AS TINYINT) END,
+    CAST(a.`repeatLoan` AS TINYINT),
     CAST(0 AS TINYINT),
     COALESCE(ud.bvn, ''),
     COALESCE(a.gaid, ''),
