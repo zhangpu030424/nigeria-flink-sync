@@ -10,16 +10,16 @@ CREATE TABLE IF NOT EXISTS src_user_product_staging (
     unpaid_amount_minor BIGINT,
     PRIMARY KEY (user_id, product_id) NOT ENFORCED
 ) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos',
+    'table-name' = 'user_product_sync_staging',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_product_sync_staging',
-    'server-time-zone' = 'Africa/Lagos',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+    'scan.partition.column' = 'user_id',
+    'scan.partition.num' = '${FLINK_PARALLELISM}',
+    'scan.partition.lower-bound' = '1',
+    'scan.partition.upper-bound' = '500000000',
+    'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_product (
