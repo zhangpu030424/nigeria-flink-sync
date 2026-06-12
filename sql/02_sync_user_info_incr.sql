@@ -1,5 +1,8 @@
--- 增量 user_info：CDC user_personal_info + 源表 Lookup；BVN 直接 vt_tokenize(/v2t)
--- 前置: mysql ... < sql/ddl/source_lookup_views.sql（user_info_user_lookup / user_work_latest_lookup）
+-- 增量 user_info：CDC user_personal_info + 源表 Lookup；BVN 优先 vt_token_cache，miss 则 vt_tokenize(/v2t)
+-- 前置: mysql ... < sql/ddl/source_lookup_views.sql
+-- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id，如 211038]
+-- 注意: 只监听 user_personal_info（不是 user）；目标 user_id = 源 user_id + 100000000
+--       timestamp 模式下仅同步 bulk-start-ms 之后的 binlog；测试 UPDATE 须在 Job RUNNING 之后且改真实字段
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -39,6 +42,20 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
     'debezium.snapshot.mode' = 'schema_only',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS dim_vt_id_number (
+    raw_value STRING,
+    token STRING,
+    PRIMARY KEY (raw_value) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'vt_id_number_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '2h'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user (
@@ -115,9 +132,11 @@ SELECT
 FROM (
     SELECT
         p.user_id + 100000000 AS user_id,
+        p.bvn AS bvn_raw,
         COALESCE(
             CASE
                 WHEN p.bvn IS NULL OR TRIM(p.bvn) = '' THEN CAST('' AS STRING)
+                WHEN vt.token IS NOT NULL AND TRIM(vt.token) <> '' THEN vt.token
                 ELSE vt_tokenize(TRIM(p.bvn))
             END,
             ''
@@ -151,8 +170,10 @@ FROM (
         )) AS info_json
     FROM src_user_personal_info AS p
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON CAST(u.id AS BIGINT) = p.user_id
+    LEFT JOIN dim_vt_id_number FOR SYSTEM_TIME AS OF p.proc_time AS vt
+        ON p.bvn IS NOT NULL AND TRIM(p.bvn) <> '' AND vt.raw_value = TRIM(p.bvn)
     LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON CAST(wr.user_id AS BIGINT) = p.user_id
     LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON CAST(ac.app_code AS INT) = CAST(u.app_code AS INT)
 ) AS e
-WHERE (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '')
-   OR e.full_name IS NOT NULL;
+WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')
+   OR (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '');

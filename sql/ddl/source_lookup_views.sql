@@ -100,6 +100,14 @@ SELECT CAST(id AS SIGNED) AS id,
        CAST(risk_order_status AS SIGNED) AS risk_order_status
 FROM user_order;
 
+CREATE OR REPLACE VIEW vt_id_number_lookup AS
+SELECT raw_value, token
+FROM vt_token_cache
+WHERE vt_type = 'id_number'
+  AND status = 1
+  AND token IS NOT NULL
+  AND TRIM(token) <> '';
+
 -- user_info 增量 Lookup：user.id / user_work_related.user_id 为 UNSIGNED 时需 CAST
 CREATE OR REPLACE VIEW user_info_user_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
