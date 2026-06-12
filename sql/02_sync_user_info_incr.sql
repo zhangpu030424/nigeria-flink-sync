@@ -1,10 +1,12 @@
--- 增量 user_info：单路 CDC user_info_dirty + 单行 bundle Lookup（源库一次 JOIN）
--- 前置: ./scripts/deploy-source-ddl.sh
--- 并行: FLINK_PARALLELISM_INCR（建议 4）；实时验证: CDC_STARTUP_MODE=latest-offset
+-- 增量 user_info：单路 CDC user_info_dirty + 窗口合并 + bundle Lookup
+-- 前置: ./scripts/deploy-source-ddl.sh（含 TRIGGER debounce 存储过程）
+-- 并行: FLINK_PARALLELISM_INCR（建议 4）；积压: TRUNCATE dirty + latest-offset
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
-SET 'table.exec.mini-batch.enabled' = 'false';
+SET 'table.exec.mini-batch.enabled' = 'true';
+SET 'table.exec.mini-batch.allow-latency' = '${USER_INFO_DIRTY_COALESCE_SEC}s';
+SET 'table.exec.mini-batch.size' = '5000';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
 SET 'execution.checkpointing.min-pause' = '120s';
@@ -70,9 +72,19 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     'table-name' = 'user_info_incr_bundle_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '30s'
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '120s'
 );
+
+-- 同 user_id 在窗口内多次 dirty 只保留最新一条，再 Lookup（减轻 binlog 洪水）
+CREATE TEMPORARY VIEW cdc_user_info_dirty_coalesced AS
+SELECT user_id,
+       MAX(updated_at) AS updated_at,
+       window_end AS proc_time
+FROM TABLE(
+    TUMBLE(TABLE cdc_user_info_dirty, DESCRIPTOR(proc_time), INTERVAL '${USER_INFO_DIRTY_COALESCE_SEC}' SECOND)
+)
+GROUP BY user_id, window_start, window_end;
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
@@ -184,7 +196,7 @@ FROM (
             KEY 'salary_type' VALUE CAST(NULL AS STRING)
             NULL ON NULL
         )) AS info_json
-    FROM cdc_user_info_dirty AS t
+    FROM cdc_user_info_dirty_coalesced AS t
     INNER JOIN dim_user_info_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.user_id = t.user_id
 ) AS e
 WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')

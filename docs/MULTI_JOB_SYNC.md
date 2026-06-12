@@ -10,6 +10,32 @@
 ./scripts/sync-all-auto.sh
 ```
 
+### 从零重跑（全量 + 增量全部重来）
+
+```bash
+git pull
+# 确认 .env：FLINK_PARALLELISM_INCR=4、CDC_SERVER_ID_UI_DIRTY=5401、FLINK_TASK_SLOTS 足够
+
+chmod +x scripts/full-rerun.sh
+./scripts/full-rerun.sh
+```
+
+脚本会自动：**Cancel 全部 Job → emergency_contact ENUM/灌明文 → TRUNCATE user_info_dirty → sync-pipeline-auto.sh**（DDL → 锁 bulk-start-ms → VT+宽表 → 6 表顺序全量→切增量）。
+
+TRIGGER 须 root 时，流水线前执行：
+
+```bash
+mysql -u root ... nigeria_backend < sql/ddl/user_info_dirty_enqueue.sql
+mysql -u root ... nigeria_backend < sql/ddl/user_info_dirty.sql
+```
+
+跑完检查：
+
+```bash
+docker exec nigeria-flink-jobmanager ./bin/flink list -r   # 应有 6 个 RUNNING 增量 Job
+bash scripts/verify-user-info-incr.sh 211038
+```
+
 **全自动顺序（勿拆开手动执行）：**
 
 | 步骤 | 动作 |
@@ -98,6 +124,7 @@ Flink **只 CDC 一张表** `user_info_dirty`；下列源表变更时由 **MySQL
 | `user_emergency_contact` | emergency_contacts |
 | `risk_user_credit_callback` | credit_limit |
 | `vt_token_cache`（id_number） | id_number |
+| `vt_token_cache`（emergency_contact） | info.emergency_contacts[].mobile |
 | `adjust_callback_record` | install_source |
 
 DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。
@@ -169,6 +196,34 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 **无法一次证明整库正确**：脏队列有积压时，单用户可能要等很久才轮到。验证应用 `--e2e`（只测管道）+ 抽样对比（测组装逻辑），不要只靠改一条业务数据立刻看目标。
 
 **常见「看起来不对」**：有 BVN 无 `vt_token_cache` → sink WHERE 过滤（与全量相同）；`timestamp` 起点在 dirty 行之前 → 需 `latest-offset` 或等 backlog 消化完。
+
+### 脏队列生产快、消费跟不上
+
+现象：`user_info_dirty` 行数不多但 binlog 极多（同 user 反复 bump `updated_at`）；Job Records 很慢、积压越来越大。
+
+**生产侧（源库，须 DBA `git pull` 后 `deploy-source-ddl.sh`）**
+
+- TRIGGER 改为 `sp_user_info_dirty_enqueue*`：**10s** debounce（用户资料）、**30s**（授信回调）、**60s**（VT / adjust）
+- `adjust_callback_record` UPDATE 仅在 `tracker_name` 变化时入队；`user` UPDATE 仅在 app_code/device/adid 等变化时入队
+
+**消费侧（Flink）**
+
+- `USER_INFO_DIRTY_COALESCE_SEC=5`：窗口内同 user 只 Lookup 一次
+- `FLINK_PARALLELISM_INCR=4`（或更高，受 slot 限制）
+- Lookup cache TTL 120s
+
+**清积压（全量已覆盖缺口时）**
+
+```sql
+TRUNCATE TABLE user_info_dirty;
+```
+
+```bash
+CDC_STARTUP_MODE=latest-offset FLINK_PARALLELISM_INCR=4 \
+  ./scripts/sync-job-auto.sh user_info --incr-only --keep-other-jobs
+```
+
+debounce 窗口内最后一次业务变更仍会被合并后的 Lookup 读到最新宽表；极端情况（变更后永不再入队且 Job 未消费）可手动 `UPDATE user_info_dirty` 补一枪。
 
 ### Checkpoint expired / tolerable failure threshold
 

@@ -261,29 +261,43 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW user_emergency_contacts_lookup AS
-SELECT CAST(user_id AS SIGNED) AS user_id,
+SELECT CAST(ec.user_id AS SIGNED) AS user_id,
        CAST(
                COALESCE(
                        JSON_ARRAYAGG(
                                JSON_OBJECT(
-                                       'name', NULLIF(TRIM(contact_name), ''),
+                                       'name', NULLIF(TRIM(ec.contact_name), ''),
                                        'mobile', CASE
-                                                     WHEN contact_number IS NULL OR TRIM(contact_number) = '' THEN NULL
-                                                     WHEN TRIM(contact_number) LIKE '+234%' THEN SUBSTRING(TRIM(contact_number), 5)
-                                                     WHEN TRIM(contact_number) LIKE '234%' AND CHAR_LENGTH(TRIM(contact_number)) > 3
-                                                         THEN SUBSTRING(TRIM(contact_number), 4)
-                                                     WHEN TRIM(contact_number) LIKE '0%' AND CHAR_LENGTH(TRIM(contact_number)) = 11
-                                                         THEN SUBSTRING(TRIM(contact_number), 2)
-                                                     ELSE TRIM(contact_number)
+                                                     WHEN ec.contact_number IS NULL OR TRIM(ec.contact_number) = ''
+                                                         THEN CAST(NULL AS JSON)
+                                                     WHEN vt.token IS NOT NULL AND TRIM(vt.token) <> ''
+                                                         THEN vt.token
+                                                     ELSE CAST(NULL AS JSON)
                                            END,
-                                       'relation', contact_relationship
+                                       'relation', ec.contact_relationship
                                )
                        ),
                        JSON_ARRAY()
                ) AS CHAR
        ) AS emergency_contacts
-FROM user_emergency_contact
-GROUP BY user_id;
+FROM user_emergency_contact ec
+         LEFT JOIN vt_token_cache vt
+                   ON vt.vt_type = 'emergency_contact'
+                       AND vt.status = 1
+                       AND vt.token IS NOT NULL
+                       AND TRIM(vt.token) <> ''
+                       AND vt.raw_value COLLATE utf8mb4_bin = (
+                           CASE
+                               WHEN ec.contact_number IS NULL OR TRIM(ec.contact_number) = '' THEN NULL
+                               WHEN TRIM(ec.contact_number) LIKE '+%' THEN TRIM(ec.contact_number)
+                               WHEN TRIM(ec.contact_number) LIKE '234%'
+                                   THEN CONCAT('+', TRIM(ec.contact_number))
+                               WHEN TRIM(ec.contact_number) LIKE '0%'
+                                   THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+                               ELSE CONCAT('+234', TRIM(ec.contact_number))
+                               END
+                           ) COLLATE utf8mb4_bin
+GROUP BY ec.user_id;
 
 CREATE OR REPLACE VIEW user_info_install_source_lookup AS
 SELECT CAST(u.id AS SIGNED) AS user_id,

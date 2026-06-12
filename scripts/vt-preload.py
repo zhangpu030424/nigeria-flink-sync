@@ -111,6 +111,22 @@ WHERE 1=1
 {not_vt}
 {limit_clause}
 """,
+    "emergency_contact": """
+SELECT src.raw_value FROM (
+  SELECT DISTINCT
+    CASE
+      WHEN ec.contact_number IS NULL OR TRIM(ec.contact_number) = '' THEN NULL
+      WHEN TRIM(ec.contact_number) LIKE '+%' THEN TRIM(ec.contact_number)
+      WHEN TRIM(ec.contact_number) LIKE '234%' THEN CONCAT('+', TRIM(ec.contact_number))
+      WHEN TRIM(ec.contact_number) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+      ELSE CONCAT('+234', TRIM(ec.contact_number))
+    END AS raw_value
+  FROM user_emergency_contact ec
+) src
+WHERE src.raw_value IS NOT NULL AND src.raw_value <> ''
+{not_vt}
+{limit_clause}
+""",
 }
 
 
@@ -1077,7 +1093,7 @@ def main() -> int:
         print("缺少 SOURCE_MYSQL_* 配置", file=sys.stderr)
         return 1
 
-    all_types = ["mobile", "gaid_idfa", "bank_account", "id_number"]
+    all_types = ["mobile", "gaid_idfa", "bank_account", "id_number", "emergency_contact"]
     vt_types = all_types if args.vt_type == "all" else [args.vt_type]
 
     if args.reset_processing:

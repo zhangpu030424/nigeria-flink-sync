@@ -40,6 +40,10 @@ if [[ $# -ge 1 ]]; then
       shift
       set -- --vt-type gaid_idfa --skip-count "$@"
       ;;
+    emergency_contact|emergency-contact|emergency)
+      shift
+      set -- --vt-type emergency_contact --skip-count "$@"
+      ;;
     all)
       shift
       set -- --vt-type all --skip-count "$@"

@@ -22,6 +22,7 @@ echo ">> deploy-source-ddl: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_M
 DDL_FILES=(
   sql/ddl/source_views_adjust.sql
   sql/ddl/source_lookup_views.sql
+  sql/ddl/user_info_dirty_enqueue.sql
   sql/ddl/user_info_dirty.sql
 )
 
