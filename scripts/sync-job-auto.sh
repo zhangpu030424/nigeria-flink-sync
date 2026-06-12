@@ -205,10 +205,14 @@ start_incr() {
   local bulk_parallel="${FLINK_PARALLELISM:-8}"
   local incr_parallel="${FLINK_PARALLELISM_INCR:-1}"
 
-  # initial：增量 Job 首次启动先并行快照全表（补全量漏写），再追 binlog；有 checkpoint 后重启从位点恢复
-  # 仅追 binlog 可用 CDC_STARTUP_MODE=timestamp（需配合 bulk-start-ms）
-  export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-initial}"
+  # 有 bulk-start-ms 时默认 timestamp：只追 binlog，不重扫全表（每行 vt_tokenize 全表极慢）
+  # 全量已写入历史数据；漏写窗口由 bulk-start-ms 覆盖。需全表快照补漏可 export CDC_STARTUP_MODE=initial
   export CDC_STARTUP_TIMESTAMP_MILLIS="${bulk_start_ms:-$(python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || date +%s000)}"
+  if [[ -n "$bulk_start_ms" ]]; then
+    export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-timestamp}"
+  else
+    export CDC_STARTUP_MODE="${CDC_STARTUP_MODE:-initial}"
+  fi
   if [[ "$CDC_STARTUP_MODE" == "latest-offset" ]]; then
     export CDC_STARTUP_TIMESTAMP_MILLIS="0"
   fi
