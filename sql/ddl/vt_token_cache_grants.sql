@@ -39,6 +39,11 @@ GRANT SELECT ON nigeria_backend.user_info_incr_bundle_lookup TO 'flink_cdc'@'101
 -- user_info 增量脏队列 CDC（表由 deploy-source-ddl / root 建；flink_cdc 只需 SELECT）
 GRANT SELECT ON nigeria_backend.user_info_dirty TO 'flink_cdc'@'101.47.31.184';
 
+-- CDC binlog 必需（若已有可跳过）:
+-- GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'flink_cdc'@'101.47.31.184';
+-- schema 快照锁表（云 RDS 常不给）；SQL 已设 debezium.snapshot.locking.mode=none，一般不必授:
+-- GRANT RELOAD, FLUSH_TABLES ON *.* TO 'flink_cdc'@'101.47.31.184';
+
 FLUSH PRIVILEGES;
 
 SHOW GRANTS FOR 'flink_cdc'@'101.47.31.184';

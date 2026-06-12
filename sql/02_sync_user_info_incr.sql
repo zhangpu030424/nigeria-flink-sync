@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS cdc_user_info_dirty (
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'false',
     'debezium.snapshot.mode' = 'schema_only',
+    -- 云 RDS 的 flink_cdc 常无 RELOAD/FLUSH_TABLES；避免 FLUSH TABLES WITH READ LOCK
+    'debezium.snapshot.locking.mode' = 'none',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 

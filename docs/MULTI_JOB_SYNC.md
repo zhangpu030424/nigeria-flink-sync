@@ -106,6 +106,12 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 
 `CDC_SERVER_ID_UI_DIRTY` 须为**单值**（如 `5401`）；脏队列 CDC 关闭 incremental snapshot 时写 `5401-5404` 会报 `NumberFormatException`。
 
+### `RELOAD or FLUSH_TABLES privilege`（CDC 启动失败）
+
+日志：`Access denied; you need RELOAD or FLUSH_TABLES`。云 RDS 默认不给 `flink_cdc` 锁表权限。
+
+处理：`git pull` 后重提 Job（`02_sync_user_info_incr.sql` 已加 `debezium.snapshot.locking.mode=none`）。勿反复重启——日志里 `attempt #12` 说明已在失败循环。
+
 未入队（仅 Lookup）：`app_config`、`device_ids` / `device_network`（`registration_ip`）。
 
 **user 增量 CDC**：`user`、`adjust_callback_record`（UTM 变更，经 adid 关联用户）
