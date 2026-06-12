@@ -51,12 +51,12 @@ WHERE p.user_id = ${SRC_UID};
 "
 echo
 
-echo "[4] Lookup 源表 / 视图是否可读"
-for t in user app_config vt_token_cache user_work_latest_lookup; do
+echo "[4] Lookup 视图是否可读（增量 Job 依赖 CAST 视图，勿直查源表）"
+for t in user_info_user_lookup app_config_lookup vt_token_cache_lookup user_work_latest_lookup; do
   cnt=$(mysql_q "SELECT COUNT(*) FROM ${t} LIMIT 1" | tr -d '[:space:]')
   echo "    ${t}: ${cnt}"
 done
-echo "    （user_info 仅 user_work_latest_lookup 为必需视图，其余直查源表）"
+echo "    若 ERR：在 DMS 执行 sql/ddl/user_info_incr_views.sql"
 echo
 
 echo "[5] BVN / VT token（有 BVN 时必须有 token 才会写 sink，同全量宽表逻辑）"

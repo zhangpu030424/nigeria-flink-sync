@@ -23,7 +23,8 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW user_bvn_lookup AS
-SELECT CAST(user_id AS SIGNED) AS user_id, bvn
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       CAST(bvn AS CHAR) AS bvn
 FROM (
          SELECT user_id,
                 bvn,
@@ -50,7 +51,8 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW risk_approval_latest_by_order AS
-SELECT order_no, MAX(callback_time) AS callback_time
+SELECT CAST(order_no AS CHAR) AS order_no,
+       CAST(MAX(callback_time) AS DATETIME(3)) AS callback_time
 FROM risk_user_approval_callback
 WHERE callback_time IS NOT NULL
   AND order_no IS NOT NULL
@@ -58,7 +60,8 @@ WHERE callback_time IS NOT NULL
 GROUP BY order_no;
 
 CREATE OR REPLACE VIEW user_repay_paid_latest_by_order AS
-SELECT order_no, MAX(callback_time) AS callback_time
+SELECT CAST(order_no AS CHAR) AS order_no,
+       CAST(MAX(callback_time) AS DATETIME(3)) AS callback_time
 FROM user_repay
 WHERE status = 2
   AND callback_time IS NOT NULL
@@ -68,7 +71,7 @@ GROUP BY order_no;
 
 CREATE OR REPLACE VIEW user_order_installment_overdue AS
 SELECT CAST(user_order_id AS SIGNED) AS user_order_id,
-       MAX(COALESCE(is_overdue, 0)) AS is_overdue
+       CAST(MAX(COALESCE(is_overdue, 0)) AS SIGNED) AS is_overdue
 FROM user_order_installment
 GROUP BY user_order_id;
 
@@ -110,6 +113,14 @@ WHERE vt_type = 'id_number'
   AND status = 1
   AND token IS NOT NULL
   AND TRIM(token) <> '';
+
+-- user_info 增量：vt_token_cache 全列 CAST（ENUM/TINYINT 直查会 ClassCastException）
+CREATE OR REPLACE VIEW vt_token_cache_lookup AS
+SELECT CAST(vt_type AS CHAR) AS vt_type,
+       CAST(raw_value AS CHAR) AS raw_value,
+       CAST(token AS CHAR) AS token,
+       CAST(status AS SIGNED) AS status
+FROM vt_token_cache;
 
 -- user_info 增量 Lookup：user.id / user_work_related.user_id 为 UNSIGNED 时需 CAST
 CREATE OR REPLACE VIEW user_info_user_lookup AS

@@ -1,5 +1,5 @@
--- 增量 user_info：CDC user_personal_info + 源表 JDBC Lookup（user/app_config/vt_token_cache 直查）
--- 仅 user_work 需视图: mysql ... < sql/ddl/user_work_latest_lookup.sql（无 GRANT，DMS 可跑）
+-- 增量 user_info：CDC user_personal_info + JDBC Lookup（须 CAST 视图，勿直查源表）
+-- 前置: mysql ... < sql/ddl/user_info_incr_views.sql
 -- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id，如 211038]
 -- 注意: 只监听 user_personal_info（不是 user）；目标 user_id = 源 user_id + 100000000
 --       timestamp 模式下仅同步 bulk-start-ms 之后的 binlog；测试 UPDATE 须在 Job RUNNING 之后且改真实字段
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS dim_vt_cache (
     PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'vt_token_cache_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -67,8 +67,8 @@ CREATE TABLE IF NOT EXISTS dim_user (
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'user',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_info_user_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS dim_user_work (
     PRIMARY KEY (user_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'user_work_latest_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
@@ -99,8 +99,8 @@ CREATE TABLE IF NOT EXISTS dim_app_config (
     PRIMARY KEY (app_code) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'app_config',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'app_config_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '1000',
