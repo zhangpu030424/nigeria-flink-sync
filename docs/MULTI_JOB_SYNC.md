@@ -102,6 +102,8 @@ Flink **只 CDC 一张表** `user_info_dirty`；下列源表变更时由 **MySQL
 
 DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。
 
+组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 `FLINK_PARALLELISM_INCR=4`。
+
 未入队（仅 Lookup）：`app_config`、`device_ids` / `device_network`（`registration_ip`）。
 
 **user 增量 CDC**：`user`、`adjust_callback_record`（UTM 变更，经 adid 关联用户）
@@ -139,7 +141,12 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 
 1. `deploy-source-ddl.sh` 校验 `user_info_dirty` 表 + TRIGGER≥14。
 2. 源表 UPDATE 后查 `SELECT * FROM user_info_dirty WHERE user_id=?` 是否有行。
-3. `bash scripts/verify-user-info-incr.sh <user_id>`。
+3. **dirty 有行但目标不变**：
+   - Web UI：`cdc_user_info_dirty` **Records Sent**、sink **Records Received** 是否增加。
+   - 直接 `UPDATE user_info_dirty SET updated_at=NOW(3) WHERE user_id=?` 测 CDC 链路。
+   - 脏表行数 `SELECT COUNT(*) FROM user_info_dirty` 极大时，timestamp 模式要从 bulk-start 重放大量 binlog，需等待或改用 `CDC_STARTUP_MODE=latest-offset` 重提 Job（全量已覆盖缺口时）。
+   - 确认 SQL 已关 `scan.incremental.snapshot.enabled=false`（脏队列表勿做全表快照）。
+4. `bash scripts/verify-user-info-incr.sh <user_id>`。
 
 ### Checkpoint expired / tolerable failure threshold
 

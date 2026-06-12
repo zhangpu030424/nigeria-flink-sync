@@ -63,7 +63,7 @@ WHERE p.user_id = ${SRC_UID};
 echo
 
 echo "[5] Lookup 视图是否可读（脏队列触发后 Lookup 取最新）"
-for t in user_info_user_lookup user_personal_latest_lookup user_id_by_bvn_lookup \
+for t in user_info_incr_bundle_lookup user_info_user_lookup user_personal_latest_lookup user_id_by_bvn_lookup \
          device_uuid_user_lookup session_uuid_user_lookup \
          app_config_lookup vt_token_cache_lookup user_work_latest_lookup \
          user_credit_latest_lookup user_reg_ip_lookup user_emergency_contacts_lookup user_info_install_source_lookup; do
@@ -94,10 +94,21 @@ MYSQL_PWD="$TARGET_MYSQL_PASSWORD" mysql -h "$TARGET_MYSQL_HOST" -P "$TARGET_MYS
   2>/dev/null || echo "    目标库查询失败"
 echo
 
+echo "[8] 脏队列规模（过大时 timestamp 模式需追大量 binlog，见 docs/MULTI_JOB_SYNC.md）"
+mysql_q "SELECT CONCAT('dirty 行数=', COUNT(*)) FROM user_info_dirty;"
+echo
+
 echo "=== 测试写入（须在 Job RUNNING 且 TRIGGER 已部署）==="
-echo "-- 须改真实值（noop UPDATE 可能不进脏队列/binlog）："
+echo "-- 1) 改 personal_info（触发器写入 dirty）："
 echo "UPDATE user_personal_info SET first_name = CONCAT('IncrTest', UNIX_TIMESTAMP()) WHERE user_id = ${SRC_UID};"
-echo "-- 确认脏队列："
+echo "-- 2) 确认脏队列："
 echo "SELECT user_id, updated_at FROM user_info_dirty WHERE user_id = ${SRC_UID};"
-echo "等待 5~10s 后查目标："
+echo "-- 3) 若 dirty 有行但目标仍不变，直接捅脏队列（绕过业务表，测 Flink CDC）："
+echo "UPDATE user_info_dirty SET updated_at = CURRENT_TIMESTAMP(3) WHERE user_id = ${SRC_UID};"
+echo "-- 4) Web UI 看 cdc_user_info_dirty Records Sent、sink_user_info Records Received 是否增加"
+echo "等待 10~30s 后查目标："
 echo "SELECT user_id, full_name, updated_at FROM user_info WHERE user_id = ${TGT_UID};"
+echo ""
+echo "仍无数据：./scripts/diagnose-job.sh <job_id>  或 Cancel 后重提："
+echo "  ./scripts/sync-job-auto.sh user_info --incr-only --bulk-start-ms \$(grep BULK_START_MS logs/bulk-start-ms.env|cut -d= -f2) --keep-other-jobs"
+echo "快速验证可试: CDC_STARTUP_MODE=latest-offset ./scripts/sync-job-auto.sh user_info --incr-only --keep-other-jobs"

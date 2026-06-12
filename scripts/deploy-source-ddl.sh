@@ -45,6 +45,7 @@ CHECK_VIEWS=(
   user_reg_ip_lookup
   user_emergency_contacts_lookup
   user_info_install_source_lookup
+  user_info_incr_bundle_lookup
   users_by_adid_lookup
   user_incr_lookup
   user_bankcard_id_by_account_lookup

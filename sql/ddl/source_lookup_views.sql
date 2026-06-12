@@ -307,6 +307,48 @@ FROM user u
          LEFT JOIN v_adjust_latest_by_adid adj
                    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid;
 
+-- user_info 增量：单行 Lookup（替代 Flink 9 路串行 JDBC Lookup）
+CREATE OR REPLACE VIEW user_info_incr_bundle_lookup AS
+SELECT CAST(u.id AS SIGNED) AS user_id,
+       CAST(u.app_code AS SIGNED) AS app_code,
+       CAST(u.create_time AS DATETIME(3)) AS create_time,
+       CAST(p.bvn AS CHAR) AS bvn,
+       CAST(p.first_name AS CHAR) AS first_name,
+       CAST(p.sur_name AS CHAR) AS sur_name,
+       CAST(p.date_of_birth AS DATE) AS date_of_birth,
+       CAST(p.education_level AS SIGNED) AS education_level,
+       CAST(p.gender AS SIGNED) AS gender,
+       CAST(p.living_address_state AS CHAR) AS living_address_state,
+       CAST(p.living_address_city AS CHAR) AS living_address_city,
+       CAST(p.living_address_first_line AS CHAR) AS living_address_first_line,
+       CAST(p.living_address_second_line AS CHAR) AS living_address_second_line,
+       CAST(p.number_of_children AS SIGNED) AS number_of_children,
+       CAST(p.marriage AS SIGNED) AS marriage,
+       CAST(vt.token AS CHAR) AS vt_token,
+       CAST(vt.status AS SIGNED) AS vt_status,
+       CAST(wr.work_type AS CHAR) AS work_type,
+       CAST(wr.occupation AS CHAR) AS occupation,
+       CAST(wr.company_name AS CHAR) AS company_name,
+       CAST(wr.monthly_income AS CHAR) AS monthly_income,
+       CAST(ac.app_name AS CHAR) AS app_name,
+       CAST(ac.version AS CHAR) AS app_version,
+       CAST(cc.credit_limit AS CHAR) AS credit_limit,
+       CAST(rip.ip AS CHAR) AS reg_ip,
+       CAST(ec.emergency_contacts AS CHAR) AS emergency_contacts,
+       CAST(isrc.install_source AS CHAR) AS install_source
+FROM `user` u
+         LEFT JOIN user_personal_latest_lookup p ON p.user_id = u.id
+         LEFT JOIN vt_token_cache_lookup vt
+                   ON vt.vt_type = 'id_number'
+                       AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
+                       AND vt.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+         LEFT JOIN user_work_latest_lookup wr ON wr.user_id = u.id
+         LEFT JOIN app_config_lookup ac ON ac.app_code = u.app_code
+         LEFT JOIN user_credit_latest_lookup cc ON cc.user_id = u.id
+         LEFT JOIN user_reg_ip_lookup rip ON rip.user_id = u.id
+         LEFT JOIN user_emergency_contacts_lookup ec ON ec.user_id = u.id
+         LEFT JOIN user_info_install_source_lookup isrc ON isrc.user_id = u.id;
+
 CREATE OR REPLACE VIEW users_by_adid_lookup AS
 SELECT CAST(adid AS CHAR) AS adid,
        CAST(MAX(id) AS SIGNED) AS user_id

@@ -35,6 +35,7 @@ GRANT SELECT ON nigeria_backend.application_user_lookup TO 'flink_cdc'@'101.47.3
 GRANT SELECT ON nigeria_backend.vt_id_number_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.vt_token_cache_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.app_config_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.user_info_incr_bundle_lookup TO 'flink_cdc'@'101.47.31.184';
 -- user_info 增量脏队列 CDC（表由 deploy-source-ddl / root 建；flink_cdc 只需 SELECT）
 GRANT SELECT ON nigeria_backend.user_info_dirty TO 'flink_cdc'@'101.47.31.184';
 
