@@ -83,3 +83,27 @@ SELECT CAST(id AS SIGNED) AS id,
        settled_time,
        CAST(risk_order_status AS SIGNED) AS risk_order_status
 FROM user_order;
+
+-- user_info 增量 Lookup：user.id / user_work_related.user_id 为 UNSIGNED 时需 CAST
+CREATE OR REPLACE VIEW user_info_user_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       app_code,
+       create_time
+FROM user;
+
+CREATE OR REPLACE VIEW user_work_latest_lookup AS
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       work_type,
+       occupation,
+       company_name,
+       monthly_income
+FROM (
+         SELECT user_id,
+                work_type,
+                occupation,
+                company_name,
+                monthly_income,
+                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+         FROM user_work_related
+     ) t
+WHERE rn = 1;
