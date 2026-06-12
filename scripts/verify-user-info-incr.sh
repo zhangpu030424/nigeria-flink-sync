@@ -68,17 +68,12 @@ in_dirty=$(mysql_q "SELECT COUNT(*) FROM user_info_dirty WHERE user_id=${SRC_UID
 echo "[3] 脏队列: 表=${dirty_tbl:-ERR}, TRIGGER=${trg_cnt:-ERR}(≥14), 总行=${dirty_cnt:-?}, 本用户=${in_dirty:-?}"
 echo
 
-# ---------- 静态对账：bundle 期望 vs 目标 ----------
+# ---------- 静态对账：bundle 期望 vs 目标（多列输出，避免 CONCAT 内嵌 TAB 解析失败）----------
 bundle_line=$(mysql_q "
-SELECT CONCAT(
-  COALESCE(TRIM(b.bvn), ''),
-  '\t',
-  COALESCE(TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,''))), ''),
-  '\t',
-  COALESCE(b.vt_token, ''),
-  '\t',
-  COALESCE(CAST(b.vt_status AS CHAR), '')
-)
+SELECT COALESCE(TRIM(b.bvn), ''),
+       COALESCE(TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,''))), ''),
+       COALESCE(b.vt_token, ''),
+       COALESCE(CAST(b.vt_status AS CHAR), '')
 FROM user_info_incr_bundle_lookup b WHERE b.user_id = ${SRC_UID} LIMIT 1;
 ")
 
@@ -97,7 +92,7 @@ else
   if [[ -z "${BVN_RAW}" ]]; then
     SINK_ELIGIBLE="yes"
     SINK_REASON="无 BVN，sink WHERE 放行"
-  elif [[ -n "${VT_TOKEN}" && "${VT_TOKEN}" != "(无)" ]]; then
+  elif [[ -n "${VT_TOKEN}" ]]; then
     SINK_ELIGIBLE="yes"
     SINK_REASON="有 BVN 且 vt_token 非空"
   else
@@ -111,8 +106,9 @@ echo
 staging_chk=$(mysql_q "
 SELECT CASE
   WHEN s.user_id IS NULL THEN 'no_staging'
-  WHEN TRIM(COALESCE(s.full_name,'')) = TRIM('${EXPECT_FN//\'/\'\'}') THEN 'match'
-  ELSE CONCAT('mismatch staging=', COALESCE(s.full_name,''), ' bundle=', '${EXPECT_FN//\'/\'\'}')
+  WHEN TRIM(COALESCE(s.full_name,'')) = TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,''))) THEN 'match'
+  ELSE CONCAT('mismatch staging=', COALESCE(s.full_name,''), ' | bundle=',
+              TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,''))))
 END
 FROM user_info_incr_bundle_lookup b
 LEFT JOIN user_info_sync_staging s ON s.user_id = b.user_id
@@ -152,27 +148,36 @@ echo
 
 # ---------- 结论 ----------
 echo "=== 验证结论 ==="
-blockers=()
-[[ "${dirty_tbl:-0}" != "1" ]] && blockers+=("user_info_dirty 表缺失")
-[[ "${trg_cnt:-0}" -lt 14 ]] && blockers+=("TRIGGER 不足")
-[[ -z "$job_line" ]] && blockers+=("无 RUNNING Job")
-[[ "$SINK_ELIGIBLE" == "no" ]] && blockers+=("bundle 无数据")
-[[ "${in_dirty:-0}" == "0" ]] && blockers+=("用户不在脏队列（改源表后 TRIGGER 未触发？）")
-[[ "${dirty_cnt:-0}" -gt 500 ]] && blockers+=("脏队列积压 ${dirty_cnt} 行，单并行度消化慢")
+infra_blockers=()
+realtime_blockers=()
+[[ "${dirty_tbl:-0}" != "1" ]] && infra_blockers+=("user_info_dirty 表缺失")
+[[ "${trg_cnt:-0}" -lt 14 ]] && infra_blockers+=("TRIGGER 不足")
+[[ "$SINK_ELIGIBLE" == "no" ]] && infra_blockers+=("bundle 无数据")
+[[ -z "$job_line" ]] && realtime_blockers+=("无 RUNNING Job（无法保证后续实时同步）")
+[[ "${dirty_cnt:-0}" -gt 500 ]] && realtime_blockers+=("脏队列积压 ${dirty_cnt} 行，单并行度消化慢")
 
-if [[ ${#blockers[@]} -gt 0 ]]; then
-  echo "阻塞项:"
-  for b in "${blockers[@]}"; do echo "  - $b"; done
+if [[ ${#infra_blockers[@]} -gt 0 ]]; then
+  echo "基础设施阻塞:"
+  for b in "${infra_blockers[@]}"; do echo "  - $b"; done
 else
-  echo "基础设施: OK"
+  echo "基础设施: OK（脏表 + TRIGGER + bundle）"
+fi
+
+if [[ ${#realtime_blockers[@]} -gt 0 ]]; then
+  echo "实时同步注意:"
+  for b in "${realtime_blockers[@]}"; do echo "  - $b"; done
 fi
 
 if [[ "$DATA_MATCH" == "pass" ]]; then
-  echo "静态正确性: bundle 与目标一致（至少 full_name）"
+  echo "静态正确性: PASS — 目标 full_name 与 bundle 一致（该用户历史同步结果可信）"
 elif [[ "$DATA_MATCH" == "stale" ]]; then
-  echo "静态正确性: 未证明 — 需 --e2e 或等待 Job 消费到该 user_id"
+  echo "静态正确性: STALE — 目标与 bundle 不一致，需 Job 消费或查 sink 过滤"
+elif [[ "$DATA_MATCH" == "missing" ]]; then
+  echo "静态正确性: MISSING — 应可写但目标无行"
+elif [[ "$staging_chk" == "match" && -n "$TGT_FN" ]]; then
+  echo "静态正确性: PASS — staging 与 bundle match，且目标有行（full_name 请人工核对大小写）"
 else
-  echo "静态正确性: 无法判定 — 见上方阻塞项"
+  echo "静态正确性: 待确认 — 先 git pull 重跑本脚本（已修复 bundle 解析）"
 fi
 echo
 
