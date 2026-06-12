@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS dim_user (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'user',
+    'table-name' = 'application_user_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -296,14 +296,14 @@ FROM (
         )) AS repayment_plan_json,
         bvn.bvn AS bvn_raw
     FROM src_user_order AS o
-    INNER JOIN dim_user FOR SYSTEM_TIME AS OF o.proc_time AS u ON u.id = o.user_id
-    LEFT JOIN dim_user_bank_default FOR SYSTEM_TIME AS OF o.proc_time AS ub ON ub.user_id = o.user_id
-    LEFT JOIN dim_user_bvn FOR SYSTEM_TIME AS OF o.proc_time AS bvn ON bvn.user_id = o.user_id
+    INNER JOIN dim_user FOR SYSTEM_TIME AS OF o.proc_time AS u ON CAST(u.id AS BIGINT) = o.user_id
+    LEFT JOIN dim_user_bank_default FOR SYSTEM_TIME AS OF o.proc_time AS ub ON CAST(ub.user_id AS BIGINT) = o.user_id
+    LEFT JOIN dim_user_bvn FOR SYSTEM_TIME AS OF o.proc_time AS bvn ON CAST(bvn.user_id AS BIGINT) = o.user_id
     LEFT JOIN dim_device_ids FOR SYSTEM_TIME AS OF o.proc_time AS di
         ON u.device_id IS NOT NULL AND TRIM(u.device_id) <> '' AND di.device_uuid = u.device_id
     LEFT JOIN dim_risk_approval FOR SYSTEM_TIME AS OF o.proc_time AS ra ON ra.order_no = o.order_no
     LEFT JOIN dim_user_repay_paid FOR SYSTEM_TIME AS OF o.proc_time AS ur ON ur.order_no = o.order_no
-    LEFT JOIN dim_installment_overdue FOR SYSTEM_TIME AS OF o.proc_time AS ov ON ov.user_order_id = o.id
+    LEFT JOIN dim_installment_overdue FOR SYSTEM_TIME AS OF o.proc_time AS ov ON CAST(ov.user_order_id AS BIGINT) = o.id
     WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''

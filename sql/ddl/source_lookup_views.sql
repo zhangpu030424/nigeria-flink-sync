@@ -2,7 +2,7 @@
 -- mysql ... < sql/ddl/source_lookup_views.sql
 
 CREATE OR REPLACE VIEW user_bank_default_lookup AS
-SELECT user_id, bank_code, bank_holder, bank_account
+SELECT CAST(user_id AS SIGNED) AS user_id, bank_code, bank_holder, bank_account
 FROM (
          SELECT user_id,
                 bank_code,
@@ -18,7 +18,7 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW user_bvn_lookup AS
-SELECT user_id, bvn
+SELECT CAST(user_id AS SIGNED) AS user_id, bvn
 FROM (
          SELECT user_id,
                 bvn,
@@ -59,9 +59,19 @@ WHERE status = 2
 GROUP BY order_no;
 
 CREATE OR REPLACE VIEW user_order_installment_overdue AS
-SELECT user_order_id, MAX(COALESCE(is_overdue, 0)) AS is_overdue
+SELECT CAST(user_order_id AS SIGNED) AS user_order_id,
+       MAX(COALESCE(is_overdue, 0)) AS is_overdue
 FROM user_order_installment
 GROUP BY user_order_id;
+
+-- application 增量 Lookup：user.id 为 UNSIGNED
+CREATE OR REPLACE VIEW application_user_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       mobile,
+       device_id,
+       gps_adid,
+       idfa
+FROM user;
 
 CREATE OR REPLACE VIEW user_repay_paid_by_order_period AS
 SELECT order_no,

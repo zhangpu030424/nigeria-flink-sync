@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
     bvn STRING,
     first_name STRING,
     sur_name STRING,
-    date_of_birth TIMESTAMP(3),
+    date_of_birth DATE,
     education_level STRING,
     gender INT,
     living_address_state STRING,

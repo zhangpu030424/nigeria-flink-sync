@@ -28,6 +28,7 @@ GRANT SELECT ON nigeria_backend.user_repay_paid_by_order_period TO 'flink_cdc'@'
 GRANT SELECT ON nigeria_backend.user_order_loan_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_info_user_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_work_latest_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.application_user_lookup TO 'flink_cdc'@'101.47.31.184';
 
 FLUSH PRIVILEGES;
 
