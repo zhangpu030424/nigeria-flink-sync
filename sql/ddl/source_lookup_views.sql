@@ -64,10 +64,22 @@ FROM user_order_installment
 GROUP BY user_order_id;
 
 CREATE OR REPLACE VIEW user_repay_paid_by_order_period AS
-SELECT order_no, current_period, MAX(callback_time) AS callback_time
+SELECT order_no,
+       CAST(current_period AS SIGNED) AS current_period,
+       MAX(callback_time) AS callback_time
 FROM user_repay
 WHERE status = 2
   AND callback_time IS NOT NULL
   AND order_no IS NOT NULL
   AND TRIM(order_no) <> ''
 GROUP BY order_no, current_period;
+
+-- loan/application 增量 Lookup：避免 UNSIGNED → BigInteger 导致 ClassCastException
+CREATE OR REPLACE VIEW user_order_loan_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       order_no,
+       order_time,
+       disburse_time,
+       settled_time,
+       CAST(risk_order_status AS SIGNED) AS risk_order_status
+FROM user_order;

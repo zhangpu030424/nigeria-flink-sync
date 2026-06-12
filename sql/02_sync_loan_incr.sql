@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS src_user_order_installment (
     amt_due STRING,
     repaid_amount STRING,
     repayment_time TIMESTAMP(3),
-    is_overdue INT,
+    is_overdue TINYINT,
     create_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'user_order',
+    'table-name' = 'user_order_loan_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -119,21 +119,21 @@ SELECT
     ),
     CAST(
         CASE
-            WHEN o.risk_order_status = 10 AND COALESCE(i.is_overdue, 0) = 1 THEN 23
-            WHEN o.risk_order_status = 10
+            WHEN CAST(o.risk_order_status AS INT) = 10 AND COALESCE(CAST(i.is_overdue AS INT), 0) = 1 THEN 23
+            WHEN CAST(o.risk_order_status AS INT) = 10
                 AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) = 0 THEN 20
-            WHEN o.risk_order_status = 10
+            WHEN CAST(o.risk_order_status AS INT) = 10
                 AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) <> 0 THEN 24
-            WHEN o.risk_order_status = 11 THEN 23
-            WHEN o.risk_order_status = 40 THEN 25
-            WHEN o.risk_order_status IN (20, 30, 50) THEN 27
+            WHEN CAST(o.risk_order_status AS INT) = 11 THEN 23
+            WHEN CAST(o.risk_order_status AS INT) = 40 THEN 25
+            WHEN CAST(o.risk_order_status AS INT) IN (20, 30, 50) THEN 27
             ELSE 20
         END AS TINYINT
     )
 FROM src_user_order_installment AS i
-INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF i.proc_time AS o ON o.id = i.user_order_id
+INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF i.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF i.proc_time AS rp
-    ON rp.order_no = o.order_no AND rp.current_period = i.current_period
+    ON rp.order_no = o.order_no AND CAST(rp.current_period AS INT) = CAST(i.current_period AS INT)
 WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> ''
   AND o.risk_order_status IS NOT NULL
-  AND o.risk_order_status NOT IN (0, 2, 4, 6, 8);
+  AND CAST(o.risk_order_status AS INT) NOT IN (0, 2, 4, 6, 8);
