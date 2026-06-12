@@ -154,7 +154,21 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
    - 直接 `UPDATE user_info_dirty SET updated_at=NOW(3) WHERE user_id=?` 测 CDC 链路。
    - 脏表行数 `SELECT COUNT(*) FROM user_info_dirty` 极大时，timestamp 模式要从 bulk-start 重放大量 binlog，需等待或改用 `CDC_STARTUP_MODE=latest-offset` 重提 Job（全量已覆盖缺口时）。
    - 确认 SQL 已关 `scan.incremental.snapshot.enabled=false`（脏队列表勿做全表快照）。
-4. `bash scripts/verify-user-info-incr.sh <user_id>`。
+4. `bash scripts/verify-user-info-incr.sh <user_id>`；端到端：`bash scripts/verify-user-info-incr.sh <user_id> --e2e`。
+
+### 如何验证方案正确性（分层）
+
+| 层 | 验证什么 | 命令 / 方法 | 通过标准 |
+|----|----------|-------------|----------|
+| L1 基础设施 | 脏表、TRIGGER、Job | `deploy-source-ddl.sh` + Flink UI RUNNING | TRIGGER≥14，Job 不 RESTARTING |
+| L2 触发器 | 源表变更 → dirty | `UPDATE user_personal_info ...` 后查 dirty | 对应 `user_id` 有行且 `updated_at` 更新 |
+| L3 组装逻辑 | Lookup 与全量一致 | `verify-user-info-incr.sh` 的 staging_vs_bundle | 显示 `match` |
+| L4 管道 | CDC → Sink | `--e2e` 或 UI Records +1 | 目标 `updated_at` / `full_name` 变化 |
+| L5 数据 | 与 bundle 一致 | 脚本「数据对账」或抽样 SQL | `expected_full_name` = 目标 `full_name` |
+
+**无法一次证明整库正确**：脏队列有积压时，单用户可能要等很久才轮到。验证应用 `--e2e`（只测管道）+ 抽样对比（测组装逻辑），不要只靠改一条业务数据立刻看目标。
+
+**常见「看起来不对」**：有 BVN 无 `vt_token_cache` → sink WHERE 过滤（与全量相同）；`timestamp` 起点在 dirty 行之前 → 需 `latest-offset` 或等 backlog 消化完。
 
 ### Checkpoint expired / tolerable failure threshold
 
