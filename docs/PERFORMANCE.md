@@ -134,7 +134,7 @@ Flink 官方也推荐：**大批量历史用离线导入，CDC 负责增量**。
 
 ### 4. Checkpoint
 
-多 CDC 增量 Job（尤其 `user_info` 8 路源 + 多 Lookup）快照期 checkpoint 耗时长，默认 10min 超时会杀 Job。
+多 CDC 增量 Job（尤其 `user_info` 6 路源 + 多 Lookup）快照期 checkpoint 耗时长，默认 10min 超时会杀 Job。
 
 | 参数 | 推荐值 |
 |------|--------|

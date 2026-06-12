@@ -96,9 +96,8 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | `user_emergency_contact` | emergency_contacts |
 | `risk_user_credit_callback` | credit_limit |
 | `vt_token_cache`（id_number） | id_number |
-| `device_ids` / `device_network` | registration_ip |
 
-未单独 CDC（靠 user 或全量补）：`app_config`（按 app_code 扇出）、adjust 原始表（install_source 靠 user.adid）。
+未单独 CDC（靠 Lookup 或 user 间接触发）：`app_config`、`device_ids` / `device_network`（`registration_ip` 经 `user_reg_ip_lookup` 组装）、adjust 原始表（install_source 靠 user.adid）。
 
 **user 增量 CDC**：`user`、`adjust_callback_record`（UTM 变更，经 adid 关联用户）
 

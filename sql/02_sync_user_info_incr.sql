@@ -1,6 +1,7 @@
 -- 增量 user_info：多源 CDC 触发 + JDBC Lookup 组装（与 user_info_sync_staging 同源）
 -- CDC 触发: user, user_personal_info, user_work_related, user_emergency_contact,
---           risk_user_credit_callback, vt_token_cache(id_number), device_ids, device_network
+--           risk_user_credit_callback, vt_token_cache(id_number)
+-- registration_ip 靠 Lookup user_reg_ip_lookup（device 表变更不单独 CDC）
 -- Lookup: user_personal_latest + 各维表（任意源变更后均取最新 personal/work/credit/...）
 -- 前置: ./scripts/deploy-source-ddl.sh
 -- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id]
@@ -160,54 +161,6 @@ CREATE TABLE IF NOT EXISTS cdc_vt_token_cache (
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
-CREATE TABLE IF NOT EXISTS cdc_device_ids (
-    id BIGINT,
-    device_uuid STRING,
-    session_uuid STRING,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'device_ids',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DEVICE_IDS}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_device_network (
-    id BIGINT,
-    device_uuid STRING,
-    session_uuid STRING,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'device_network',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DEVICE_NET}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
 -- ---------- JDBC Lookup 维表 ----------
 CREATE TABLE IF NOT EXISTS dim_user (
     id BIGINT,
@@ -260,34 +213,6 @@ CREATE TABLE IF NOT EXISTS dim_user_id_by_bvn (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
-);
-
-CREATE TABLE IF NOT EXISTS dim_device_uuid_user (
-    device_uuid STRING,
-    user_id BIGINT,
-    PRIMARY KEY (device_uuid) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'device_uuid_user_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '30m'
-);
-
-CREATE TABLE IF NOT EXISTS dim_session_uuid_user (
-    session_uuid STRING,
-    user_id BIGINT,
-    PRIMARY KEY (session_uuid) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'session_uuid_user_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
     'lookup.cache.ttl' = '30m'
 );
 
@@ -423,26 +348,7 @@ INNER JOIN cdc_user_personal_info AS p
     ON p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
     AND TRIM(p.bvn) = TRIM(vt.raw_value)
 WHERE vt.vt_type = 'id_number'
-  AND p.user_id IS NOT NULL
-UNION ALL
-SELECT u.id AS user_id, di.proc_time
-FROM cdc_device_ids AS di
-INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
-WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> ''
-  AND u.id IS NOT NULL
-UNION ALL
-SELECT u.id AS user_id, dn.proc_time
-FROM cdc_device_network AS dn
-INNER JOIN cdc_user AS u ON u.device_id = dn.device_uuid
-WHERE dn.device_uuid IS NOT NULL AND TRIM(dn.device_uuid) <> ''
-  AND u.id IS NOT NULL
-UNION ALL
-SELECT u.id AS user_id, dn.proc_time
-FROM cdc_device_network AS dn
-INNER JOIN cdc_device_ids AS di ON di.session_uuid = dn.session_uuid
-INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
-WHERE dn.session_uuid IS NOT NULL AND TRIM(dn.session_uuid) <> ''
-  AND u.id IS NOT NULL;
+  AND p.user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
