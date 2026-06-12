@@ -1,24 +1,15 @@
--- 增量 loan：CDC user_order_installment + 源表 Lookup（user_order / user_repay）
--- 前置: mysql ... < sql/ddl/source_lookup_views.sql
+-- 增量 loan：多源 CDC 触发 + Lookup 组装
+-- CDC: user_order_installment, user_order, user_repay
+-- 前置: ./scripts/deploy-source-ddl.sh
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '2s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
-CREATE TABLE IF NOT EXISTS src_user_order_installment (
+CREATE TABLE IF NOT EXISTS cdc_user_order_installment (
     id BIGINT,
     user_order_id BIGINT,
-    installment_order_no STRING,
     current_period INT,
-    received STRING,
-    interests STRING,
-    poundage_fees STRING,
-    penalty_amount STRING,
-    amt_due STRING,
-    repaid_amount STRING,
-    repayment_time TIMESTAMP(3),
-    is_overdue TINYINT,
-    create_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -30,12 +21,85 @@ CREATE TABLE IF NOT EXISTS src_user_order_installment (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user_order_installment',
     'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_LOAN_INSTALLMENT}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_user_order (
+    id BIGINT,
+    order_no STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'user_order',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_LOAN_ORDER}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_user_repay (
+    id BIGINT,
+    order_no STRING,
+    current_period BIGINT,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'user_repay',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_LOAN_REPAY}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS dim_installment (
+    id BIGINT,
+    user_order_id BIGINT,
+    installment_order_no STRING,
+    current_period BIGINT,
+    received STRING,
+    interests STRING,
+    poundage_fees STRING,
+    penalty_amount STRING,
+    amt_due STRING,
+    repaid_amount STRING,
+    repayment_time TIMESTAMP(3),
+    is_overdue BIGINT,
+    create_time TIMESTAMP(3),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_order_installment_loan_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_order (
@@ -53,7 +117,7 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_repay_period (
@@ -70,6 +134,20 @@ CREATE TABLE IF NOT EXISTS dim_repay_period (
     'lookup.cache.max-rows' = '500000',
     'lookup.cache.ttl' = '30m'
 );
+
+CREATE TEMPORARY VIEW v_loan_triggers AS
+SELECT id AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
+UNION ALL
+SELECT i.id AS installment_id, o.proc_time
+FROM cdc_user_order AS o
+INNER JOIN cdc_user_order_installment AS i ON i.user_order_id = o.id
+UNION ALL
+SELECT i.id AS installment_id, ur.proc_time
+FROM cdc_user_repay AS ur
+INNER JOIN cdc_user_order AS o ON o.order_no = ur.order_no
+INNER JOIN cdc_user_order_installment AS i
+    ON i.user_order_id = o.id AND CAST(i.current_period AS BIGINT) = ur.current_period
+WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> '';
 
 CREATE TABLE IF NOT EXISTS sink_loan (
     loan_no STRING, application_no STRING, `period` TINYINT, roll_sequence TINYINT,
@@ -130,9 +208,10 @@ SELECT
             ELSE 20
         END AS TINYINT
     )
-FROM src_user_order_installment AS i
-INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF i.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
-LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF i.proc_time AS rp
+FROM v_loan_triggers AS t
+INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i ON i.id = t.installment_id
+INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
+LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF t.proc_time AS rp
     ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
 WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> ''
   AND o.risk_order_status IS NOT NULL

@@ -306,3 +306,104 @@ SELECT CAST(u.id AS SIGNED) AS user_id,
 FROM user u
          LEFT JOIN v_adjust_latest_by_adid adj
                    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid;
+
+CREATE OR REPLACE VIEW users_by_adid_lookup AS
+SELECT CAST(adid AS CHAR) AS adid,
+       CAST(MAX(id) AS SIGNED) AS user_id
+FROM user
+WHERE adid IS NOT NULL AND TRIM(adid) <> ''
+GROUP BY adid;
+
+-- user 增量 Lookup
+CREATE OR REPLACE VIEW user_incr_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       CAST(app_code AS SIGNED) AS app_code,
+       CAST(mobile AS CHAR) AS mobile,
+       CAST(device_id AS CHAR) AS device_id,
+       CAST(adid AS CHAR) AS adid,
+       CAST(create_time AS DATETIME(3)) AS create_time
+FROM user;
+
+-- user_bankcard 增量：bank_account → bank_info.id
+CREATE OR REPLACE VIEW user_bankcard_id_by_account_lookup AS
+SELECT CAST(TRIM(bank_account) AS CHAR) AS bank_account,
+       CAST(id AS SIGNED) AS bank_id
+FROM (
+         SELECT id, bank_account,
+                ROW_NUMBER() OVER (PARTITION BY TRIM(bank_account) ORDER BY id DESC) AS rn
+         FROM user_bank_info
+         WHERE deleted = 0
+           AND bank_account IS NOT NULL
+           AND TRIM(bank_account) <> ''
+     ) t
+WHERE rn = 1;
+
+CREATE OR REPLACE VIEW user_bankcard_incr_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       CAST(user_id AS SIGNED) AS user_id,
+       CAST(bank_code AS CHAR) AS bank_code,
+       CAST(bank_account AS CHAR) AS bank_account,
+       CAST(is_default AS SIGNED) AS is_default,
+       CAST(deleted AS SIGNED) AS deleted
+FROM user_bank_info;
+
+-- user_product 增量：user+product 最新一单
+CREATE OR REPLACE VIEW user_product_latest_lookup AS
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       CAST(product_id AS CHAR) AS product_id,
+       CAST(amount_max AS CHAR) AS amount_max
+FROM (
+         SELECT user_id,
+                product_id,
+                amount_max,
+                ROW_NUMBER() OVER (PARTITION BY user_id, product_id ORDER BY order_time DESC) AS rn
+         FROM user_order
+         WHERE user_id IS NOT NULL
+           AND product_id IS NOT NULL
+           AND TRIM(product_id) <> ''
+     ) t
+WHERE rn = 1;
+
+-- application 增量：订单全字段 Lookup
+CREATE OR REPLACE VIEW application_order_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       CAST(order_no AS CHAR) AS order_no,
+       CAST(user_id AS SIGNED) AS user_id,
+       CAST(app_code AS SIGNED) AS app_code,
+       CAST(product_id AS CHAR) AS product_id,
+       CAST(period_days AS SIGNED) AS period_days,
+       CAST(period_count AS SIGNED) AS period_count,
+       CAST(re_loan AS SIGNED) AS re_loan,
+       CAST(amount_max AS CHAR) AS amount_max,
+       CAST(received AS CHAR) AS received,
+       CAST(repayment AS CHAR) AS repayment,
+       CAST(poundage AS CHAR) AS poundage,
+       CAST(order_time AS DATETIME(3)) AS order_time,
+       CAST(disburse_time AS DATETIME(3)) AS disburse_time,
+       CAST(settled_time AS DATETIME(3)) AS settled_time,
+       CAST(last_repayment_time AS DATETIME(3)) AS last_repayment_time,
+       CAST(risk_order_status AS SIGNED) AS risk_order_status
+FROM user_order;
+
+CREATE OR REPLACE VIEW application_order_id_by_order_no_lookup AS
+SELECT CAST(order_no AS CHAR) AS order_no,
+       CAST(id AS SIGNED) AS order_id
+FROM user_order
+WHERE order_no IS NOT NULL AND TRIM(order_no) <> '';
+
+-- loan 增量：分期全字段 Lookup
+CREATE OR REPLACE VIEW user_order_installment_loan_lookup AS
+SELECT CAST(id AS SIGNED) AS id,
+       CAST(user_order_id AS SIGNED) AS user_order_id,
+       CAST(installment_order_no AS CHAR) AS installment_order_no,
+       CAST(current_period AS SIGNED) AS current_period,
+       CAST(received AS CHAR) AS received,
+       CAST(interests AS CHAR) AS interests,
+       CAST(poundage_fees AS CHAR) AS poundage_fees,
+       CAST(penalty_amount AS CHAR) AS penalty_amount,
+       CAST(amt_due AS CHAR) AS amt_due,
+       CAST(repaid_amount AS CHAR) AS repaid_amount,
+       CAST(repayment_time AS DATETIME(3)) AS repayment_time,
+       CAST(is_overdue AS SIGNED) AS is_overdue,
+       CAST(create_time AS DATETIME(3)) AS create_time
+FROM user_order_installment;

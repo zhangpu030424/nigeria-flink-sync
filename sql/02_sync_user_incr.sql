@@ -1,14 +1,5 @@
--- 增量：CDC user → 裸号规范 +234 → vt_tokenize(/v2t)（不依赖 vt_token_cache 预灌）
--- 全量: ./scripts/run-user-fast.sh
---
--- CDC_STARTUP_MODE（run-sql / sync-job-auto 注入）:
---   initial          — 先并行快照全表补全量漏写，再追 binlog（默认）
---   timestamp        — 仅从 BULK_START_MS 起追 binlog（不补历史漏写）
---   latest-offset    — 仅从提交时刻起（会漏历史）
--- incremental.snapshot + schema_only：先加载表结构再追 binlog，避免 schema isn't known
---
--- 执行: ./scripts/run-sql.sh sql/02_sync_user_incr.sql
-
+-- 增量 user：多源 CDC 触发 + Lookup 组装
+-- CDC: user, adjust_callback_record（UTM 变更）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -16,14 +7,8 @@ SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '1s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
-CREATE TABLE IF NOT EXISTS src_user (
+CREATE TABLE IF NOT EXISTS cdc_user (
     id BIGINT,
-    app_code STRING,
-    mobile STRING,
-    device_id STRING,
-    adid STRING,
-    status INT,
-    create_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -35,12 +20,68 @@ CREATE TABLE IF NOT EXISTS src_user (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user',
     'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_USER_MAIN}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_adjust_callback (
+    id BIGINT,
+    adid STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'adjust_callback_record',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_USER_ADJUST}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS dim_user_row (
+    id BIGINT,
+    app_code BIGINT,
+    mobile STRING,
+    device_id STRING,
+    adid STRING,
+    create_time TIMESTAMP(3),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_incr_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '30m'
+);
+
+CREATE TABLE IF NOT EXISTS dim_users_by_adid (
+    adid STRING,
+    user_id BIGINT,
+    PRIMARY KEY (adid) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'users_by_adid_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '200000',
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_adjust (
@@ -56,13 +97,22 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     PRIMARY KEY (adid) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'adjust_latest_by_adid',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
+
+CREATE TEMPORARY VIEW v_user_triggers AS
+SELECT id AS user_id, proc_time FROM cdc_user WHERE id IS NOT NULL
+UNION ALL
+SELECT ua.user_id, adj.proc_time
+FROM cdc_adjust_callback AS adj
+INNER JOIN dim_users_by_adid FOR SYSTEM_TIME AS OF adj.proc_time AS ua
+    ON ua.adid = adj.adid
+WHERE adj.adid IS NOT NULL AND TRIM(adj.adid) <> '' AND ua.user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_user (
     user_id BIGINT,
@@ -161,8 +211,9 @@ FROM (
         adj.campaign_tracker AS campaign_id,
         adj.adgroup_tracker AS ad_group_id,
         adj.campaign_tracker AS advertiser_id
-    FROM src_user AS u
-    LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
+    FROM v_user_triggers AS t
+    INNER JOIN dim_user_row FOR SYSTEM_TIME AS OF t.proc_time AS u ON u.id = t.user_id
+    LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF t.proc_time AS adj
         ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> '';

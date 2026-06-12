@@ -44,6 +44,14 @@ CHECK_VIEWS=(
   user_reg_ip_lookup
   user_emergency_contacts_lookup
   user_info_install_source_lookup
+  users_by_adid_lookup
+  user_incr_lookup
+  user_bankcard_id_by_account_lookup
+  user_bankcard_incr_lookup
+  user_product_latest_lookup
+  application_order_lookup
+  application_order_id_by_order_no_lookup
+  user_order_installment_loan_lookup
   application_user_lookup
   user_order_loan_lookup
   user_repay_paid_by_order_period
