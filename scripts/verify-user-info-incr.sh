@@ -42,7 +42,18 @@ mysql_q() {
     -u "$SOURCE_MYSQL_USER" "$SOURCE_MYSQL_DATABASE" -N -e "$1" 2>/dev/null || echo "ERR"
 }
 
-echo "[3] 源库 user_personal_info + user 是否存在（INNER JOIN 必需）"
+echo "[3] user_info_dirty 脏队列（单路 CDC；源表变更须经 TRIGGER 写入）"
+dirty_tbl=$(mysql_q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='user_info_dirty'" | tr -d '[:space:]')
+trg_cnt=$(mysql_q "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND trigger_name LIKE 'trg_user_info_dirty_%'" | tr -d '[:space:]')
+echo "    表存在=${dirty_tbl:-ERR}, TRIGGER 数=${trg_cnt:-ERR}（期望≥14）"
+if [[ "${dirty_tbl:-0}" == "1" ]]; then
+  mysql_q "SELECT CONCAT('队列行数=', COUNT(*), ', 测试用户=', MAX(CASE WHEN user_id=${SRC_UID} THEN 1 ELSE 0 END)) FROM user_info_dirty;"
+else
+  echo "    若缺失：./scripts/deploy-source-ddl.sh（TRIGGER 须 DBA/root）"
+fi
+echo
+
+echo "[4] 源库 user + personal_info（组装必需；仅以 user 注册也可同步）"
 mysql_q "
 SELECT CONCAT('personal_info 行数=', COUNT(*), ', user 存在=', MAX(CASE WHEN u.id IS NOT NULL THEN 1 ELSE 0 END))
 FROM user_personal_info p
@@ -51,7 +62,7 @@ WHERE p.user_id = ${SRC_UID};
 "
 echo
 
-echo "[4] Lookup 视图是否可读（多源 CDC 触发后均 Lookup 取最新）"
+echo "[5] Lookup 视图是否可读（脏队列触发后 Lookup 取最新）"
 for t in user_info_user_lookup user_personal_latest_lookup user_id_by_bvn_lookup \
          device_uuid_user_lookup session_uuid_user_lookup \
          app_config_lookup vt_token_cache_lookup user_work_latest_lookup \
@@ -62,7 +73,7 @@ done
 echo "    若 ERR：./scripts/deploy-source-ddl.sh 或 ./scripts/sync-all-auto.sh --incr-only"
 echo
 
-echo "[5] BVN / VT token（有 BVN 时必须有 token 才会写 sink，同全量宽表逻辑）"
+echo "[6] BVN / VT token（有 BVN 时必须有 token 才会写 sink，同全量宽表逻辑）"
 mysql_q "
 SELECT CONCAT(
   'bvn=', COALESCE(MAX(TRIM(p.bvn)), '(空)'),
@@ -76,21 +87,17 @@ WHERE p.user_id = ${SRC_UID};
 "
 echo
 
-echo "[6] 目标库当前行"
+echo "[7] 目标库当前行"
 MYSQL_PWD="$TARGET_MYSQL_PASSWORD" mysql -h "$TARGET_MYSQL_HOST" -P "$TARGET_MYSQL_PORT" \
   -u "$TARGET_MYSQL_USER" "$TARGET_MYSQL_DATABASE" -e \
   "SELECT user_id, full_name, LEFT(id_number,8) AS id_num_prefix, updated_at FROM user_info WHERE user_id = ${TGT_UID};" \
   2>/dev/null || echo "    目标库查询失败"
 echo
 
-echo "=== 测试写入（须在 Job RUNNING 之后；任一 CDC 源表变更均可触发）==="
-echo "-- personal_info:"
-echo "UPDATE user_personal_info SET first_name = 'IncrTest' WHERE user_id = ${SRC_UID};"
-echo "-- work:"
-echo "UPDATE user_work_related SET company_name = 'IncrCo' WHERE user_id = ${SRC_UID};"
-echo "-- emergency:"
-echo "UPDATE user_emergency_contact SET contact_name = contact_name WHERE user_id = ${SRC_UID};"
-echo "-- user（registration_time / install_source）:"
-echo "UPDATE \`user\` SET adid = adid WHERE id = ${SRC_UID};"
+echo "=== 测试写入（须在 Job RUNNING 且 TRIGGER 已部署）==="
+echo "-- 须改真实值（noop UPDATE 可能不进脏队列/binlog）："
+echo "UPDATE user_personal_info SET first_name = CONCAT('IncrTest', UNIX_TIMESTAMP()) WHERE user_id = ${SRC_UID};"
+echo "-- 确认脏队列："
+echo "SELECT user_id, updated_at FROM user_info_dirty WHERE user_id = ${SRC_UID};"
 echo "等待 5~10s 后查目标："
 echo "SELECT user_id, full_name, updated_at FROM user_info WHERE user_id = ${TGT_UID};"

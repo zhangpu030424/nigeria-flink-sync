@@ -1,12 +1,9 @@
--- 增量 user_info：多源 CDC 触发 + JDBC Lookup 组装（与 user_info_sync_staging 同源）
--- CDC 触发: user, user_personal_info, user_work_related, user_emergency_contact,
---           risk_user_credit_callback, vt_token_cache(id_number)
--- registration_ip 靠 Lookup user_reg_ip_lookup（device 表变更不单独 CDC）
--- Lookup: user_personal_latest + 各维表（任意源变更后均取最新 personal/work/credit/...）
--- 前置: ./scripts/deploy-source-ddl.sh
+-- 增量 user_info：单路 CDC user_info_dirty（源表 TRIGGER 扇出 user_id）+ JDBC Lookup 组装
+-- 前置: ./scripts/deploy-source-ddl.sh（含 sql/ddl/user_info_dirty.sql 表与 TRIGGER）
+-- Lookup: user_personal_latest + 各维表（触发后取最新 personal/work/credit/...）
 -- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id]
 -- 目标 user_id = 源 user_id + 100000000
--- 未 CDC: app_config（按 app_code 扇出）、adjust 原始表（靠 user.adid 变更触发 install_source）
+-- 未入队: app_config（按 app_code 扇出）、device_ids/device_network（registration_ip 仅 Lookup）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -19,36 +16,12 @@ SET 'execution.checkpointing.min-pause' = '120s';
 SET 'execution.checkpointing.tolerable-failed-checkpoints' = '10';
 SET 'execution.checkpointing.unaligned' = 'true';
 
--- ---------- CDC 源（仅用于触发 user_id 刷新） ----------
-CREATE TABLE IF NOT EXISTS cdc_user (
-    id BIGINT,
-    device_id STRING,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_USER}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
-    id BIGINT,
+-- ---------- CDC：脏队列（源表 TRIGGER 维护，单 binlog 连接） ----------
+CREATE TABLE IF NOT EXISTS cdc_user_info_dirty (
     user_id BIGINT,
-    bvn STRING,
+    updated_at TIMESTAMP(3),
     proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
+    PRIMARY KEY (user_id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
     'hostname' = '${SOURCE_MYSQL_HOST}',
@@ -56,103 +29,9 @@ CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_personal_info',
+    'table-name' = 'user_info_dirty',
     'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_PERSONAL}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    -- user_personal_info 含 JSON 列；历史 binlog 偶发 deserializeJson EOF，warn 跳过坏事件避免整 Job 重启
-    'debezium.event.deserialization.failure.handling.mode' = 'warn',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_user_work_related (
-    id BIGINT,
-    user_id BIGINT,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_work_related',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_WORK}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_user_emergency_contact (
-    id BIGINT,
-    user_id BIGINT,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_emergency_contact',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_EMERGENCY}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_risk_user_credit_callback (
-    id BIGINT,
-    user_id BIGINT,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'risk_user_credit_callback',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_CREDIT}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only',
-    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_vt_token_cache (
-    vt_type STRING,
-    raw_value STRING,
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'vt_token_cache',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_VT}',
+    'server-id' = '${CDC_SERVER_ID_UI_DIRTY}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
@@ -196,20 +75,6 @@ CREATE TABLE IF NOT EXISTS dim_user_personal_latest (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'user_personal_latest_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
-);
-
-CREATE TABLE IF NOT EXISTS dim_user_id_by_bvn (
-    bvn STRING,
-    user_id BIGINT,
-    PRIMARY KEY (bvn) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_id_by_bvn_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -320,35 +185,10 @@ CREATE TABLE IF NOT EXISTS dim_user_install_source (
     'lookup.cache.ttl' = '2h'
 );
 
--- 统一触发流：仅用 CDC 双流 JOIN（VIEW 内勿用 FOR SYSTEM_TIME Lookup）
 CREATE TEMPORARY VIEW v_user_info_triggers AS
-SELECT u.id AS user_id, u.proc_time
-FROM cdc_user AS u
-WHERE u.id IS NOT NULL
-UNION ALL
-SELECT p.user_id, p.proc_time
-FROM cdc_user_personal_info AS p
-WHERE p.user_id IS NOT NULL
-UNION ALL
-SELECT w.user_id, w.proc_time
-FROM cdc_user_work_related AS w
-WHERE w.user_id IS NOT NULL
-UNION ALL
-SELECT ec.user_id, ec.proc_time
-FROM cdc_user_emergency_contact AS ec
-WHERE ec.user_id IS NOT NULL
-UNION ALL
-SELECT cc.user_id, cc.proc_time
-FROM cdc_risk_user_credit_callback AS cc
-WHERE cc.user_id IS NOT NULL
-UNION ALL
-SELECT p.user_id, vt.proc_time
-FROM cdc_vt_token_cache AS vt
-INNER JOIN cdc_user_personal_info AS p
-    ON p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
-    AND TRIM(p.bvn) = TRIM(vt.raw_value)
-WHERE vt.vt_type = 'id_number'
-  AND p.user_id IS NOT NULL;
+SELECT d.user_id, d.proc_time
+FROM cdc_user_info_dirty AS d
+WHERE d.user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,

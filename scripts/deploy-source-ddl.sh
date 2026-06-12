@@ -22,6 +22,7 @@ echo ">> deploy-source-ddl: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_M
 DDL_FILES=(
   sql/ddl/source_views_adjust.sql
   sql/ddl/source_lookup_views.sql
+  sql/ddl/user_info_dirty.sql
 )
 
 for f in "${DDL_FILES[@]}"; do
@@ -68,6 +69,31 @@ done
 
 if [[ "$failed" -ne 0 ]]; then
   echo "ERR: 源库视图部署未完整，请检查 flink_cdc 是否有 CREATE VIEW 权限"
+  exit 1
+fi
+
+echo ""
+echo ">> 校验 user_info_dirty（增量脏队列）"
+if table_exists user_info_dirty; then
+  echo "  ✓ user_info_dirty 表"
+else
+  echo "  ✗ user_info_dirty 表缺失"
+  failed=1
+fi
+trg_cnt=$(mysql_source_query \
+  "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${SOURCE_MYSQL_DATABASE}' AND trigger_name LIKE 'trg_user_info_dirty_%';" \
+  2>/dev/null || echo "0")
+trg_cnt=$(echo "$trg_cnt" | tr -d '[:space:]')
+if [[ "${trg_cnt:-0}" -ge 14 ]]; then
+  echo "  ✓ user_info_dirty TRIGGER 数量=${trg_cnt}"
+else
+  echo "  ✗ user_info_dirty TRIGGER 不足（当前 ${trg_cnt:-0}，期望≥14）"
+  echo "    请用具备 TRIGGER 权限的账号执行: mysql ... < sql/ddl/user_info_dirty.sql"
+  failed=1
+fi
+
+if [[ "$failed" -ne 0 ]]; then
+  echo "ERR: 源库 DDL 部署未完整"
   exit 1
 fi
 

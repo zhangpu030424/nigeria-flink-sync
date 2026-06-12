@@ -78,7 +78,7 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | Job | CDC 源表 | VT |
 |-----|---------|-----|
 | user | `user` + `adjust_callback_record` | 运行时 vt_tokenize |
-| user_info | 多源 CDC（见下）+ Lookup | id_number |
+| user_info | **`user_info_dirty` 单路 CDC** + Lookup（源表 TRIGGER 入队） | id_number |
 | user_bankcard | `user_bank_info` + `vt_token_cache` | bank_account |
 | user_product | `user_order` → Lookup 最新 product | 无 |
 | application | 多源 CDC（见下）+ Lookup | mobile/gaid/bank/id_number |
@@ -86,18 +86,23 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 
 增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-all-auto.sh` / `sync-pipeline-auto.sh` 已内置，无需 DMS 手动执行）。
 
-**user_info 增量 CDC 源表**（任一变更 → 按 `user_id` 重算整行 info）：
+**user_info 增量（脏队列方案 B）**
 
-| CDC 表 | 影响字段 |
-|--------|----------|
-| `user` | registration_time、app、install_source（adid） |
+Flink **只 CDC 一张表** `user_info_dirty`；下列源表变更时由 **MySQL TRIGGER** 写入 `user_id`，Flink 收到后 Lookup 组装整行：
+
+| TRIGGER 源表 | 影响字段 |
+|-------------|----------|
+| `user` | registration_time、app、adid |
 | `user_personal_info` | 姓名、BVN、地址、education 等 |
 | `user_work_related` | job_type、salary、company、profession |
 | `user_emergency_contact` | emergency_contacts |
 | `risk_user_credit_callback` | credit_limit |
 | `vt_token_cache`（id_number） | id_number |
+| `adjust_callback_record` | install_source |
 
-未单独 CDC（靠 Lookup 或 user 间接触发）：`app_config`、`device_ids` / `device_network`（`registration_ip` 经 `user_reg_ip_lookup` 组装）、adjust 原始表（install_source 靠 user.adid）。
+DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。
+
+未入队（仅 Lookup）：`app_config`、`device_ids` / `device_network`（`registration_ip`）。
 
 **user 增量 CDC**：`user`、`adjust_callback_record`（UTM 变更，经 adid 关联用户）
 
@@ -130,17 +135,11 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 
 ## 增量故障排查
 
-### `cdc_user_personal_info` binlog JSON 反序列化失败
+### user_info 增量无数据
 
-日志特征：`deserializeJson` + `EOFException` + `WRITE_ROWS`，Job 进入 `RESTARTING` 循环，UPDATE 无法到 sink。
-
-原因：`user_personal_info` 表含 JSON 列，某条历史 binlog 事件损坏或过大，Debezium 默认 `fail` 会拉垮整 Job。
-
-处理：
-
-1. `git pull` 后重提 Job（SQL 已对 `cdc_user_personal_info` 加 `debezium.event.deserialization.failure.handling.mode=warn`，跳过坏事件并打 WARN）。
-2. 全量已覆盖缺口时，可临时 `CDC_STARTUP_MODE=latest-offset` 只追新变更。
-3. 源库排查：`SHOW COLUMNS FROM user_personal_info WHERE Type LIKE '%json%';`，对照失败时刻（日志 `EventHeaderV4{timestamp=...}`）附近 INSERT。
+1. `deploy-source-ddl.sh` 校验 `user_info_dirty` 表 + TRIGGER≥14。
+2. 源表 UPDATE 后查 `SELECT * FROM user_info_dirty WHERE user_id=?` 是否有行。
+3. `bash scripts/verify-user-info-incr.sh <user_id>`。
 
 ### Checkpoint expired / tolerable failure threshold
 
