@@ -129,6 +129,20 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 
 全量仍走宽表；增量不再依赖定时刷新 `*_sync_staging`。
 
+## 增量故障排查
+
+### `cdc_user_personal_info` binlog JSON 反序列化失败
+
+日志特征：`deserializeJson` + `EOFException` + `WRITE_ROWS`，Job 进入 `RESTARTING` 循环，UPDATE 无法到 sink。
+
+原因：`user_personal_info` 表含 JSON 列，某条历史 binlog 事件损坏或过大，Debezium 默认 `fail` 会拉垮整 Job。
+
+处理：
+
+1. `git pull` 后重提 Job（SQL 已对 `cdc_user_personal_info` 加 `debezium.event.deserialization.failure.handling.mode=warn`，跳过坏事件并打 WARN）。
+2. 全量已覆盖缺口时，可临时 `CDC_STARTUP_MODE=latest-offset` 只追新变更。
+3. 源库排查：`SHOW COLUMNS FROM user_personal_info WHERE Type LIKE '%json%';`，对照失败时刻（日志 `EventHeaderV4{timestamp=...}`）附近 INSERT。
+
 ## 未纳入流水线
 
 - **id_mapping**：SQL 宽表已就绪；增量仍 CDC 宽表（待改多源 CDC + 双写）

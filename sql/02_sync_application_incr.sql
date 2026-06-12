@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only',
+    'debezium.event.deserialization.failure.handling.mode' = 'warn',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );

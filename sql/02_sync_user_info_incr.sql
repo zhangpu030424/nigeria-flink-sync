@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only',
+    -- user_personal_info 含 JSON 列；历史 binlog 偶发 deserializeJson EOF，warn 跳过坏事件避免整 Job 重启
+    'debezium.event.deserialization.failure.handling.mode' = 'warn',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
