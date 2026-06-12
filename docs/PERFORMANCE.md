@@ -134,7 +134,16 @@ Flink 官方也推荐：**大批量历史用离线导入，CDC 负责增量**。
 
 ### 4. Checkpoint
 
-全量阶段已将 interval 调到 **120s**，减少 checkpoint 打断。全量完成后可改回 60s。
+多 CDC 增量 Job（尤其 `user_info` 8 路源 + 多 Lookup）快照期 checkpoint 耗时长，默认 10min 超时会杀 Job。
+
+| 参数 | 推荐值 |
+|------|--------|
+| `execution.checkpointing.interval` | `300s` |
+| `execution.checkpointing.timeout` | `1800s`（30min） |
+| `execution.checkpointing.unaligned` | `true` |
+| `execution.checkpointing.tolerable-failed-checkpoints` | `10` |
+
+`.env` 可覆盖：`FLINK_CHECKPOINT_INTERVAL=300s`、`FLINK_CHECKPOINT_TIMEOUT=1800s`。改 `docker-compose.yml` 后须 `docker compose up -d --force-recreate jobmanager`。
 
 ## 合理预期（4 核 + JDBC MySQL）
 

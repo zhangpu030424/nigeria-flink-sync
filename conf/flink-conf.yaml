@@ -10,7 +10,11 @@ state.backend: rocksdb
 state.checkpoints.dir: file:///tmp/flink-checkpoints
 state.savepoints.dir: file:///tmp/flink-savepoints
 state.checkpoint-storage: filesystem
-execution.checkpointing.interval: 60s
+execution.checkpointing.interval: 300s
+execution.checkpointing.timeout: 1800s
+execution.checkpointing.min-pause: 120s
+execution.checkpointing.tolerable-failed-checkpoints: 10
+execution.checkpointing.unaligned: true
 execution.checkpointing.mode: EXACTLY_ONCE
 execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
 

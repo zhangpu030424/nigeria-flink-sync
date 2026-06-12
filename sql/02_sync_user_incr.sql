@@ -6,6 +6,11 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '1s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
+SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
+SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
+SET 'execution.checkpointing.min-pause' = '120s';
+SET 'execution.checkpointing.tolerable-failed-checkpoints' = '10';
+SET 'execution.checkpointing.unaligned' = 'true';
 
 CREATE TABLE IF NOT EXISTS cdc_user (
     id BIGINT,

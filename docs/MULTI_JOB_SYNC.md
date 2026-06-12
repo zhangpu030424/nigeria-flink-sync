@@ -143,6 +143,21 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 2. 全量已覆盖缺口时，可临时 `CDC_STARTUP_MODE=latest-offset` 只追新变更。
 3. 源库排查：`SHOW COLUMNS FROM user_personal_info WHERE Type LIKE '%json%';`，对照失败时刻（日志 `EventHeaderV4{timestamp=...}`）附近 INSERT。
 
+### Checkpoint expired / tolerable failure threshold
+
+日志特征：`Checkpoint expired before completing`、`checkpoint request time in queue: 655935`（队列等约 11 分钟）、`Exceeded checkpoint tolerable failure threshold`。
+
+原因：多 CDC + Lookup 快照期 state 大，默认 **10 分钟 checkpoint 超时**不够；120s 间隔又触发新 checkpoint 排队。
+
+处理：`git pull` 后重建 JobManager 并重提增量 Job：
+
+```bash
+docker compose up -d --force-recreate jobmanager
+./scripts/sync-job-auto.sh user_info --incr-only --bulk-start-ms <MS> --keep-other-jobs
+```
+
+已调：`interval=300s`、`timeout=1800s`、`unaligned=true`、`tolerable-failed-checkpoints=10`（见 `docker-compose.yml` 与各 `*_incr.sql`）。
+
 ## 未纳入流水线
 
 - **id_mapping**：SQL 宽表已就绪；增量仍 CDC 宽表（待改多源 CDC + 双写）
