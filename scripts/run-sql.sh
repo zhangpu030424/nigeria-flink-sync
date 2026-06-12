@@ -60,7 +60,8 @@ export LM_CDC_SERVER_ID_URI="${LM_CDC_SERVER_ID_URI:-5741-5744}"
 # user_info 增量多 CDC（5400+）
 _ui_base="${CDC_SERVER_ID_UI_BASE:-5400}"
 _ui_span="${CDC_SERVER_ID_UI_SPAN:-4}"
-export CDC_SERVER_ID_UI_DIRTY="${CDC_SERVER_ID_UI_DIRTY:-$((_ui_base + 1))-$((_ui_base + _ui_span))}"
+# 脏队列表 CDC 关闭 incremental snapshot 时 server-id 须为单值（非 5401-5404 范围，否则 NumberFormatException）
+export CDC_SERVER_ID_UI_DIRTY="${CDC_SERVER_ID_UI_DIRTY:-$((_ui_base + 1))}"
 export CDC_SERVER_ID_UI_USER="${CDC_SERVER_ID_UI_USER:-$((_ui_base + 1))-$((_ui_base + _ui_span))}"
 export CDC_SERVER_ID_UI_PERSONAL="${CDC_SERVER_ID_UI_PERSONAL:-$((_ui_base + 11))-$((_ui_base + 11 + _ui_span))}"
 export CDC_SERVER_ID_UI_WORK="${CDC_SERVER_ID_UI_WORK:-$((_ui_base + 21))-$((_ui_base + 21 + _ui_span))}"

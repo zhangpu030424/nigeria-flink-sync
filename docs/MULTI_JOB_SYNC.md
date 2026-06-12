@@ -104,6 +104,8 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 
 组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 `FLINK_PARALLELISM_INCR=4`。
 
+`CDC_SERVER_ID_UI_DIRTY` 须为**单值**（如 `5401`）；脏队列 CDC 关闭 incremental snapshot 时写 `5401-5404` 会报 `NumberFormatException`。
+
 未入队（仅 Lookup）：`app_config`、`device_ids` / `device_network`（`registration_ip`）。
 
 **user 增量 CDC**：`user`、`adjust_callback_record`（UTM 变更，经 adid 关联用户）
