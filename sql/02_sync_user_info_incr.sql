@@ -141,32 +141,32 @@ FROM (
             ''
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '') AS full_name,
-        JSON_OBJECT(
-            'birthday', DATE_FORMAT(p.date_of_birth, 'yyyy-MM-dd'),
-            'job_type', wr.work_type,
-            'education', p.education_level,
-            'gender', p.gender,
-            'salary', CASE
+        JSON_STRING(JSON_OBJECT(
+            'birthday' VALUE DATE_FORMAT(p.date_of_birth, 'yyyy-MM-dd'),
+            'job_type' VALUE wr.work_type,
+            'education' VALUE p.education_level,
+            'gender' VALUE p.gender,
+            'salary' VALUE CASE
                 WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS STRING)
                 ELSE wr.monthly_income
             END,
-            'company', wr.company_name,
-            'profession', wr.occupation,
-            'registration_time', CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) AS BIGINT),
-            'marital', p.marriage,
-            'children_num', p.number_of_children,
-            'full_name', TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))),
-            'app', JSON_OBJECT(
-                'name', ac.app_name,
-                'version', ac.version,
-                'app_id', u.app_code
+            'company' VALUE wr.company_name,
+            'profession' VALUE wr.occupation,
+            'registration_time' VALUE CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) AS BIGINT),
+            'marital' VALUE p.marriage,
+            'children_num' VALUE p.number_of_children,
+            'full_name' VALUE TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))),
+            'app' VALUE JSON_OBJECT(
+                'name' VALUE ac.app_name,
+                'version' VALUE ac.version,
+                'app_id' VALUE u.app_code
             ),
-            'address', JSON_OBJECT(
-                'province', p.living_address_state,
-                'city', p.living_address_city,
-                'detail', TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
+            'address' VALUE JSON_OBJECT(
+                'province' VALUE p.living_address_state,
+                'city' VALUE p.living_address_city,
+                'detail' VALUE TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
             )
-        ) AS info_json
+        )) AS info_json
     FROM src_user_personal_info AS p
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON u.id = p.user_id
     LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON wr.user_id = p.user_id

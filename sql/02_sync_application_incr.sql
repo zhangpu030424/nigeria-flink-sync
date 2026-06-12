@@ -306,22 +306,22 @@ FROM (
                 ELSE 1
             END AS TINYINT
         ) AS risk_status,
-        JSON_OBJECT(
-            'roll_sequence', 0,
-            'period', 1,
-            'principal', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'disbursed_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'interest', 0,
-            'admin_fee', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'service_fee', 0,
-            'tax_fee', 0,
-            'reduction_amount', 0,
-            'total_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'term', COALESCE(o.period_days, 7),
-            'start_date', DATE_FORMAT(o.order_time, 'yyyy-MM-dd'),
-            'due_date', DATE_FORMAT(o.last_repayment_time, 'yyyy-MM-dd'),
-            'roll_allowed', 0
-        ) AS repayment_plan_json,
+        JSON_STRING(JSON_OBJECT(
+            'roll_sequence' VALUE 0,
+            'period' VALUE 1,
+            'principal' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            'disbursed_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            'interest' VALUE 0,
+            'admin_fee' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            'service_fee' VALUE 0,
+            'tax_fee' VALUE 0,
+            'reduction_amount' VALUE 0,
+            'total_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            'term' VALUE COALESCE(o.period_days, 7),
+            'start_date' VALUE DATE_FORMAT(o.order_time, 'yyyy-MM-dd'),
+            'due_date' VALUE DATE_FORMAT(o.last_repayment_time, 'yyyy-MM-dd'),
+            'roll_allowed' VALUE 0
+        )) AS repayment_plan_json,
         bvn.bvn AS bvn_raw
     FROM src_user_order AS o
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF o.proc_time AS u ON u.id = o.user_id
