@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS dim_vt_cache (
     vt_type STRING,
     raw_value STRING,
     token STRING,
-    status INT,
+    status BIGINT,
     PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS dim_vt_cache (
 
 CREATE TABLE IF NOT EXISTS dim_user (
     id BIGINT,
-    app_code INT,
+    app_code BIGINT,
     create_time TIMESTAMP(3),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS dim_user_work (
 );
 
 CREATE TABLE IF NOT EXISTS dim_app_config (
-    app_code INT,
+    app_code BIGINT,
     app_name STRING,
     version STRING,
     PRIMARY KEY (app_code) NOT ENFORCED
@@ -183,7 +183,7 @@ FROM (
         AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
         AND vt.raw_value = TRIM(p.bvn)
     LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON CAST(wr.user_id AS BIGINT) = p.user_id
-    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON CAST(ac.app_code AS INT) = CAST(u.app_code AS INT)
+    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON ac.app_code = u.app_code
 ) AS e
 WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')
    OR (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '');

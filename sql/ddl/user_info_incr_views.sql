@@ -1,4 +1,5 @@
 -- user_info 增量所需 Lookup 视图（DMS 可跑，无 GRANT）
+-- Flink 侧对应整型列须声明 BIGINT（MySQL CAST AS SIGNED → JDBC Long，声明 INT 会 ClassCastException）
 -- mysql ... < sql/ddl/user_info_incr_views.sql
 
 USE nigeria_backend;

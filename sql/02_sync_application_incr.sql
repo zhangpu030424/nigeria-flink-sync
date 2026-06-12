@@ -137,7 +137,7 @@ CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
 
 CREATE TABLE IF NOT EXISTS dim_installment_overdue (
     user_order_id BIGINT,
-    is_overdue INT,
+    is_overdue BIGINT,
     PRIMARY KEY (user_order_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',

@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
     order_time TIMESTAMP(3),
     disburse_time TIMESTAMP(3),
     settled_time TIMESTAMP(3),
-    risk_order_status INT,
+    risk_order_status BIGINT,
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
 
 CREATE TABLE IF NOT EXISTS dim_repay_period (
     order_no STRING,
-    current_period INT,
+    current_period BIGINT,
     callback_time TIMESTAMP(3),
     PRIMARY KEY (order_no, current_period) NOT ENFORCED
 ) WITH (
@@ -133,7 +133,7 @@ SELECT
 FROM src_user_order_installment AS i
 INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF i.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF i.proc_time AS rp
-    ON rp.order_no = o.order_no AND CAST(rp.current_period AS INT) = CAST(i.current_period AS INT)
+    ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
 WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> ''
   AND o.risk_order_status IS NOT NULL
   AND CAST(o.risk_order_status AS INT) NOT IN (0, 2, 4, 6, 8);
