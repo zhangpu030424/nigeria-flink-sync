@@ -475,7 +475,6 @@ FROM (
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '') AS full_name,
         JSON_STRING(JSON_OBJECT(
-            NULL ON NULL NULL,
             KEY 'birthday' VALUE CASE
                 WHEN p.date_of_birth IS NULL THEN CAST(NULL AS STRING)
                 ELSE DATE_FORMAT(CAST(p.date_of_birth AS TIMESTAMP(3)), 'yyyy-MM-dd')
@@ -513,15 +512,14 @@ FROM (
             KEY 'ocr' VALUE CAST(NULL AS STRING),
             KEY 'profession' VALUE CAST(wr.occupation AS STRING),
             KEY 'app' VALUE JSON_OBJECT(
-                NULL ON NULL NULL,
                 KEY 'name' VALUE CAST(ac.app_name AS STRING),
                 KEY 'version' VALUE CAST(ac.version AS STRING),
                 KEY 'app_id' VALUE CAST(u.app_code AS BIGINT)
+                NULL ON NULL
             ),
             KEY 'emergency_contacts' VALUE COALESCE(ec.emergency_contacts, '[]'),
             KEY 'salary_day' VALUE CAST(NULL AS STRING),
             KEY 'address' VALUE JSON_OBJECT(
-                NULL ON NULL NULL,
                 KEY 'province' VALUE CAST(p.living_address_state AS STRING),
                 KEY 'city' VALUE CAST(p.living_address_city AS STRING),
                 KEY 'district' VALUE CAST(NULL AS STRING),
@@ -531,6 +529,7 @@ FROM (
                     ELSE TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
                 END,
                 KEY 'village' VALUE CAST(NULL AS STRING)
+                NULL ON NULL
             ),
             KEY 'salary_fortnightly' VALUE CAST(NULL AS STRING),
             KEY 'salary_daily' VALUE CAST(NULL AS STRING),
@@ -546,6 +545,7 @@ FROM (
             KEY 'salary_weekly' VALUE CAST(NULL AS STRING),
             KEY 'survey' VALUE CAST(NULL AS STRING),
             KEY 'salary_type' VALUE CAST(NULL AS STRING)
+            NULL ON NULL
         )) AS info_json
     FROM v_user_info_triggers AS t
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF t.proc_time AS u ON u.id = t.user_id
