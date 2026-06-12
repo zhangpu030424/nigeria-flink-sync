@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
     first_name STRING,
     sur_name STRING,
     date_of_birth DATE,
-    education_level STRING,
+    education_level INT,
     gender INT,
     living_address_state STRING,
     living_address_city STRING,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
 
 CREATE TABLE IF NOT EXISTS dim_user (
     id BIGINT,
-    app_code STRING,
+    app_code INT,
     create_time TIMESTAMP(3),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -74,14 +74,14 @@ CREATE TABLE IF NOT EXISTS dim_user_work (
 );
 
 CREATE TABLE IF NOT EXISTS dim_app_config (
-    app_code STRING,
+    app_code INT,
     app_name STRING,
     version STRING,
     PRIMARY KEY (app_code) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'app_config',
+    'table-name' = 'app_config_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '1000',
@@ -126,7 +126,7 @@ FROM (
         JSON_STRING(JSON_OBJECT(
             'birthday' VALUE CAST(p.date_of_birth AS STRING),
             'job_type' VALUE wr.work_type,
-            'education' VALUE p.education_level,
+            'education' VALUE CAST(p.education_level AS STRING),
             'gender' VALUE CAST(p.gender AS STRING),
             'salary' VALUE CASE
                 WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS STRING)
@@ -152,7 +152,7 @@ FROM (
     FROM src_user_personal_info AS p
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON CAST(u.id AS BIGINT) = p.user_id
     LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON CAST(wr.user_id AS BIGINT) = p.user_id
-    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON ac.app_code = u.app_code
+    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON CAST(ac.app_code AS INT) = CAST(u.app_code AS INT)
 ) AS e
 WHERE (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '')
    OR e.full_name IS NOT NULL;

@@ -2,7 +2,10 @@
 -- mysql ... < sql/ddl/source_lookup_views.sql
 
 CREATE OR REPLACE VIEW user_bank_default_lookup AS
-SELECT CAST(user_id AS SIGNED) AS user_id, bank_code, bank_holder, bank_account
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       CAST(bank_code AS CHAR) AS bank_code,
+       CAST(bank_holder AS CHAR) AS bank_holder,
+       CAST(bank_account AS CHAR) AS bank_account
 FROM (
          SELECT user_id,
                 bank_code,
@@ -29,7 +32,10 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW device_ids_latest_lookup AS
-SELECT device_uuid, session_uuid, aaid, idfa
+SELECT CAST(device_uuid AS CHAR) AS device_uuid,
+       CAST(session_uuid AS CHAR) AS session_uuid,
+       CAST(aaid AS CHAR) AS aaid,
+       CAST(idfa AS CHAR) AS idfa
 FROM (
          SELECT device_uuid,
                 session_uuid,
@@ -64,13 +70,13 @@ SELECT CAST(user_order_id AS SIGNED) AS user_order_id,
 FROM user_order_installment
 GROUP BY user_order_id;
 
--- application 增量 Lookup：user.id 为 UNSIGNED
+-- application 增量 Lookup：user.id 为 UNSIGNED；device 字段统一 CHAR
 CREATE OR REPLACE VIEW application_user_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
-       mobile,
-       device_id,
-       gps_adid,
-       idfa
+       CAST(mobile AS CHAR) AS mobile,
+       CAST(device_id AS CHAR) AS device_id,
+       CAST(gps_adid AS CHAR) AS gps_adid,
+       CAST(idfa AS CHAR) AS idfa
 FROM user;
 
 CREATE OR REPLACE VIEW user_repay_paid_by_order_period AS
@@ -97,16 +103,22 @@ FROM user_order;
 -- user_info 增量 Lookup：user.id / user_work_related.user_id 为 UNSIGNED 时需 CAST
 CREATE OR REPLACE VIEW user_info_user_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
-       app_code,
+       CAST(app_code AS SIGNED) AS app_code,
        create_time
 FROM user;
 
+CREATE OR REPLACE VIEW app_config_lookup AS
+SELECT CAST(app_code AS SIGNED) AS app_code,
+       app_name,
+       version
+FROM app_config;
+
 CREATE OR REPLACE VIEW user_work_latest_lookup AS
 SELECT CAST(user_id AS SIGNED) AS user_id,
-       work_type,
-       occupation,
-       company_name,
-       monthly_income
+       CAST(work_type AS CHAR) AS work_type,
+       CAST(occupation AS CHAR) AS occupation,
+       CAST(company_name AS CHAR) AS company_name,
+       CAST(monthly_income AS CHAR) AS monthly_income
 FROM (
          SELECT user_id,
                 work_type,

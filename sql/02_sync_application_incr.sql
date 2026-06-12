@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS src_user_order (
     id BIGINT,
     order_no STRING,
     user_id BIGINT,
-    app_code STRING,
+    app_code INT,
     product_id STRING,
     period_days INT,
     period_count INT,
@@ -221,7 +221,7 @@ FROM (
         o.order_no AS sn,
         o.user_id + 100000000 AS user_id,
         o.user_id + 100000000 AS group_user_id,
-        CAST(o.app_code AS INT) AS app_id,
+        o.app_code AS app_id,
         vt_tokenize(
             CASE
                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)

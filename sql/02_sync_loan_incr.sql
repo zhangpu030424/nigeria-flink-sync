@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS src_user_order_installment (
     penalty_amount STRING,
     amt_due STRING,
     repaid_amount STRING,
-    repayment_time DATE,
-    is_overdue BOOLEAN,
-    create_time DATE,
+    repayment_time TIMESTAMP(3),
+    is_overdue TINYINT,
+    create_time TIMESTAMP(3),
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -119,7 +119,7 @@ SELECT
     ),
     CAST(
         CASE
-            WHEN CAST(o.risk_order_status AS INT) = 10 AND COALESCE(i.is_overdue, FALSE) THEN 23
+            WHEN CAST(o.risk_order_status AS INT) = 10 AND COALESCE(CAST(i.is_overdue AS INT), 0) = 1 THEN 23
             WHEN CAST(o.risk_order_status AS INT) = 10
                 AND CAST(COALESCE(NULLIF(TRIM(i.repaid_amount), ''), '0') AS DECIMAL(20, 2)) = 0 THEN 20
             WHEN CAST(o.risk_order_status AS INT) = 10
