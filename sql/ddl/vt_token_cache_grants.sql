@@ -1,6 +1,9 @@
--- vt-preload.py stream 模式所需权限（源库 DBA 执行）
+-- vt-preload.py / 增量 Lookup 视图授权（须源库 DBA 在 mysql 客户端执行，勿用云 DMS 查询窗）
+-- 若报 [5030] You are not allowed to create a user with GRANT：
+--   1) flink_cdc 用户已存在且能跑 CDC → 多半已有 SELECT，可跳过本文件
+--   2) 或请 DBA 先 CREATE USER，再执行本文件
+-- user_info 已直查 user/app_config/vt_token_cache，通常无需本文件里的视图 GRANT
 -- 注意：建表用 root 执行 sql/ddl/vt_token_cache.sql；flink_cdc 不需要 CREATE
--- 主机：错误里若是 'flink_cdc'@'101.47.31.184' 则对该 IP 授权；也可同时授 '%'
 
 USE nigeria_backend;
 

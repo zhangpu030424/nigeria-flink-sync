@@ -1,4 +1,6 @@
--- 增量 Job JDBC Lookup 用维表视图（user_order / user_order_installment CDC 点查）
+-- 增量 Job JDBC Lookup 用维表视图（application/loan 等）
+-- 仅 user_info 增量: 跑 sql/ddl/user_work_latest_lookup.sql 即可（其余直查源表）
+-- 授权勿在云 DMS 控制台跑 GRANT（会报 5030）；见 sql/ddl/vt_token_cache_grants.sql 说明
 -- mysql ... < sql/ddl/source_lookup_views.sql
 
 CREATE OR REPLACE VIEW user_bank_default_lookup AS

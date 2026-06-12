@@ -1,6 +1,5 @@
 -- 增量 user_info：CDC user_personal_info + 源表 JDBC Lookup（user/app_config/vt_token_cache 直查）
--- 仅 user_work 需视图 user_work_latest_lookup（每用户最新一条，Lookup 无法替代）:
---   mysql ... < sql/ddl/source_lookup_views.sql  （只跑该视图一段即可）
+-- 仅 user_work 需视图: mysql ... < sql/ddl/user_work_latest_lookup.sql（无 GRANT，DMS 可跑）
 -- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id，如 211038]
 -- 注意: 只监听 user_personal_info（不是 user）；目标 user_id = 源 user_id + 100000000
 --       timestamp 模式下仅同步 bulk-start-ms 之后的 binlog；测试 UPDATE 须在 Job RUNNING 之后且改真实字段
