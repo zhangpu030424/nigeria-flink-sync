@@ -64,6 +64,15 @@ envsubst "$VARS" < "$SQL_FILE" > "$PREPARED"
 CONTAINER="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 REMOTE="/tmp/nigeria-flink-run.sql"
 
+if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+  echo ">> ERR: JobManager 容器 [$CONTAINER] 未运行（可能 OOM 或崩溃退出）"
+  echo ">> 恢复: ./scripts/up.sh"
+  echo ">> 诊断: docker logs --tail 80 $CONTAINER"
+  docker ps -a --filter "name=nigeria-flink" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || true
+  rm -f "$PREPARED"
+  exit 1
+fi
+
 echo ">> 执行: $SQL_FILE"
 echo ">> 注入并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}  fetch=${FLINK_CDC_FETCH_SIZE}  sink_buffer=${FLINK_SINK_BUFFER_ROWS}"
 if [[ "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *_lm_bulk* ]]; then

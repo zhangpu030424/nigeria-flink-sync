@@ -36,6 +36,10 @@ CHECK_VIEWS=(
   app_config_lookup
   vt_token_cache_lookup
   user_work_latest_lookup
+  user_credit_latest_lookup
+  user_reg_ip_lookup
+  user_emergency_contacts_lookup
+  user_info_install_source_lookup
   application_user_lookup
   user_order_loan_lookup
   user_repay_paid_by_order_period

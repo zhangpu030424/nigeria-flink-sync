@@ -107,15 +107,33 @@ mysql_count() {
   MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
 }
 
-# 全量达标：默认要求宽表计数 == 目标表计数；SYNC_REQUIRE_EXACT_COUNT=0 时按 SYNC_THRESHOLD_PCT 百分比
+# 全量达标：默认宽表计数 == 目标；允许目标略多（全量期间增量 Job 并行写入，见 SYNC_COUNT_MAX_SURPLUS）
 bulk_count_reached() {
   local src="$1"
   local tgt="$2"
   [[ "$src" =~ ^[0-9]+$ && "$tgt" =~ ^[0-9]+$ && "$src" -gt 0 ]] || return 1
   if [[ "$SYNC_REQUIRE_EXACT_COUNT" == "1" ]]; then
-    [[ "$tgt" -eq "$src" ]]
+    [[ "$tgt" -eq "$src" ]] && return 0
+    if [[ "$tgt" -gt "$src" ]]; then
+      local surplus=$((tgt - src))
+      local max_surplus="${SYNC_COUNT_MAX_SURPLUS:-100}"
+      [[ "$surplus" -le "$max_surplus" ]] && return 0
+    fi
+    return 1
   else
     awk "BEGIN {exit !(($tgt * 100 / $src) >= $SYNC_THRESHOLD_PCT)}"
+  fi
+}
+
+count_match_reason() {
+  local src="$1"
+  local tgt="$2"
+  if [[ "$tgt" -eq "$src" ]]; then
+    echo "一致"
+  elif [[ "$tgt" -gt "$src" ]]; then
+    echo "目标多$((tgt - src))（增量并行写入，≤${SYNC_COUNT_MAX_SURPLUS:-100}视为达标）"
+  else
+    echo "目标少$((src - tgt))"
   fi
 }
 
@@ -129,11 +147,11 @@ verify_staging_target_count() {
     log "✗ 无法读取宽表/目标计数（宽表=${src_cnt} 目标=${tgt_cnt}）"
     return 1
   fi
-  if [[ "$src_cnt" -ne "$tgt_cnt" ]]; then
-    log "✗ 宽表与目标表数量不一致：宽表=${src_cnt} 目标=${tgt_cnt} 差=$((tgt_cnt - src_cnt))"
+  if ! bulk_count_reached "$src_cnt" "$tgt_cnt"; then
+    log "✗ 宽表与目标表数量未达标：宽表=${src_cnt} 目标=${tgt_cnt}（$(count_match_reason "$src_cnt" "$tgt_cnt")）"
     return 1
   fi
-  log "✓ 宽表与目标表数量一致：${src_cnt}"
+  log "✓ 宽表与目标表数量达标：宽表=${src_cnt} 目标=${tgt_cnt}（$(count_match_reason "$src_cnt" "$tgt_cnt")）"
   return 0
 }
 

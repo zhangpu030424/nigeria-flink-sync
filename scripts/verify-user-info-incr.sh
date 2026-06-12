@@ -52,7 +52,8 @@ WHERE p.user_id = ${SRC_UID};
 echo
 
 echo "[4] Lookup 视图是否可读（增量 Job 依赖 CAST 视图，勿直查源表）"
-for t in user_info_user_lookup app_config_lookup vt_token_cache_lookup user_work_latest_lookup; do
+for t in user_info_user_lookup app_config_lookup vt_token_cache_lookup user_work_latest_lookup \
+         user_credit_latest_lookup user_reg_ip_lookup user_emergency_contacts_lookup user_info_install_source_lookup; do
   cnt=$(mysql_q "SELECT COUNT(*) FROM ${t} LIMIT 1" | tr -d '[:space:]')
   echo "    ${t}: ${cnt}"
 done
