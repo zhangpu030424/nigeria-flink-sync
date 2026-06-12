@@ -16,6 +16,7 @@ SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 -- ---------- CDC 源（仅用于触发 user_id 刷新） ----------
 CREATE TABLE IF NOT EXISTS cdc_user (
     id BIGINT,
+    device_id STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS cdc_user (
 CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
     id BIGINT,
     user_id BIGINT,
+    bvn STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -154,6 +156,7 @@ CREATE TABLE IF NOT EXISTS cdc_vt_token_cache (
 CREATE TABLE IF NOT EXISTS cdc_device_ids (
     id BIGINT,
     device_uuid STRING,
+    session_uuid STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -385,39 +388,54 @@ CREATE TABLE IF NOT EXISTS dim_user_install_source (
     'lookup.cache.ttl' = '2h'
 );
 
--- ---------- 统一触发流：任意源变更 → 按 user_id 重算整行 ----------
+-- 统一触发流：仅用 CDC 双流 JOIN（VIEW 内勿用 FOR SYSTEM_TIME Lookup）
 CREATE TEMPORARY VIEW v_user_info_triggers AS
-SELECT user_id, proc_time FROM cdc_user WHERE id IS NOT NULL
+SELECT u.id AS user_id, u.proc_time
+FROM cdc_user AS u
+WHERE u.id IS NOT NULL
 UNION ALL
-SELECT user_id, proc_time FROM cdc_user_personal_info WHERE user_id IS NOT NULL
+SELECT p.user_id, p.proc_time
+FROM cdc_user_personal_info AS p
+WHERE p.user_id IS NOT NULL
 UNION ALL
-SELECT user_id, proc_time FROM cdc_user_work_related WHERE user_id IS NOT NULL
+SELECT w.user_id, w.proc_time
+FROM cdc_user_work_related AS w
+WHERE w.user_id IS NOT NULL
 UNION ALL
-SELECT user_id, proc_time FROM cdc_user_emergency_contact WHERE user_id IS NOT NULL
+SELECT ec.user_id, ec.proc_time
+FROM cdc_user_emergency_contact AS ec
+WHERE ec.user_id IS NOT NULL
 UNION ALL
-SELECT user_id, proc_time FROM cdc_risk_user_credit_callback WHERE user_id IS NOT NULL
+SELECT cc.user_id, cc.proc_time
+FROM cdc_risk_user_credit_callback AS cc
+WHERE cc.user_id IS NOT NULL
 UNION ALL
-SELECT ub.user_id, vt.proc_time
+SELECT p.user_id, vt.proc_time
 FROM cdc_vt_token_cache AS vt
-INNER JOIN dim_user_id_by_bvn FOR SYSTEM_TIME AS OF vt.proc_time AS ub
-    ON ub.bvn = TRIM(vt.raw_value)
+INNER JOIN cdc_user_personal_info AS p
+    ON p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
+    AND TRIM(p.bvn) = TRIM(vt.raw_value)
 WHERE vt.vt_type = 'id_number'
+  AND p.user_id IS NOT NULL
 UNION ALL
-SELECT du.user_id, di.proc_time
+SELECT u.id AS user_id, di.proc_time
 FROM cdc_device_ids AS di
-INNER JOIN dim_device_uuid_user FOR SYSTEM_TIME AS OF di.proc_time AS du
-    ON du.device_uuid = di.device_uuid
+INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
 WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> ''
+  AND u.id IS NOT NULL
 UNION ALL
-SELECT COALESCE(du.user_id, su.user_id) AS user_id, dn.proc_time
+SELECT u.id AS user_id, dn.proc_time
 FROM cdc_device_network AS dn
-LEFT JOIN dim_device_uuid_user FOR SYSTEM_TIME AS OF dn.proc_time AS du
-    ON du.device_uuid = dn.device_uuid
-    AND dn.device_uuid IS NOT NULL AND TRIM(dn.device_uuid) <> ''
-LEFT JOIN dim_session_uuid_user FOR SYSTEM_TIME AS OF dn.proc_time AS su
-    ON su.session_uuid = dn.session_uuid
-    AND dn.session_uuid IS NOT NULL AND TRIM(dn.session_uuid) <> ''
-WHERE COALESCE(du.user_id, su.user_id) IS NOT NULL;
+INNER JOIN cdc_user AS u ON u.device_id = dn.device_uuid
+WHERE dn.device_uuid IS NOT NULL AND TRIM(dn.device_uuid) <> ''
+  AND u.id IS NOT NULL
+UNION ALL
+SELECT u.id AS user_id, dn.proc_time
+FROM cdc_device_network AS dn
+INNER JOIN cdc_device_ids AS di ON di.session_uuid = dn.session_uuid
+INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
+WHERE dn.session_uuid IS NOT NULL AND TRIM(dn.session_uuid) <> ''
+  AND u.id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
