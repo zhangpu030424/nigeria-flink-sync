@@ -145,35 +145,35 @@ FROM (
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '') AS full_name,
         JSON_STRING(JSON_OBJECT(
-            'birthday' VALUE CAST(p.date_of_birth AS STRING),
-            'job_type' VALUE CAST(wr.work_type AS STRING),
-            'education' VALUE CAST(p.education_level AS STRING),
-            'gender' VALUE CAST(p.gender AS STRING),
-            'salary' VALUE CASE
+            KEY 'birthday' VALUE CAST(p.date_of_birth AS STRING),
+            KEY 'job_type' VALUE CAST(wr.work_type AS STRING),
+            KEY 'education' VALUE CAST(p.education_level AS STRING),
+            KEY 'gender' VALUE CAST(p.gender AS STRING),
+            KEY 'salary' VALUE CASE
                 WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS STRING)
                 ELSE CAST(wr.monthly_income AS STRING)
             END,
-            'company' VALUE CAST(wr.company_name AS STRING),
-            'profession' VALUE CAST(wr.occupation AS STRING),
-            'registration_time' VALUE CASE
+            KEY 'company' VALUE CAST(wr.company_name AS STRING),
+            KEY 'profession' VALUE CAST(wr.occupation AS STRING),
+            KEY 'registration_time' VALUE CASE
                 WHEN u.create_time IS NULL THEN CAST(NULL AS BIGINT)
                 ELSE CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) AS BIGINT)
             END,
-            'marital' VALUE CAST(p.marriage AS STRING),
-            'children_num' VALUE CASE
+            KEY 'marital' VALUE CAST(p.marriage AS STRING),
+            KEY 'children_num' VALUE CASE
                 WHEN p.number_of_children IS NULL THEN CAST(NULL AS STRING)
                 ELSE CAST(p.number_of_children AS STRING)
             END,
-            'full_name' VALUE TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))),
-            'app' VALUE JSON_OBJECT(
-                'name' VALUE CAST(ac.app_name AS STRING),
-                'version' VALUE CAST(ac.version AS STRING),
-                'app_id' VALUE CAST(u.app_code AS STRING)
+            KEY 'full_name' VALUE TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))),
+            KEY 'app' VALUE JSON_OBJECT(
+                KEY 'name' VALUE CAST(ac.app_name AS STRING),
+                KEY 'version' VALUE CAST(ac.version AS STRING),
+                KEY 'app_id' VALUE CAST(u.app_code AS STRING)
             ),
-            'address' VALUE JSON_OBJECT(
-                'province' VALUE CAST(p.living_address_state AS STRING),
-                'city' VALUE CAST(p.living_address_city AS STRING),
-                'detail' VALUE TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
+            KEY 'address' VALUE JSON_OBJECT(
+                KEY 'province' VALUE CAST(p.living_address_state AS STRING),
+                KEY 'city' VALUE CAST(p.living_address_city AS STRING),
+                KEY 'detail' VALUE TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
             )
         )) AS info_json
     FROM src_user_personal_info AS p

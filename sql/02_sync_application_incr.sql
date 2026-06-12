@@ -279,20 +279,20 @@ FROM (
             END AS TINYINT
         ) AS risk_status,
         JSON_STRING(JSON_OBJECT(
-            'roll_sequence' VALUE 0,
-            'period' VALUE 1,
-            'principal' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'disbursed_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'interest' VALUE 0,
-            'admin_fee' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'service_fee' VALUE 0,
-            'tax_fee' VALUE 0,
-            'reduction_amount' VALUE 0,
-            'total_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            'term' VALUE COALESCE(o.period_days, 7),
-            'start_date' VALUE DATE_FORMAT(o.order_time, 'yyyy-MM-dd'),
-            'due_date' VALUE DATE_FORMAT(o.last_repayment_time, 'yyyy-MM-dd'),
-            'roll_allowed' VALUE 0
+            KEY 'roll_sequence' VALUE CAST(0 AS INT),
+            KEY 'period' VALUE CAST(1 AS INT),
+            KEY 'principal' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            KEY 'disbursed_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            KEY 'interest' VALUE CAST(0 AS BIGINT),
+            KEY 'admin_fee' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            KEY 'service_fee' VALUE CAST(0 AS BIGINT),
+            KEY 'tax_fee' VALUE CAST(0 AS BIGINT),
+            KEY 'reduction_amount' VALUE CAST(0 AS BIGINT),
+            KEY 'total_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
+            KEY 'term' VALUE CAST(COALESCE(o.period_days, 7) AS INT),
+            KEY 'start_date' VALUE DATE_FORMAT(o.order_time, 'yyyy-MM-dd'),
+            KEY 'due_date' VALUE DATE_FORMAT(o.last_repayment_time, 'yyyy-MM-dd'),
+            KEY 'roll_allowed' VALUE CAST(0 AS INT)
         )) AS repayment_plan_json,
         bvn.bvn AS bvn_raw
     FROM src_user_order AS o
