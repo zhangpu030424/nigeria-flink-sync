@@ -124,7 +124,7 @@ FROM (
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '') AS full_name,
         JSON_STRING(JSON_OBJECT(
-            'birthday' VALUE DATE_FORMAT(p.date_of_birth, 'yyyy-MM-dd'),
+            'birthday' VALUE CAST(p.date_of_birth AS STRING),
             'job_type' VALUE wr.work_type,
             'education' VALUE p.education_level,
             'gender' VALUE CAST(p.gender AS STRING),
