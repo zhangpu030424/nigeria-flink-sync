@@ -77,9 +77,9 @@ record_bulk_start_ms() {
 # 优先 source_mysql：源库 NOW() @ Africa/Lagos → UNIX_TIMESTAMP，与 binlog 时间轴对齐。
 BULK_START_MS=${BULK_START_MS}
 BULK_START_SOURCE=${BULK_START_SOURCE}
-BULK_START_ISO_NG=${BULK_START_ISO_NG}
-BULK_START_ISO_UTC=${BULK_START_ISO_UTC}
-BULK_START_ISO_HOST=${BULK_START_ISO_HOST}
+BULK_START_ISO_NG='${BULK_START_ISO_NG}'
+BULK_START_ISO_UTC='${BULK_START_ISO_UTC}'
+BULK_START_ISO_HOST='${BULK_START_ISO_HOST}'
 EOF
   echo ">> 锁定 bulk-start-ms=${BULK_START_MS}（来源: ${BULK_START_SOURCE}）"
   echo ">>   尼日利亚(WAT): ${BULK_START_ISO_NG}  ← CDC/binlog 对齐看这一行"
@@ -93,9 +93,10 @@ EOF
 load_bulk_start_ms() {
   local f="${1:-logs/bulk-start-ms.env}"
   if [[ -f "$f" ]]; then
-    # shellcheck disable=SC1090
+    # shellcheck source=scripts/lib/load-env.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/load-env.sh"
     set -a
-    source "$f"
+    load_env_file "$f"
     set +a
     if [[ -n "${BULK_START_MS:-}" ]]; then
       echo ">> 读取 bulk-start-ms=${BULK_START_MS} (WAT ${BULK_START_ISO_NG:-${BULK_START_ISO:-}}) ← ${f}"

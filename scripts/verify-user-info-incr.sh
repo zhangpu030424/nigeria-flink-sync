@@ -8,25 +8,19 @@ SRC_UID="${1:-211038}"
 TGT_UID=$((SRC_UID + 100000000))
 
 [[ -f .env ]] || { echo "缺少 .env"; exit 1; }
-# 只加载 KEY=VALUE 行（与 run-sql.sh 一致，避免 .env 中文注释行被 source 执行）
+# shellcheck source=scripts/lib/load-env.sh
+source "$(dirname "$0")/lib/load-env.sh"
 set -a
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line%%#*}"
-  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -z "$line" ]] && continue
-  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-  key="${line%%=*}"
-  [[ -n "${!key:-}" ]] && continue
-  export "$line"
-done < .env
+load_env_file .env
 set +a
 
 echo "=== user_info 增量排查 user_id=${SRC_UID} → 目标 ${TGT_UID} ==="
 echo
 
 if [[ -f logs/bulk-start-ms.env ]]; then
-  # shellcheck disable=SC1091
-  source logs/bulk-start-ms.env
+  set -a
+  load_env_file logs/bulk-start-ms.env
+  set +a
   echo "[1] bulk-start-ms=${BULK_START_MS:-?} (${BULK_START_ISO_NG:-WAT 未知})"
   echo "    timestamp 模式只同步该时刻之后的 binlog"
 else
