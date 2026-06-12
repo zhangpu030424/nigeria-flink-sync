@@ -101,7 +101,8 @@ SELECT CAST(id AS SIGNED) AS id,
 FROM user_order;
 
 CREATE OR REPLACE VIEW vt_id_number_lookup AS
-SELECT raw_value, token
+SELECT CAST(raw_value AS CHAR) AS raw_value,
+       CAST(token AS CHAR) AS token
 FROM vt_token_cache
 WHERE vt_type = 'id_number'
   AND status = 1
@@ -112,13 +113,13 @@ WHERE vt_type = 'id_number'
 CREATE OR REPLACE VIEW user_info_user_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
        CAST(app_code AS SIGNED) AS app_code,
-       create_time
+       CAST(create_time AS DATETIME(3)) AS create_time
 FROM user;
 
 CREATE OR REPLACE VIEW app_config_lookup AS
 SELECT CAST(app_code AS SIGNED) AS app_code,
-       app_name,
-       version
+       CAST(app_name AS CHAR) AS app_name,
+       CAST(version AS CHAR) AS version
 FROM app_config;
 
 CREATE OR REPLACE VIEW user_work_latest_lookup AS
