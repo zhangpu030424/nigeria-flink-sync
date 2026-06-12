@@ -14,7 +14,7 @@ SELECT b.id,
        b.is_default
 FROM user_bank_info b
          LEFT JOIN vt_token_cache vt
-                   ON vt.vt_type = 'bank_account'
+                   ON vt.vt_type = 3
                        AND vt.status = 1
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin
 WHERE b.deleted = 0

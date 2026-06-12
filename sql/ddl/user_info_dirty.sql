@@ -116,11 +116,11 @@ CREATE TRIGGER trg_user_info_dirty_vt_ai
     AFTER INSERT ON vt_token_cache
     FOR EACH ROW
 BEGIN
-    IF NEW.vt_type = 'id_number'
+    IF NEW.vt_type = 4
         AND NEW.raw_value IS NOT NULL
         AND TRIM(NEW.raw_value) <> '' THEN
         CALL sp_user_info_dirty_enqueue_bvn(NEW.raw_value, 60);
-    ELSEIF NEW.vt_type = 'emergency_contact'
+    ELSEIF NEW.vt_type = 5
         AND NEW.raw_value IS NOT NULL
         AND TRIM(NEW.raw_value) <> '' THEN
         CALL sp_user_info_dirty_enqueue_emergency_mobile(NEW.raw_value, 60);
@@ -131,11 +131,11 @@ CREATE TRIGGER trg_user_info_dirty_vt_au
     AFTER UPDATE ON vt_token_cache
     FOR EACH ROW
 BEGIN
-    IF NEW.vt_type = 'id_number'
+    IF NEW.vt_type = 4
         AND NEW.raw_value IS NOT NULL
         AND TRIM(NEW.raw_value) <> '' THEN
         CALL sp_user_info_dirty_enqueue_bvn(NEW.raw_value, 60);
-    ELSEIF NEW.vt_type = 'emergency_contact'
+    ELSEIF NEW.vt_type = 5
         AND NEW.raw_value IS NOT NULL
         AND TRIM(NEW.raw_value) <> '' THEN
         CALL sp_user_info_dirty_enqueue_emergency_mobile(NEW.raw_value, 60);

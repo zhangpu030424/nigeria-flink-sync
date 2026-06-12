@@ -1,10 +1,13 @@
 -- VT 字典表：明文(规范化后) → token，全表/多 Job 共用
+-- vt_type 用 TINYINT，避免 ENUM ALTER 锁表；编码见 sql/ddl/vt_type_codes.sql
 -- 在源库 nigeria_backend 执行:
 --   mysql -h <host> -u ... -p nigeria_backend < sql/ddl/vt_token_cache.sql
+-- 已有 ENUM 表无法 ALTER 时:
+--   mysql ... < sql/ddl/vt_token_cache_rebuild.sql
 
 CREATE TABLE IF NOT EXISTS vt_token_cache (
     id           BIGINT       NOT NULL AUTO_INCREMENT,
-    vt_type      ENUM('mobile','gaid_idfa','bank_account','id_number','emergency_contact','id2') NOT NULL,
+    vt_type      TINYINT      NOT NULL COMMENT '1mobile 2gaid 3bank 4id_number 5emergency 6id2',
     raw_value    VARCHAR(128) NOT NULL COLLATE utf8mb4_bin COMMENT '规范化明文，bin 比较避免与源表排序规则冲突',
     token        VARCHAR(128) NULL COMMENT '/v2t 返回 token',
     masking      VARCHAR(128) NULL COMMENT '/v2t 返回 masking（可选）',

@@ -1,13 +1,6 @@
--- 已有 vt_token_cache 表：扩展 ENUM + 灌入 emergency_contact 明文（可重复执行）
--- mysql ... < sql/ddl/vt_token_cache_add_emergency_contact.sql
-
-ALTER TABLE vt_token_cache
-    MODIFY vt_type ENUM(
-        'mobile', 'gaid_idfa', 'bank_account', 'id_number', 'emergency_contact', 'id2'
-        ) NOT NULL;
-
+-- 灌 emergency_contact 明文（vt_type=5）；表须已为 TINYINT，见 vt_token_cache_rebuild.sql
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'emergency_contact', norm.mobile_norm, 0
+SELECT 5, norm.mobile_norm, 0
 FROM (
     SELECT DISTINCT
         CASE
@@ -23,5 +16,5 @@ WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 
 SELECT vt_type, status, COUNT(*) AS cnt
 FROM vt_token_cache
-WHERE vt_type = 'emergency_contact'
+WHERE vt_type = 5
 GROUP BY vt_type, status;

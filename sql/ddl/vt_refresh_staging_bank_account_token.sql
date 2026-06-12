@@ -3,7 +3,7 @@
 
 UPDATE user_bankcard_sync_staging s
     INNER JOIN vt_token_cache vt
-    ON vt.vt_type = 'bank_account'
+    ON vt.vt_type = 3
         AND vt.status = 1
         AND vt.raw_value = s.bank_account_raw
 SET s.bank_account_token = vt.token

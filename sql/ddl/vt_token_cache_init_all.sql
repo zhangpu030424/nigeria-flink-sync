@@ -13,7 +13,7 @@
 
 CREATE TABLE IF NOT EXISTS vt_token_cache (
     id           BIGINT       NOT NULL AUTO_INCREMENT,
-    vt_type      ENUM('mobile','gaid_idfa','bank_account','id_number','emergency_contact','id2') NOT NULL,
+    vt_type      TINYINT      NOT NULL COMMENT '1mobile 2gaid 3bank 4id_number 5emergency 6id2',
     raw_value    VARCHAR(128) NOT NULL COMMENT '源明文（mobile 为规范化后）',
     token        VARCHAR(128) NULL,
     masking      VARCHAR(128) NULL,
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS vt_token_cache (
 
 -- ---------- mobile ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'mobile', norm.mobile_norm, 0
+SELECT 1, norm.mobile_norm, 0
 FROM (
     SELECT DISTINCT
         CASE
@@ -45,7 +45,7 @@ WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 
 -- ---------- gaid_idfa（多源 UNION 去重）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'gaid_idfa', v.val, 0
+SELECT 2, v.val, 0
 FROM (
     SELECT DISTINCT TRIM(u.gps_adid) AS val FROM `user` u
     WHERE u.gps_adid IS NOT NULL AND TRIM(u.gps_adid) <> ''
@@ -62,7 +62,7 @@ FROM (
 
 -- ---------- bank_account ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'bank_account', TRIM(b.bank_account), 0
+SELECT 3, TRIM(b.bank_account), 0
 FROM user_bank_info b
 WHERE b.deleted = 0
   AND b.bank_account IS NOT NULL
@@ -70,14 +70,14 @@ WHERE b.deleted = 0
 
 -- ---------- id_number (BVN) ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'id_number', TRIM(p.bvn), 0
+SELECT 4, TRIM(p.bvn), 0
 FROM user_personal_info p
 WHERE p.bvn IS NOT NULL
   AND TRIM(p.bvn) <> '';
 
 -- ---------- emergency_contact ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'emergency_contact', norm.mobile_norm, 0
+SELECT 5, norm.mobile_norm, 0
 FROM (
     SELECT DISTINCT
         CASE

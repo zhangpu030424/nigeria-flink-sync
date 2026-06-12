@@ -2,7 +2,7 @@
 -- mysql -h <host> -u root -p nigeria_backend < sql/ddl/vt_reseed_mobile_pending.sql
 
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
-SELECT 'mobile', norm.mobile_norm, 0
+SELECT 1, norm.mobile_norm, 0
 FROM (
     SELECT DISTINCT
         CASE
@@ -17,4 +17,4 @@ FROM (
 WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 
 SELECT status, COUNT(*) AS cnt
-FROM vt_token_cache WHERE vt_type = 'mobile' GROUP BY status;
+FROM vt_token_cache WHERE vt_type = 1 GROUP BY status;

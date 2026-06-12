@@ -18,8 +18,10 @@ mysql_source_cmd() {
 mysql_source_file() {
   local f="$1"
   [[ -f "$f" ]] || { echo "ERR: SQL 文件不存在: $f" >&2; return 1; }
-  echo ">> 源库 DDL: $f"
+  echo ">> 源库 DDL: $f （$(date '+%H:%M:%S') 开始；大表 ALTER/INSERT 可能 1~10 分钟，无输出属正常）"
+  local t0=$SECONDS
   mysql_source_cmd < "$f"
+  echo ">> 完成: $f （耗时 $((SECONDS - t0))s）"
 }
 
 mysql_source_query() {

@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS cdc_user_bank_info (
 );
 
 CREATE TABLE IF NOT EXISTS cdc_vt_token_cache (
-    vt_type STRING,
+    vt_type TINYINT,
     raw_value STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
@@ -96,7 +96,7 @@ SELECT ba.bank_id, vt.proc_time
 FROM cdc_vt_token_cache AS vt
 INNER JOIN dim_bankcard_by_account FOR SYSTEM_TIME AS OF vt.proc_time AS ba
     ON ba.bank_account = TRIM(vt.raw_value)
-WHERE vt.vt_type = 'bank_account'
+WHERE vt.vt_type = 3
   AND vt.raw_value IS NOT NULL AND TRIM(vt.raw_value) <> ''
   AND ba.bank_id IS NOT NULL;
 

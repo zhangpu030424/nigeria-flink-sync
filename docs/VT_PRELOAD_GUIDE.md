@@ -112,13 +112,15 @@ Flink TaskManager 日志**不应**出现 `VT /v2t batch`。
 
 `vt_token_cache` 已支持 `gaid_idfa`、`bank_account`、`id_number`、`emergency_contact`（紧急联系人手机号，+234 规范化同 mobile）。
 
-**user_info**：`info.emergency_contacts[].mobile` 写入 VT token（Lookup 视图 JOIN `vt_type=emergency_contact`）；须先预灌该类型再重建宽表/跑增量。
+**user_info**：`info.emergency_contacts[].mobile` 写入 VT token（`vt_type=5`）；须先预灌再重建宽表。
 
-已有库扩展 ENUM：
+已有 ENUM 表无法 `ALTER` 时，**删表重建**（会清空全部 token）:
 
 ```bash
-mysql ... < sql/ddl/vt_token_cache_add_emergency_contact.sql
-./scripts/vt-preload.sh emergency_contact
+mysql ... < sql/ddl/vt_token_cache_rebuild.sql
+./scripts/rebuild-all-staging.sh
 ```
+
+`vt_type` TINYINT 编码: 1=mobile 2=gaid_idfa 3=bank_account 4=id_number 5=emergency_contact 6=id2。Flink 通过 `vt_token_cache_lookup` 视图仍用字符串名 JOIN。
 
 `--vt-type all` 会包含 `emergency_contact`。后续 Job 在宽表 JOIN 对应 `*_token` 列即可。

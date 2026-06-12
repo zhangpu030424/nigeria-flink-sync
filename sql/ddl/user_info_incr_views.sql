@@ -72,7 +72,15 @@ SELECT CAST(app_code AS SIGNED) AS app_code,
 FROM app_config;
 
 CREATE OR REPLACE VIEW vt_token_cache_lookup AS
-SELECT CAST(vt_type AS CHAR) AS vt_type,
+SELECT CAST(CASE vt_type
+                WHEN 1 THEN 'mobile'
+                WHEN 2 THEN 'gaid_idfa'
+                WHEN 3 THEN 'bank_account'
+                WHEN 4 THEN 'id_number'
+                WHEN 5 THEN 'emergency_contact'
+                WHEN 6 THEN 'id2'
+                ELSE CAST(vt_type AS CHAR)
+            END AS CHAR) AS vt_type,
        CAST(raw_value AS CHAR) AS raw_value,
        CAST(token AS CHAR) AS token,
        CAST(status AS SIGNED) AS status
@@ -156,7 +164,7 @@ SELECT CAST(ec.user_id AS SIGNED) AS user_id,
        ) AS emergency_contacts
 FROM user_emergency_contact ec
          LEFT JOIN vt_token_cache vt
-                   ON vt.vt_type = 'emergency_contact'
+                   ON vt.vt_type = 5
                        AND vt.status = 1
                        AND vt.token IS NOT NULL
                        AND TRIM(vt.token) <> ''

@@ -39,7 +39,7 @@ FROM `user` u
          LEFT JOIN adjust_latest_by_adid a
                    ON u.adid IS NOT NULL AND u.adid <> '' AND a.adid = u.adid
          LEFT JOIN vt_token_cache vt_m
-                   ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
+                   ON vt_m.vt_type = 1 AND vt_m.status = 1
                        AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
                            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
                            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
@@ -62,7 +62,7 @@ SELECT b.id,
        b.is_default
 FROM user_bank_info b
          LEFT JOIN vt_token_cache vt_b
-                   ON vt_b.vt_type = 'bank_account' AND vt_b.status = 1
+                   ON vt_b.vt_type = 3 AND vt_b.status = 1
                        AND vt_b.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin
 WHERE b.deleted = 0
   AND b.bank_account IS NOT NULL AND TRIM(b.bank_account) <> '';
@@ -183,7 +183,7 @@ FROM `user` u
          LEFT JOIN user_work_related wr ON wr.user_id = u.id
          LEFT JOIN app_config ac ON ac.app_code = u.app_code
          LEFT JOIN vt_token_cache vt_id
-                   ON vt_id.vt_type = 'id_number' AND vt_id.status = 1
+                   ON vt_id.vt_type = 4 AND vt_id.status = 1
                        AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
          LEFT JOIN (
     SELECT user_id, credit_limit
@@ -240,7 +240,7 @@ FROM `user` u
            ) AS emergency_contacts
     FROM user_emergency_contact ec
              LEFT JOIN vt_token_cache vt
-                       ON vt.vt_type = 'emergency_contact'
+                       ON vt.vt_type = 5
                            AND vt.status = 1
                            AND vt.token IS NOT NULL
                            AND TRIM(vt.token) <> ''
@@ -442,7 +442,7 @@ FROM (
     WHERE rn = 1
 ) di ON di.device_uuid = u.device_id
          LEFT JOIN vt_token_cache vt_m
-                   ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
+                   ON vt_m.vt_type = 1 AND vt_m.status = 1
                        AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
                            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
                            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
@@ -451,15 +451,15 @@ FROM (
                            ELSE CONCAT('+234', TRIM(u.mobile))
                        END) COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_id
-                   ON vt_id.vt_type = 'id_number' AND vt_id.status = 1
+                   ON vt_id.vt_type = 4 AND vt_id.status = 1
                        AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_g
-                   ON vt_g.vt_type = 'gaid_idfa' AND vt_g.status = 1
+                   ON vt_g.vt_type = 2 AND vt_g.status = 1
                        AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''),
                                                                               NULLIF(TRIM(u.idfa), ''),
                                                                               NULLIF(TRIM(di.aaid), ''))) COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_ba
-                   ON vt_ba.vt_type = 'bank_account' AND vt_ba.status = 1
+                   ON vt_ba.vt_type = 3 AND vt_ba.status = 1
                        AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
          LEFT JOIN (
     SELECT order_no,
@@ -792,7 +792,7 @@ FROM (
          FROM device_ids d
                   INNER JOIN `user` u ON u.device_id = d.device_uuid
                   INNER JOIN vt_token_cache vt_g
-                             ON vt_g.vt_type = 'gaid_idfa' AND vt_g.status = 1
+                             ON vt_g.vt_type = 2 AND vt_g.status = 1
                                  AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(
                                      NULLIF(TRIM(d.aaid), ''),
                                      NULLIF(TRIM(d.idfa), '')
@@ -810,7 +810,7 @@ FROM (
          FROM device_ids d
                   INNER JOIN `user` u ON u.device_id = d.device_uuid
                   INNER JOIN vt_token_cache vt_g
-                             ON vt_g.vt_type = 'gaid_idfa' AND vt_g.status = 1
+                             ON vt_g.vt_type = 2 AND vt_g.status = 1
                                  AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(
                                      NULLIF(TRIM(d.aaid), ''),
                                      NULLIF(TRIM(d.idfa), '')

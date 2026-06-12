@@ -6,7 +6,7 @@
 
 UPDATE user_sync_staging s
     INNER JOIN vt_token_cache vt
-    ON vt.vt_type = 'mobile'
+    ON vt.vt_type = 1
         AND vt.status = 1
         AND vt.raw_value = s.mobile_norm
 SET s.mobile_token = vt.token

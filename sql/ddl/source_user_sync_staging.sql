@@ -36,7 +36,7 @@ FROM `user` u
          LEFT JOIN adjust_latest_by_adid a
                    ON u.adid IS NOT NULL AND u.adid <> '' AND a.adid = u.adid
          LEFT JOIN vt_token_cache vt
-                   ON vt.vt_type = 'mobile'
+                   ON vt.vt_type = 1
                        AND vt.status = 1
                        AND vt.raw_value COLLATE utf8mb4_bin = (CASE
                            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL

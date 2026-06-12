@@ -43,13 +43,30 @@ DB_UPSERT_CHUNK = 50000
 DEFAULT_HEARTBEAT_SEC = 30
 TARGET_RATE_PER_MIN = 200_000
 
+# vt_token_cache.vt_type TINYINT（见 sql/ddl/vt_type_codes.sql）
+VT_TYPE_CODE: Dict[str, int] = {
+    "mobile": 1,
+    "gaid_idfa": 2,
+    "bank_account": 3,
+    "id_number": 4,
+    "emergency_contact": 5,
+    "id2": 6,
+}
+
+
+def vt_type_db(name: str) -> int:
+    code = VT_TYPE_CODE.get(name)
+    if code is None:
+        raise KeyError(f"unknown vt_type: {name}")
+    return code
+
 # 源表与 vt_token_cache 排序规则可能不同（0900_ai_ci vs unicode_ci），比较时统一 COLLATE
 COLLATE_CMP = "utf8mb4_bin"
 
 SOURCE_NOT_VT = """
 AND NOT EXISTS (
   SELECT 1 FROM vt_token_cache vt
-  WHERE vt.vt_type = '{vt_type}'
+  WHERE vt.vt_type = {vt_type}
     AND vt.raw_value COLLATE {collate} = src.raw_value COLLATE {collate}
     AND vt.status = {ok} AND vt.token IS NOT NULL AND vt.token <> ''
 )
@@ -132,7 +149,7 @@ WHERE src.raw_value IS NOT NULL AND src.raw_value <> ''
 
 def _not_vt_clause(vt_type: str, ok: int = STATUS_OK) -> str:
     return SOURCE_NOT_VT.format(
-        vt_type=escape_sql(vt_type), ok=ok, collate=COLLATE_CMP,
+        vt_type=vt_type_db(vt_type), ok=ok, collate=COLLATE_CMP,
     )
 
 
@@ -142,7 +159,7 @@ def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
 
 CACHE_PENDING_ID_SQL = """
 SELECT id, raw_value FROM vt_token_cache
-WHERE vt_type = '{vt_type}' AND status = {status}
+WHERE vt_type = {vt_type} AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
 ORDER BY id
 LIMIT {limit}
@@ -496,7 +513,7 @@ def delete_insert_success(
     """DELETE 旧 status=0 行 + INSERT 新 token 行，比 UPDATE/UPSERT 更轻。"""
     if not rows:
         return
-    vt = escape_sql(vt_type)
+    vt = vt_type_db(vt_type)
     for i in range(0, len(rows), DB_UPSERT_CHUNK):
         chunk = rows[i:i + DB_UPSERT_CHUNK]
         stmts: List[str] = []
@@ -505,7 +522,7 @@ def delete_insert_success(
             ids = ",".join(str(r[0]) for r in sub)
             stmts.append(f"DELETE FROM vt_token_cache WHERE id IN ({ids});")
         values = ",\n".join(
-            f"('{vt}', '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
+            f"({vt}, '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
             for _id, raw, tok, mask in chunk
         )
         stmts.append(f"""
@@ -540,11 +557,11 @@ def upsert_success(
 ) -> None:
     if not rows:
         return
-    vt = escape_sql(vt_type)
+    vt = vt_type_db(vt_type)
     for i in range(0, len(rows), DB_UPSERT_CHUNK):
         chunk = rows[i:i + DB_UPSERT_CHUNK]
         values = ",\n".join(
-            f"('{vt}', '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
+            f"({vt}, '{escape_sql(raw)}', '{escape_sql(tok)}', {_sql_lit(mask)}, {STATUS_OK})"
             for raw, tok, mask in chunk
         )
         sql = f"""
@@ -567,11 +584,11 @@ def upsert_failed(
 ) -> None:
     if not raw_values:
         return
-    vt, err = escape_sql(vt_type), escape_sql(error[:500])
+    vt, err = vt_type_db(vt_type), escape_sql(error[:500])
     for i in range(0, len(raw_values), DB_UPSERT_CHUNK):
         chunk = raw_values[i:i + DB_UPSERT_CHUNK]
         values = ",\n".join(
-            f"('{vt}', '{escape_sql(raw)}', {STATUS_FAIL}, 1, '{err}')"
+            f"({vt}, '{escape_sql(raw)}', {STATUS_FAIL}, 1, '{err}')"
             for raw in chunk
         )
         sql = f"""
@@ -590,7 +607,7 @@ def fetch_fast_batch(
     vt_type: str, limit: int, retry_failed: bool,
 ) -> List[Tuple[int, str]]:
     """只 SELECT id+raw_value（无认领 UPDATE），VT 后 DELETE+INSERT。"""
-    vt, lim = escape_sql(vt_type), int(limit)
+    vt, lim = vt_type_db(vt_type), int(limit)
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
     sql = CACHE_PENDING_ID_SQL.format(vt_type=vt, status=status, limit=lim)
     log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ...")
@@ -605,7 +622,7 @@ def count_token_stats(
 ) -> Dict[int, int]:
     sql = f"""
 SELECT status, COUNT(*) FROM vt_token_cache
-WHERE vt_type='{escape_sql(vt_type)}' GROUP BY status ORDER BY status;
+WHERE vt_type={vt_type_db(vt_type)} GROUP BY status ORDER BY status;
 """
     rows = mysql_query(host, port, user, password, database, sql)
     stats: Dict[int, int] = {}
@@ -621,7 +638,7 @@ def count_ok_with_token(
 ) -> int:
     sql = f"""
 SELECT COUNT(*) FROM vt_token_cache
-WHERE vt_type='{escape_sql(vt_type)}' AND status={STATUS_OK}
+WHERE vt_type={vt_type_db(vt_type)} AND status={STATUS_OK}
   AND token IS NOT NULL AND token <> '';
 """
     rows = mysql_query(host, port, user, password, database, sql)
@@ -635,7 +652,7 @@ def count_fast_pending(
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
     sql = f"""
 SELECT COUNT(*) FROM vt_token_cache
-WHERE vt_type='{escape_sql(vt_type)}' AND status={status}
+WHERE vt_type={vt_type_db(vt_type)} AND status={status}
   AND raw_value IS NOT NULL AND raw_value <> '';
 """
     rows = mysql_query(host, port, user, password, database, sql)
@@ -667,7 +684,7 @@ def count_stream_pending(
     if retry_failed:
         sql = f"""
 SELECT COUNT(*) FROM vt_token_cache
-WHERE vt_type='{escape_sql(vt_type)}' AND status={STATUS_FAIL}
+WHERE vt_type={vt_type_db(vt_type)} AND status={STATUS_FAIL}
   AND raw_value IS NOT NULL AND raw_value <> '';
 """
         rows = mysql_query(host, port, user, password, database, sql)
@@ -924,19 +941,19 @@ def claim_and_fetch_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, batch_size: int, retry_failed: bool,
 ) -> List[Tuple[int, str]]:
-    vt, limit = escape_sql(vt_type), int(batch_size)
+    vt, limit = vt_type_db(vt_type), int(batch_size)
     log(f"[{vt_type}] cache认领 UPDATE LIMIT {limit} ...")
     t0 = time.time()
     mysql_exec(host, port, user, password, database, f"""
 UPDATE vt_token_cache SET status={STATUS_PROCESSING}
-WHERE vt_type='{vt}' AND {status_clause(retry_failed)}
+WHERE vt_type={vt} AND {status_clause(retry_failed)}
   AND raw_value IS NOT NULL AND raw_value <> ''
 ORDER BY id LIMIT {limit};
 """)
     log(f"[{vt_type}] 认领 UPDATE {time.time() - t0:.1f}s")
     sql = f"""
 SELECT id, raw_value FROM vt_token_cache
-WHERE vt_type='{vt}' AND status={STATUS_PROCESSING} ORDER BY id LIMIT {limit};
+WHERE vt_type={vt} AND status={STATUS_PROCESSING} ORDER BY id LIMIT {limit};
 """
     return parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
 
@@ -999,7 +1016,7 @@ def process_cache_chunk(
 
 
 def reset_processing(host: str, port: str, user: str, password: str, database: str, vt_type: Optional[str]) -> None:
-    tc = "" if not vt_type else f" AND vt_type='{escape_sql(vt_type)}'"
+    tc = "" if not vt_type else f" AND vt_type={vt_type_db(vt_type)}"
     mysql_exec(host, port, user, password, database,
                f"UPDATE vt_token_cache SET status={STATUS_PENDING} WHERE status={STATUS_PROCESSING}{tc};")
 
@@ -1011,7 +1028,7 @@ def process_vt_type_cache(
     dry_run: bool, heartbeat_sec: int,
 ) -> int:
     sql = f"""
-SELECT COUNT(*) FROM vt_token_cache WHERE vt_type='{escape_sql(vt_type)}' AND {status_clause(retry_failed)};
+SELECT COUNT(*) FROM vt_token_cache WHERE vt_type={vt_type_db(vt_type)} AND {status_clause(retry_failed)};
 """
     pending = int(mysql_query(host, port, user, password, database, sql)[0])
     if pending == 0:

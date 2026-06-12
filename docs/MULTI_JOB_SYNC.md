@@ -20,7 +20,7 @@ chmod +x scripts/full-rerun.sh
 ./scripts/full-rerun.sh
 ```
 
-脚本会自动：**Cancel 全部 Job → emergency_contact ENUM/灌明文 → TRUNCATE user_info_dirty → sync-pipeline-auto.sh**（DDL → 锁 bulk-start-ms → VT+宽表 → 6 表顺序全量→切增量）。
+脚本会自动：**Cancel Job → DROP 重建 vt_token_cache(TINYINT) → TRUNCATE dirty → sync-pipeline-auto.sh**
 
 TRIGGER 须 root 时，流水线前执行：
 
