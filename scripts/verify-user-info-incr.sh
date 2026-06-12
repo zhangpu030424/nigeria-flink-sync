@@ -51,8 +51,10 @@ WHERE p.user_id = ${SRC_UID};
 "
 echo
 
-echo "[4] Lookup 视图是否可读（增量 Job 依赖 CAST 视图，勿直查源表）"
-for t in user_info_user_lookup app_config_lookup vt_token_cache_lookup user_work_latest_lookup \
+echo "[4] Lookup 视图是否可读（多源 CDC 触发后均 Lookup 取最新）"
+for t in user_info_user_lookup user_personal_latest_lookup user_id_by_bvn_lookup \
+         device_uuid_user_lookup session_uuid_user_lookup \
+         app_config_lookup vt_token_cache_lookup user_work_latest_lookup \
          user_credit_latest_lookup user_reg_ip_lookup user_emergency_contacts_lookup user_info_install_source_lookup; do
   cnt=$(mysql_q "SELECT COUNT(*) FROM ${t} LIMIT 1" | tr -d '[:space:]')
   echo "    ${t}: ${cnt}"
@@ -81,9 +83,14 @@ MYSQL_PWD="$TARGET_MYSQL_PASSWORD" mysql -h "$TARGET_MYSQL_HOST" -P "$TARGET_MYS
   2>/dev/null || echo "    目标库查询失败"
 echo
 
-echo "=== 测试写入（须在 Job RUNNING 之后执行，且改真实字段）==="
-echo "UPDATE user_personal_info SET first_name = CONCAT(COALESCE(first_name,''), '') WHERE user_id = ${SRC_UID};"
-echo "-- 或明确改名："
+echo "=== 测试写入（须在 Job RUNNING 之后；任一 CDC 源表变更均可触发）==="
+echo "-- personal_info:"
 echo "UPDATE user_personal_info SET first_name = 'IncrTest' WHERE user_id = ${SRC_UID};"
+echo "-- work:"
+echo "UPDATE user_work_related SET company_name = 'IncrCo' WHERE user_id = ${SRC_UID};"
+echo "-- emergency:"
+echo "UPDATE user_emergency_contact SET contact_name = contact_name WHERE user_id = ${SRC_UID};"
+echo "-- user（registration_time / install_source）:"
+echo "UPDATE \`user\` SET adid = adid WHERE id = ${SRC_UID};"
 echo "等待 5~10s 后查目标："
 echo "SELECT user_id, full_name, updated_at FROM user_info WHERE user_id = ${TGT_UID};"

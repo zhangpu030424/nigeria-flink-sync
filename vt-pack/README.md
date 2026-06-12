@@ -22,6 +22,16 @@ cp .env.example .env   # 首次
 vim .env
 ./run.sh --skip-count
 ./run.sh --background --skip-count
+
+# 单类型快捷子命令（等价于 --vt-type <type> --skip-count）
+./run.sh bank_account
+./run.sh mobile
+./run.sh id_number
+./run.sh gaid_idfa
+./run.sh all
+
+# 后台跑银行卡
+./run.sh --background bank_account
 ```
 
 ## 常见错误

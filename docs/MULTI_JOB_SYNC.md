@@ -78,13 +78,27 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | Job | CDC 源表 | VT |
 |-----|---------|-----|
 | user | `user` | Lookup `vt_token_cache` → miss `vt_tokenize` |
-| user_info | `user_personal_info` | 同上（id_number） |
+| user_info | 多源 CDC（见下）+ Lookup | id_number VT |
 | user_bankcard | `user_bank_info` | 同上（bank_account） |
 | user_product | `user_order` | 无 |
 | application | `user_order` + Lookup 维表 | mobile/gaid/bank/id_number |
 | loan | `user_order_installment` + Lookup | 无 |
 
 增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-all-auto.sh` / `sync-pipeline-auto.sh` 已内置，无需 DMS 手动执行）。
+
+**user_info 增量 CDC 源表**（任一变更 → 按 `user_id` 重算整行 info）：
+
+| CDC 表 | 影响字段 |
+|--------|----------|
+| `user` | registration_time、app、install_source（adid） |
+| `user_personal_info` | 姓名、BVN、地址、education 等 |
+| `user_work_related` | job_type、salary、company、profession |
+| `user_emergency_contact` | emergency_contacts |
+| `risk_user_credit_callback` | credit_limit |
+| `vt_token_cache`（id_number） | id_number |
+| `device_ids` / `device_network` | registration_ip |
+
+未单独 CDC（靠 user 或全量补）：`app_config`（按 app_code 扇出）、adjust 原始表（install_source 靠 user.adid）。
 
 全量仍走宽表；增量不再依赖定时刷新 `*_sync_staging`。
 

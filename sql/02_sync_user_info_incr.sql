@@ -1,8 +1,11 @@
--- 增量 user_info：CDC user_personal_info + JDBC Lookup（须 CAST 视图，勿直查源表）
+-- 增量 user_info：多源 CDC 触发 + JDBC Lookup 组装（与 user_info_sync_staging 同源）
+-- CDC 触发: user, user_personal_info, user_work_related, user_emergency_contact,
+--           risk_user_credit_callback, vt_token_cache(id_number), device_ids, device_network
+-- Lookup: user_personal_latest + 各维表（任意源变更后均取最新 personal/work/credit/...）
 -- 前置: ./scripts/deploy-source-ddl.sh
--- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id，如 211038]
--- 注意: 只监听 user_personal_info（不是 user）；目标 user_id = 源 user_id + 100000000
---       info JSON 键集合与 user_info_sync_staging 宽表固定一致
+-- 验证: bash scripts/verify-user-info-incr.sh [源库 user_id]
+-- 目标 user_id = 源 user_id + 100000000
+-- 未 CDC: app_config（按 app_code 扇出）、adjust 原始表（靠 user.adid 变更触发 install_source）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -10,21 +13,32 @@ SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '1s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
-CREATE TABLE IF NOT EXISTS src_user_personal_info (
+-- ---------- CDC 源（仅用于触发 user_id 刷新） ----------
+CREATE TABLE IF NOT EXISTS cdc_user (
+    id BIGINT,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'user',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_USER}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_user_personal_info (
     id BIGINT,
     user_id BIGINT,
-    bvn STRING,
-    first_name STRING,
-    sur_name STRING,
-    date_of_birth DATE,
-    education_level INT,
-    gender INT,
-    living_address_state STRING,
-    living_address_city STRING,
-    living_address_first_line STRING,
-    living_address_second_line STRING,
-    number_of_children INT,
-    marriage INT,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -36,12 +50,235 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'user_personal_info',
     'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_PERSONAL}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
     'debezium.snapshot.mode' = 'schema_only',
     'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_user_work_related (
+    id BIGINT,
+    user_id BIGINT,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'user_work_related',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_WORK}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_user_emergency_contact (
+    id BIGINT,
+    user_id BIGINT,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'user_emergency_contact',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_EMERGENCY}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_risk_user_credit_callback (
+    id BIGINT,
+    user_id BIGINT,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'risk_user_credit_callback',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_CREDIT}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_vt_token_cache (
+    vt_type STRING,
+    raw_value STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'vt_token_cache',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_VT}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_device_ids (
+    id BIGINT,
+    device_uuid STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'device_ids',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_DEVICE_IDS}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS cdc_device_network (
+    id BIGINT,
+    device_uuid STRING,
+    session_uuid STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'mysql-cdc',
+    'hostname' = '${SOURCE_MYSQL_HOST}',
+    'port' = '${SOURCE_MYSQL_PORT}',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'database-name' = '${SOURCE_MYSQL_DATABASE}',
+    'table-name' = 'device_network',
+    'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_UI_DEVICE_NET}',
+    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
+    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
+    'scan.incremental.snapshot.enabled' = 'true',
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+-- ---------- JDBC Lookup 维表 ----------
+CREATE TABLE IF NOT EXISTS dim_user (
+    id BIGINT,
+    app_code BIGINT,
+    create_time TIMESTAMP(3),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_info_user_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '2h'
+);
+
+CREATE TABLE IF NOT EXISTS dim_user_personal_latest (
+    user_id BIGINT,
+    bvn STRING,
+    first_name STRING,
+    sur_name STRING,
+    date_of_birth DATE,
+    education_level BIGINT,
+    gender BIGINT,
+    living_address_state STRING,
+    living_address_city STRING,
+    living_address_first_line STRING,
+    living_address_second_line STRING,
+    number_of_children BIGINT,
+    marriage BIGINT,
+    PRIMARY KEY (user_id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_personal_latest_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '30m'
+);
+
+CREATE TABLE IF NOT EXISTS dim_user_id_by_bvn (
+    bvn STRING,
+    user_id BIGINT,
+    PRIMARY KEY (bvn) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_id_by_bvn_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '30m'
+);
+
+CREATE TABLE IF NOT EXISTS dim_device_uuid_user (
+    device_uuid STRING,
+    user_id BIGINT,
+    PRIMARY KEY (device_uuid) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'device_uuid_user_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.ttl' = '30m'
+);
+
+CREATE TABLE IF NOT EXISTS dim_session_uuid_user (
+    session_uuid STRING,
+    user_id BIGINT,
+    PRIMARY KEY (session_uuid) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'session_uuid_user_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_vt_cache (
@@ -54,21 +291,6 @@ CREATE TABLE IF NOT EXISTS dim_vt_cache (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
     'table-name' = 'vt_token_cache_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '2h'
-);
-
-CREATE TABLE IF NOT EXISTS dim_user (
-    id BIGINT,
-    app_code BIGINT,
-    create_time TIMESTAMP(3),
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_info_user_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
@@ -89,7 +311,7 @@ CREATE TABLE IF NOT EXISTS dim_user_work (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_app_config (
@@ -118,7 +340,7 @@ CREATE TABLE IF NOT EXISTS dim_user_credit (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_reg_ip (
@@ -132,7 +354,7 @@ CREATE TABLE IF NOT EXISTS dim_user_reg_ip (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_emergency_contacts (
@@ -146,7 +368,7 @@ CREATE TABLE IF NOT EXISTS dim_user_emergency_contacts (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
+    'lookup.cache.ttl' = '30m'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_install_source (
@@ -162,6 +384,40 @@ CREATE TABLE IF NOT EXISTS dim_user_install_source (
     'lookup.cache.max-rows' = '500000',
     'lookup.cache.ttl' = '2h'
 );
+
+-- ---------- 统一触发流：任意源变更 → 按 user_id 重算整行 ----------
+CREATE TEMPORARY VIEW v_user_info_triggers AS
+SELECT user_id, proc_time FROM cdc_user WHERE id IS NOT NULL
+UNION ALL
+SELECT user_id, proc_time FROM cdc_user_personal_info WHERE user_id IS NOT NULL
+UNION ALL
+SELECT user_id, proc_time FROM cdc_user_work_related WHERE user_id IS NOT NULL
+UNION ALL
+SELECT user_id, proc_time FROM cdc_user_emergency_contact WHERE user_id IS NOT NULL
+UNION ALL
+SELECT user_id, proc_time FROM cdc_risk_user_credit_callback WHERE user_id IS NOT NULL
+UNION ALL
+SELECT ub.user_id, vt.proc_time
+FROM cdc_vt_token_cache AS vt
+INNER JOIN dim_user_id_by_bvn FOR SYSTEM_TIME AS OF vt.proc_time AS ub
+    ON ub.bvn = TRIM(vt.raw_value)
+WHERE vt.vt_type = 'id_number'
+UNION ALL
+SELECT du.user_id, di.proc_time
+FROM cdc_device_ids AS di
+INNER JOIN dim_device_uuid_user FOR SYSTEM_TIME AS OF di.proc_time AS du
+    ON du.device_uuid = di.device_uuid
+WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> ''
+UNION ALL
+SELECT COALESCE(du.user_id, su.user_id) AS user_id, dn.proc_time
+FROM cdc_device_network AS dn
+LEFT JOIN dim_device_uuid_user FOR SYSTEM_TIME AS OF dn.proc_time AS du
+    ON du.device_uuid = dn.device_uuid
+    AND dn.device_uuid IS NOT NULL AND TRIM(dn.device_uuid) <> ''
+LEFT JOIN dim_session_uuid_user FOR SYSTEM_TIME AS OF dn.proc_time AS su
+    ON su.session_uuid = dn.session_uuid
+    AND dn.session_uuid IS NOT NULL AND TRIM(dn.session_uuid) <> ''
+WHERE COALESCE(du.user_id, su.user_id) IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
@@ -189,7 +445,7 @@ SELECT
     e.info_json
 FROM (
     SELECT
-        p.user_id + 100000000 AS user_id,
+        t.user_id + 100000000 AS user_id,
         p.bvn AS bvn_raw,
         COALESCE(
             CASE
@@ -273,18 +529,19 @@ FROM (
             KEY 'survey' VALUE CAST(NULL AS STRING),
             KEY 'salary_type' VALUE CAST(NULL AS STRING)
         )) AS info_json
-    FROM src_user_personal_info AS p
-    INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON CAST(u.id AS BIGINT) = p.user_id
-    LEFT JOIN dim_vt_cache FOR SYSTEM_TIME AS OF p.proc_time AS vt
+    FROM v_user_info_triggers AS t
+    INNER JOIN dim_user FOR SYSTEM_TIME AS OF t.proc_time AS u ON u.id = t.user_id
+    LEFT JOIN dim_user_personal_latest FOR SYSTEM_TIME AS OF t.proc_time AS p ON p.user_id = t.user_id
+    LEFT JOIN dim_vt_cache FOR SYSTEM_TIME AS OF t.proc_time AS vt
         ON vt.vt_type = 'id_number'
         AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
         AND vt.raw_value = TRIM(p.bvn)
-    LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON CAST(wr.user_id AS BIGINT) = p.user_id
-    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON ac.app_code = u.app_code
-    LEFT JOIN dim_user_credit FOR SYSTEM_TIME AS OF p.proc_time AS cc ON cc.user_id = p.user_id
-    LEFT JOIN dim_user_reg_ip FOR SYSTEM_TIME AS OF p.proc_time AS reg_ip ON reg_ip.user_id = p.user_id
-    LEFT JOIN dim_user_emergency_contacts FOR SYSTEM_TIME AS OF p.proc_time AS ec ON ec.user_id = p.user_id
-    LEFT JOIN dim_user_install_source FOR SYSTEM_TIME AS OF p.proc_time AS isrc ON isrc.user_id = p.user_id
+    LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF t.proc_time AS wr ON wr.user_id = t.user_id
+    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF t.proc_time AS ac ON ac.app_code = u.app_code
+    LEFT JOIN dim_user_credit FOR SYSTEM_TIME AS OF t.proc_time AS cc ON cc.user_id = t.user_id
+    LEFT JOIN dim_user_reg_ip FOR SYSTEM_TIME AS OF t.proc_time AS reg_ip ON reg_ip.user_id = t.user_id
+    LEFT JOIN dim_user_emergency_contacts FOR SYSTEM_TIME AS OF t.proc_time AS ec ON ec.user_id = t.user_id
+    LEFT JOIN dim_user_install_source FOR SYSTEM_TIME AS OF t.proc_time AS isrc ON isrc.user_id = t.user_id
 ) AS e
 WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')
    OR (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '');

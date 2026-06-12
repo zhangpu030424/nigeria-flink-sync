@@ -1,32 +1,51 @@
 #!/usr/bin/env bash
-# VT 字典预加载（调用 vt-preload.py）
-# 后台: ./scripts/vt-preload.sh --background --skip-count
+# 独立 VT 预加载包入口（解压后在同一目录执行: ./run.sh）
+# 后台: ./run.sh --background --skip-count
+# 单类型: ./run.sh bank_account | ./run.sh mobile | ./run.sh id_number
 set -euo pipefail
-cd "$(dirname "$0")/.."
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 if [[ ! -f .env ]]; then
-  echo "请先: cp .env.example .env"
+  if [[ -f .env.example ]]; then
+    echo "请先: cp .env.example .env 并填写 SOURCE_MYSQL_* / VT_BASE_URL"
+  else
+    echo "缺少 .env（需 SOURCE_MYSQL_*、VT_BASE_URL 等）"
+  fi
   exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "需要 python3"
-  exit 1
+PYTHON=python3
+if [[ -x "${ROOT}/py/bin/python3" ]]; then
+  PYTHON="${ROOT}/py/bin/python3"
+elif [[ -x "${ROOT}/py/bin/python" ]]; then
+  PYTHON="${ROOT}/py/bin/python"
 fi
 
-if ! command -v mysql >/dev/null 2>&1; then
-  echo "需要 mysql 客户端；或: docker run --rm -i mysql:8.0 mysql ..."
-  exit 1
+if [[ -d "${ROOT}/bin" ]]; then
+  export PATH="${ROOT}/bin:${PATH}"
 fi
 
-chmod +x scripts/vt-preload.py
+chmod +x "${ROOT}/vt-preload.py"
 
-# 快捷子命令: ./scripts/vt-preload.sh bank_account → --vt-type bank_account --skip-count
+# 快捷子命令（其余参数透传给 vt-preload.py）
 if [[ $# -ge 1 ]]; then
   case "$1" in
+    fix-mobile-only)
+      shift
+      set -- --fix-mobile-only "$@"
+      ;;
+    fix-mobile)
+      shift
+      set -- --fix-mobile-only "$@"
+      ;;
     mobile)
       shift
       set -- --vt-type mobile --skip-count "$@"
+      ;;
+    mobile-only)
+      shift
+      set -- --vt-type mobile --no-fix-mobile-raw --skip-count "$@"
       ;;
     bank_account|bank-account|bankcard)
       shift
@@ -57,7 +76,7 @@ for arg in "$@"; do
 done
 
 if [[ "$BACKGROUND" -eq 1 ]]; then
-  LOG_DIR="logs"
+  LOG_DIR="${ROOT}/logs"
   mkdir -p "$LOG_DIR"
   LOG_FILE="${LOG_DIR}/vt-preload-$(date +%Y%m%d-%H%M%S).log"
   PID_FILE="${LOG_DIR}/vt-preload.pid"
@@ -65,19 +84,18 @@ if [[ "$BACKGROUND" -eq 1 ]]; then
   if [[ -f "$PID_FILE" ]]; then
     old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-      echo "已有 VT 预加载在跑 pid=${old_pid}，日志见 logs/vt-preload-*.log"
+      echo "已有 VT 预加载在跑 pid=${old_pid}"
       echo "停止: kill ${old_pid}"
       exit 1
     fi
   fi
 
-  nohup python3 scripts/vt-preload.py "${PY_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
+  nohup "$PYTHON" "${ROOT}/vt-preload.py" "${PY_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
   echo "$!" > "$PID_FILE"
   echo "VT 预加载已在后台启动 pid=$(cat "$PID_FILE")"
   echo "日志: ${LOG_FILE}"
   echo "跟踪: tail -f ${LOG_FILE}"
-  echo "停止: kill \$(cat ${PID_FILE})"
   exit 0
 fi
 
-exec python3 scripts/vt-preload.py "${PY_ARGS[@]}"
+exec "$PYTHON" "${ROOT}/vt-preload.py" "${PY_ARGS[@]}"

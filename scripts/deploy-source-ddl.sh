@@ -33,6 +33,10 @@ echo ">> 校验关键对象"
 CHECK_VIEWS=(
   v_adjust_latest_by_adid
   user_info_user_lookup
+  user_personal_latest_lookup
+  user_id_by_bvn_lookup
+  device_uuid_user_lookup
+  session_uuid_user_lookup
   app_config_lookup
   vt_token_cache_lookup
   user_work_latest_lookup

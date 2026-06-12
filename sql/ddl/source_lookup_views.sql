@@ -127,6 +127,76 @@ SELECT CAST(id AS SIGNED) AS id,
        CAST(create_time AS DATETIME(3)) AS create_time
 FROM user;
 
+-- user_info 增量：每人最新一条 personal_info（非 CDC 触发源也走 Lookup 取最新）
+CREATE OR REPLACE VIEW user_personal_latest_lookup AS
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       CAST(bvn AS CHAR) AS bvn,
+       CAST(first_name AS CHAR) AS first_name,
+       CAST(sur_name AS CHAR) AS sur_name,
+       CAST(date_of_birth AS DATE) AS date_of_birth,
+       CAST(education_level AS SIGNED) AS education_level,
+       CAST(gender AS SIGNED) AS gender,
+       CAST(living_address_state AS CHAR) AS living_address_state,
+       CAST(living_address_city AS CHAR) AS living_address_city,
+       CAST(living_address_first_line AS CHAR) AS living_address_first_line,
+       CAST(living_address_second_line AS CHAR) AS living_address_second_line,
+       CAST(number_of_children AS SIGNED) AS number_of_children,
+       CAST(marriage AS SIGNED) AS marriage
+FROM (
+         SELECT user_id,
+                bvn,
+                first_name,
+                sur_name,
+                date_of_birth,
+                education_level,
+                gender,
+                living_address_state,
+                living_address_city,
+                living_address_first_line,
+                living_address_second_line,
+                number_of_children,
+                marriage,
+                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+         FROM user_personal_info
+     ) t
+WHERE rn = 1;
+
+-- vt_token_cache CDC 触发：bvn → user_id
+CREATE OR REPLACE VIEW user_id_by_bvn_lookup AS
+SELECT CAST(TRIM(bvn) AS CHAR) AS bvn,
+       CAST(user_id AS SIGNED) AS user_id
+FROM (
+         SELECT user_id,
+                bvn,
+                ROW_NUMBER() OVER (PARTITION BY TRIM(bvn) ORDER BY id DESC) AS rn
+         FROM user_personal_info
+         WHERE bvn IS NOT NULL AND TRIM(bvn) <> ''
+     ) t
+WHERE rn = 1;
+
+-- device_ids / device_network CDC 触发：解析到 user_id
+CREATE OR REPLACE VIEW device_uuid_user_lookup AS
+SELECT CAST(TRIM(device_id) AS CHAR) AS device_uuid,
+       CAST(MAX(id) AS SIGNED) AS user_id
+FROM user
+WHERE device_id IS NOT NULL AND TRIM(device_id) <> ''
+GROUP BY TRIM(device_id);
+
+CREATE OR REPLACE VIEW session_uuid_user_lookup AS
+SELECT CAST(di.session_uuid AS CHAR) AS session_uuid,
+       CAST(MAX(u.id) AS SIGNED) AS user_id
+FROM user u
+         INNER JOIN (
+    SELECT device_uuid,
+           session_uuid,
+           ROW_NUMBER() OVER (PARTITION BY device_uuid ORDER BY id DESC) AS rn
+    FROM device_ids
+    WHERE device_uuid IS NOT NULL AND TRIM(device_uuid) <> ''
+      AND session_uuid IS NOT NULL AND TRIM(session_uuid) <> ''
+) di ON di.device_uuid = u.device_id AND di.rn = 1
+WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+GROUP BY di.session_uuid;
+
 CREATE OR REPLACE VIEW app_config_lookup AS
 SELECT CAST(app_code AS SIGNED) AS app_code,
        CAST(app_name AS CHAR) AS app_name,
