@@ -8,9 +8,17 @@ SRC_UID="${1:-211038}"
 TGT_UID=$((SRC_UID + 100000000))
 
 [[ -f .env ]] || { echo "缺少 .env"; exit 1; }
-# shellcheck disable=SC1091
+# 只加载 KEY=VALUE 行（与 run-sql.sh 一致，避免 .env 中文注释行被 source 执行）
 set -a
-source .env
+while IFS= read -r line || [[ -n "$line" ]]; do
+  line="${line%%#*}"
+  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -z "$line" ]] && continue
+  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+  key="${line%%=*}"
+  [[ -n "${!key:-}" ]] && continue
+  export "$line"
+done < .env
 set +a
 
 echo "=== user_info 增量排查 user_id=${SRC_UID} → 目标 ${TGT_UID} ==="
