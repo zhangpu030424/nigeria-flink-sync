@@ -73,10 +73,24 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | `loan_sync_staging` | — | user_order_installment + user_order |
 | `id_mapping_sync_staging` | mobile/gaid/bank/id_number VT；device 原始 UUID | application + user + bankcard + device_ids 双向边 |
 
+## 增量模式（统一）
+
+| Job | CDC 源表 | VT |
+|-----|---------|-----|
+| user | `user` | Lookup `vt_token_cache` → miss `vt_tokenize` |
+| user_info | `user_personal_info` | 同上（id_number） |
+| user_bankcard | `user_bank_info` | 同上（bank_account） |
+| user_product | `user_order` | 无 |
+| application | `user_order` + Lookup 维表 | mobile/gaid/bank/id_number |
+| loan | `user_order_installment` + Lookup | 无 |
+
+增量 Job 启动前在源库执行一次：`mysql ... < sql/ddl/source_lookup_views.sql`（application/loan Lookup 维表视图）。
+
+全量仍走宽表；增量不再依赖定时刷新 `*_sync_staging`。
+
 ## 未纳入流水线
 
-- **id_mapping**：SQL 宽表已就绪，`ENABLED=0`（需在 application 全量完成后启用；`id2` 待源字段确认）
-- **application/loan 增量**：CDC 宽表；新订单需 cron 刷新 `source_all_sync_staging.sql` 相关段或重跑全量段
+- **id_mapping**：SQL 宽表已就绪；增量仍 CDC 宽表（待改多源 CDC + 双写）
 
 ## 金额
 

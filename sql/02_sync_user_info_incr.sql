@@ -1,4 +1,4 @@
--- 增量 user_info：CDC user_info_sync_staging（宽表需先重建；info_json 在宽表内已组装完整）
+-- 增量 user_info：CDC user_personal_info + 源表 Lookup + VT Lookup miss 时 vt_tokenize(/v2t)
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -6,13 +6,23 @@ SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '1s';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 
-CREATE TABLE IF NOT EXISTS src_user_info_staging (
+CREATE TABLE IF NOT EXISTS src_user_personal_info (
+    id BIGINT,
     user_id BIGINT,
-    bvn_raw STRING,
-    id_number_token STRING,
-    full_name STRING,
-    info_json STRING,
-    PRIMARY KEY (user_id) NOT ENFORCED
+    bvn STRING,
+    first_name STRING,
+    sur_name STRING,
+    date_of_birth TIMESTAMP(3),
+    education_level STRING,
+    gender STRING,
+    living_address_state STRING,
+    living_address_city STRING,
+    living_address_first_line STRING,
+    living_address_second_line STRING,
+    number_of_children INT,
+    marriage STRING,
+    proc_time AS PROCTIME(),
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'mysql-cdc',
     'hostname' = '${SOURCE_MYSQL_HOST}',
@@ -20,12 +30,77 @@ CREATE TABLE IF NOT EXISTS src_user_info_staging (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_info_sync_staging',
+    'table-name' = 'user_personal_info',
     'server-time-zone' = 'Africa/Lagos',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',
-    'debezium.snapshot.mode' = 'schema_only'
+    'debezium.snapshot.mode' = 'schema_only',
+    'scan.incremental.snapshot.chunk.size' = '${FLINK_CDC_CHUNK_SIZE}',
+    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
+);
+
+CREATE TABLE IF NOT EXISTS dim_user (
+    id BIGINT,
+    app_code STRING,
+    create_time TIMESTAMP(3),
+    PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'user',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '2h'
+);
+
+CREATE TABLE IF NOT EXISTS dim_user_work (
+    user_id BIGINT,
+    work_type STRING,
+    occupation STRING,
+    company_name STRING,
+    monthly_income STRING,
+    PRIMARY KEY (user_id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'user_work_related',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.ttl' = '2h'
+);
+
+CREATE TABLE IF NOT EXISTS dim_app_config (
+    app_code STRING,
+    app_name STRING,
+    version STRING,
+    PRIMARY KEY (app_code) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'app_config',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '1000',
+    'lookup.cache.ttl' = '24h'
+);
+
+CREATE TABLE IF NOT EXISTS dim_vt_id_number (
+    vt_type STRING,
+    raw_value STRING,
+    token STRING,
+    status INT,
+    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
+    'table-name' = 'vt_token_cache',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '2h'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
@@ -54,16 +129,50 @@ SELECT
     e.info_json
 FROM (
     SELECT
-        s.user_id + 100000000 AS user_id,
+        p.user_id + 100000000 AS user_id,
         COALESCE(
             CASE
-                WHEN s.bvn_raw IS NULL OR TRIM(s.bvn_raw) = '' THEN CAST('' AS STRING)
-                WHEN s.id_number_token IS NOT NULL AND TRIM(s.id_number_token) <> '' THEN s.id_number_token
-                ELSE vt_tokenize(TRIM(s.bvn_raw))
+                WHEN p.bvn IS NULL OR TRIM(p.bvn) = '' THEN CAST('' AS STRING)
+                ELSE COALESCE(
+                    NULLIF(TRIM(vt.token), ''),
+                    vt_tokenize(TRIM(p.bvn))
+                )
             END,
             ''
         ) AS id_number,
-        COALESCE(s.full_name, '') AS full_name,
-        COALESCE(CAST(s.info_json AS STRING), '{}') AS info_json
-    FROM src_user_info_staging s
-) e;
+        COALESCE(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), '') AS full_name,
+        JSON_OBJECT(
+            'birthday', DATE_FORMAT(p.date_of_birth, 'yyyy-MM-dd'),
+            'job_type', wr.work_type,
+            'education', p.education_level,
+            'gender', p.gender,
+            'salary', CASE
+                WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS STRING)
+                ELSE wr.monthly_income
+            END,
+            'company', wr.company_name,
+            'profession', wr.occupation,
+            'registration_time', CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) AS BIGINT),
+            'marital', p.marriage,
+            'children_num', p.number_of_children,
+            'full_name', TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))),
+            'app', JSON_OBJECT(
+                'name', ac.app_name,
+                'version', ac.version,
+                'app_id', u.app_code
+            ),
+            'address', JSON_OBJECT(
+                'province', p.living_address_state,
+                'city', p.living_address_city,
+                'detail', TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ', COALESCE(p.living_address_second_line, '')))
+            )
+        ) AS info_json
+    FROM src_user_personal_info AS p
+    INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON u.id = p.user_id
+    LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON wr.user_id = p.user_id
+    LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON ac.app_code = u.app_code
+    LEFT JOIN dim_vt_id_number FOR SYSTEM_TIME AS OF p.proc_time AS vt
+        ON vt.vt_type = 'id_number' AND vt.status = 1 AND vt.raw_value = TRIM(p.bvn)
+) AS e
+WHERE (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '')
+   OR e.full_name IS NOT NULL;

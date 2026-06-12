@@ -69,6 +69,17 @@ mysql ... < sql/ddl/vt_seed_mobile.sql
 mysql ... < sql/ddl/vt_refresh_staging_mobile_token.sql   # 可选，刷新宽表
 ```
 
+**后台静默跑（断开 SSH 不中断）：**
+
+```bash
+# 日志写入 logs/vt-preload-YYYYMMDD-HHMMSS.log，pid 写入 logs/vt-preload.pid
+./scripts/vt-preload.sh --background --skip-count
+# 或减少心跳：VT_PRELOAD_HEARTBEAT_SEC=0 ./scripts/vt-preload.sh --background --skip-count
+
+tail -f logs/vt-preload-*.log
+kill $(cat logs/vt-preload.pid)
+```
+
 增量 Flink Job 通过 Lookup `vt_token_cache` 取 token；新号在 preload 完成前不会写入目标库。
 
 ---
