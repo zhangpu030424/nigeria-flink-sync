@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 一键全自动：锁定起始时间戳 → 重建宽表 → 顺序全量(含 VT 两阶段) → 各表切增量
+# 一键全自动：源库 DDL → 锁定起始时间戳 → 重建宽表 → 顺序全量(含 VT 两阶段) → 各表切增量
 #
-# 增量 binlog 起点 = 本脚本开头锁定的 bulk-start-ms（宽表重建期间变更也会补）
+# 无需 DMS 手动操作；Lookup 视图由 deploy-source-ddl.sh 自动部署。
 #
 # 用法:
 #   ./scripts/sync-pipeline-auto.sh
@@ -24,26 +24,20 @@ for arg in "$@"; do
   [[ "$arg" == --jobs=* ]] && JOBS_FILTER="${arg#--jobs=}"
 done
 
-if [[ ! -f .env ]]; then
-  echo "请先: cp .env.example .env"
-  exit 1
-fi
-
-set -a
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line%%#*}"
-  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -z "$line" ]] && continue
-  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-  export "$line"
-done < .env
-set +a
+# shellcheck source=scripts/lib/load-project-env.sh
+source scripts/lib/load-project-env.sh
+load_project_env "$(pwd)"
 
 # shellcheck source=scripts/lib/bulk-start-ms.sh
 source scripts/lib/bulk-start-ms.sh
 
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
+
+echo "=========================================="
+echo "步骤 A: 源库 DDL（adjust + Lookup 视图）"
+echo "=========================================="
+./scripts/deploy-source-ddl.sh
 
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   if ! load_bulk_start_ms "${LOG_DIR}/bulk-start-ms.env"; then

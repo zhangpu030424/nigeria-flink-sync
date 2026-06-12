@@ -79,22 +79,9 @@ fi
 [[ -f "$FULL_SQL" ]] || { echo "全量 SQL 不存在: $FULL_SQL"; exit 1; }
 [[ -f "$INCR_SQL" ]] || { echo "增量 SQL 不存在: $INCR_SQL"; exit 1; }
 
-if [[ ! -f .env ]]; then
-  echo "请先: cp .env.example .env"
-  exit 1
-fi
-
-set -a
-while IFS= read -r envline || [[ -n "$envline" ]]; do
-  envline="${envline%%#*}"
-  envline="$(echo "$envline" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -z "$envline" ]] && continue
-  [[ "$envline" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-  key="${envline%%=*}"
-  [[ -n "${!key:-}" ]] && continue
-  export "$envline"
-done < .env
-set +a
+# shellcheck source=scripts/lib/load-project-env.sh
+source scripts/lib/load-project-env.sh
+load_project_env "$(pwd)"
 
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 LOG_DIR="logs"
@@ -219,6 +206,8 @@ start_incr() {
 
   export FLINK_PARALLELISM="${incr_parallel}"
   log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}"
+  log "源库 DDL: deploy-source-ddl.sh"
+  ./scripts/deploy-source-ddl.sh >> "$LOG_FILE" 2>&1
   log "增量 SQL: ${INCR_SQL} mode=${CDC_STARTUP_MODE} bulk-start-ms=${CDC_STARTUP_TIMESTAMP_MILLIS}"
   ./scripts/run-sql.sh "$INCR_SQL"
   log "增量 Job 已提交。监控: ./scripts/monitor-sync.sh ${MONITOR_TABLE} 60"

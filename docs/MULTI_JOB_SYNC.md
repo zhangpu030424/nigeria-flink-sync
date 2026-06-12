@@ -84,7 +84,7 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | application | `user_order` + Lookup 维表 | mobile/gaid/bank/id_number |
 | loan | `user_order_installment` + Lookup | 无 |
 
-增量 Job 启动前在源库执行一次：`mysql ... < sql/ddl/source_lookup_views.sql`（application/loan Lookup 维表视图）。
+增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-all-auto.sh` / `sync-pipeline-auto.sh` 已内置，无需 DMS 手动执行）。
 
 全量仍走宽表；增量不再依赖定时刷新 `*_sync_staging`。
 
