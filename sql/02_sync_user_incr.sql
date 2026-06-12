@@ -1,4 +1,4 @@
--- 增量（预 VT + 兜底）：Lookup vt_token_cache → miss 时 UDF 调 /v2t
+-- 增量：CDC user → 裸号规范 +234 → vt_tokenize(/v2t)（不依赖 vt_token_cache 预灌）
 -- 全量: ./scripts/run-user-fast.sh
 --
 -- CDC_STARTUP_MODE（run-sql / sync-job-auto 注入）:
@@ -64,22 +64,6 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     'lookup.cache.ttl' = '2h'
 );
 
-CREATE TABLE IF NOT EXISTS dim_vt_mobile (
-    vt_type STRING,
-    raw_value STRING,
-    token STRING,
-    status INT,
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
-);
-
 CREATE TABLE IF NOT EXISTS sink_user (
     user_id BIGINT,
     app_id INT,
@@ -135,17 +119,14 @@ FROM (
         CAST(u.app_code AS INT) AS app_id,
         u.id + 100000000 AS group_user_id,
         u.id + 100000000 AS info_user_id,
-        COALESCE(
-            NULLIF(TRIM(vt.token), ''),
-            vt_tokenize(
-                CASE
-                    WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-                    WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                    WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                    WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                    ELSE CONCAT('+234', TRIM(u.mobile))
-                END
-            )
+        vt_tokenize(
+            CASE
+                WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
+                WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                ELSE CONCAT('+234', TRIM(u.mobile))
+            END
         ) AS mobile_token,
         CAST(0 AS BIGINT) AS closed_time,
         COALESCE(u.device_id, '') AS reg_device_uuid,
@@ -183,15 +164,5 @@ FROM (
     FROM src_user AS u
     LEFT JOIN dim_user_adjust FOR SYSTEM_TIME AS OF u.proc_time AS adj
         ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
-    LEFT JOIN dim_vt_mobile FOR SYSTEM_TIME AS OF u.proc_time AS vt
-        ON vt.vt_type = 'mobile'
-        AND vt.status = 1
-        AND vt.raw_value = CASE
-            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-            ELSE CONCAT('+234', TRIM(u.mobile))
-        END
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> '';

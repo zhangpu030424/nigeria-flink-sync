@@ -1,4 +1,4 @@
--- 增量 application：CDC user_order + 源表 Lookup + VT Lookup miss 时 vt_tokenize(/v2t)
+-- 增量 application：CDC user_order + 源表 Lookup；mobile 规范 +234 后直接 vt_tokenize
 -- 前置: mysql ... < sql/ddl/source_lookup_views.sql
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
@@ -238,17 +238,14 @@ FROM (
         o.user_id + 100000000 AS user_id,
         o.user_id + 100000000 AS group_user_id,
         CAST(o.app_code AS INT) AS app_id,
-        COALESCE(
-            NULLIF(TRIM(vt_m.token), ''),
-            vt_tokenize(
-                CASE
-                    WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-                    WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                    WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                    WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                    ELSE CONCAT('+234', TRIM(u.mobile))
-                END
-            )
+        vt_tokenize(
+            CASE
+                WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
+                WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                ELSE CONCAT('+234', TRIM(u.mobile))
+            END
         ) AS mobile_token,
         CASE
             WHEN bvn.bvn IS NULL OR TRIM(bvn.bvn) = '' THEN CAST('' AS STRING)
@@ -332,15 +329,6 @@ FROM (
     LEFT JOIN dim_risk_approval FOR SYSTEM_TIME AS OF o.proc_time AS ra ON ra.order_no = o.order_no
     LEFT JOIN dim_user_repay_paid FOR SYSTEM_TIME AS OF o.proc_time AS ur ON ur.order_no = o.order_no
     LEFT JOIN dim_installment_overdue FOR SYSTEM_TIME AS OF o.proc_time AS ov ON ov.user_order_id = o.id
-    LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_m
-        ON vt_m.vt_type = 'mobile' AND vt_m.status = 1
-        AND vt_m.raw_value = CASE
-            WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-            WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-            ELSE CONCAT('+234', TRIM(u.mobile))
-        END
     LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_id
         ON vt_id.vt_type = 'id_number' AND vt_id.status = 1 AND vt_id.raw_value = TRIM(bvn.bvn)
     LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_g
