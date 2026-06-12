@@ -97,8 +97,8 @@ SELECT
     CAST(COALESCE(i.current_period, 1) AS TINYINT),
     CAST(0 AS TINYINT),
     CAST(COALESCE(CAST(o.disburse_time AS DATE), CAST(o.order_time AS DATE), CAST(i.create_time AS DATE)) AS DATE),
-    CAST(i.repayment_time AS DATE),
-    CAST(i.repayment_time AS DATE),
+    CASE WHEN i.repayment_time IS NULL THEN CAST(NULL AS DATE) ELSE CAST(i.repayment_time AS DATE) END,
+    CASE WHEN i.repayment_time IS NULL THEN CAST(NULL AS DATE) ELSE CAST(i.repayment_time AS DATE) END,
     CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
     CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.interests), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
     CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(i.poundage_fees), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
@@ -112,7 +112,7 @@ SELECT
             THEN CAST(UNIX_TIMESTAMP(CAST(rp.callback_time AS STRING)) * 1000 AS BIGINT)
         ELSE CAST(NULL AS BIGINT)
     END,
-    CAST(o.settled_time AS DATE),
+    CASE WHEN o.settled_time IS NULL THEN CAST(NULL AS DATE) ELSE CAST(o.settled_time AS DATE) END,
     GREATEST(
         CAST(COALESCE(UNIX_TIMESTAMP(CAST(COALESCE(CAST(o.disburse_time AS DATE), CAST(o.order_time AS DATE), CAST(i.create_time AS DATE)) AS STRING)), 0) * 1000 AS BIGINT),
         CAST(0 AS BIGINT)

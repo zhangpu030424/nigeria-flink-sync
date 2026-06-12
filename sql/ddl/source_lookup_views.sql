@@ -80,9 +80,9 @@ SELECT CAST(id AS SIGNED) AS id,
 FROM user;
 
 CREATE OR REPLACE VIEW user_repay_paid_by_order_period AS
-SELECT order_no,
+SELECT CAST(order_no AS CHAR) AS order_no,
        CAST(current_period AS SIGNED) AS current_period,
-       MAX(callback_time) AS callback_time
+       CAST(MAX(callback_time) AS DATETIME(3)) AS callback_time
 FROM user_repay
 WHERE status = 2
   AND callback_time IS NOT NULL
@@ -90,13 +90,13 @@ WHERE status = 2
   AND TRIM(order_no) <> ''
 GROUP BY order_no, current_period;
 
--- loan/application 增量 Lookup：避免 UNSIGNED → BigInteger 导致 ClassCastException
+-- loan/application 增量 Lookup：避免 UNSIGNED / DATETIME / CHAR 类型导致 ClassCastException
 CREATE OR REPLACE VIEW user_order_loan_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
-       order_no,
-       order_time,
-       disburse_time,
-       settled_time,
+       CAST(order_no AS CHAR) AS order_no,
+       CAST(order_time AS DATETIME(3)) AS order_time,
+       CAST(disburse_time AS DATETIME(3)) AS disburse_time,
+       CAST(settled_time AS DATETIME(3)) AS settled_time,
        CAST(risk_order_status AS SIGNED) AS risk_order_status
 FROM user_order;
 
