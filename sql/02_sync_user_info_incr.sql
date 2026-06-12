@@ -1,4 +1,4 @@
--- 增量 user_info：CDC user_personal_info + 源表 Lookup + VT Lookup miss 时 vt_tokenize(/v2t)
+-- 增量 user_info：CDC user_personal_info + 源表 Lookup；BVN 直接 vt_tokenize(/v2t)
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -87,22 +87,6 @@ CREATE TABLE IF NOT EXISTS dim_app_config (
     'lookup.cache.ttl' = '24h'
 );
 
-CREATE TABLE IF NOT EXISTS dim_vt_id_number (
-    vt_type STRING,
-    raw_value STRING,
-    token STRING,
-    status INT,
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '2h'
-);
-
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
     live_image STRING, id_card STRING, info STRING,
@@ -133,10 +117,7 @@ FROM (
         COALESCE(
             CASE
                 WHEN p.bvn IS NULL OR TRIM(p.bvn) = '' THEN CAST('' AS STRING)
-                ELSE COALESCE(
-                    NULLIF(TRIM(vt.token), ''),
-                    vt_tokenize(TRIM(p.bvn))
-                )
+                ELSE vt_tokenize(TRIM(p.bvn))
             END,
             ''
         ) AS id_number,
@@ -171,8 +152,6 @@ FROM (
     INNER JOIN dim_user FOR SYSTEM_TIME AS OF p.proc_time AS u ON u.id = p.user_id
     LEFT JOIN dim_user_work FOR SYSTEM_TIME AS OF p.proc_time AS wr ON wr.user_id = p.user_id
     LEFT JOIN dim_app_config FOR SYSTEM_TIME AS OF p.proc_time AS ac ON ac.app_code = u.app_code
-    LEFT JOIN dim_vt_id_number FOR SYSTEM_TIME AS OF p.proc_time AS vt
-        ON vt.vt_type = 'id_number' AND vt.status = 1 AND vt.raw_value = TRIM(p.bvn)
 ) AS e
 WHERE (e.id_number IS NOT NULL AND TRIM(e.id_number) <> '')
    OR e.full_name IS NOT NULL;

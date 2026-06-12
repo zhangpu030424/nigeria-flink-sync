@@ -1,4 +1,4 @@
--- 增量 application：CDC user_order + 源表 Lookup；mobile 规范 +234 后直接 vt_tokenize
+-- 增量 application：CDC user_order + 源表 Lookup；敏感字段直接 vt_tokenize（mobile +234 规范）
 -- 前置: mysql ... < sql/ddl/source_lookup_views.sql
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
@@ -149,22 +149,6 @@ CREATE TABLE IF NOT EXISTS dim_installment_overdue (
     'lookup.cache.ttl' = '30m'
 );
 
-CREATE TABLE IF NOT EXISTS dim_vt_token (
-    vt_type STRING,
-    raw_value STRING,
-    token STRING,
-    status INT,
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '2h'
-);
-
 CREATE TABLE IF NOT EXISTS sink_application (
     application_no STRING, mobile STRING, bid STRING, app_id INT, app_version STRING,
     user_id BIGINT, group_user_id BIGINT, sn STRING, is_test TINYINT, is_first_apply TINYINT, is_auto_apply TINYINT,
@@ -249,28 +233,19 @@ FROM (
         ) AS mobile_token,
         CASE
             WHEN bvn.bvn IS NULL OR TRIM(bvn.bvn) = '' THEN CAST('' AS STRING)
-            ELSE COALESCE(
-                NULLIF(TRIM(vt_id.token), ''),
-                vt_tokenize(TRIM(bvn.bvn))
-            )
+            ELSE vt_tokenize(TRIM(bvn.bvn))
         END AS id_number_token,
         CASE
             WHEN TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) IS NULL
                 OR TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) = ''
                 THEN CAST(NULL AS STRING)
-            ELSE COALESCE(
-                NULLIF(TRIM(vt_g.token), ''),
-                vt_tokenize(TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))))
-            )
+            ELSE vt_tokenize(TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))))
         END AS gaid_idfa_token,
         COALESCE(u.device_id, '') AS device_uuid,
         di.session_uuid AS session_id,
         COALESCE(ub.bank_code, '') AS bank_code,
         COALESCE(ub.bank_holder, '') AS bank_account_name,
-        COALESCE(
-            NULLIF(TRIM(vt_ba.token), ''),
-            vt_tokenize(TRIM(ub.bank_account))
-        ) AS bank_account_token,
+        vt_tokenize(TRIM(ub.bank_account)) AS bank_account_token,
         o.product_id,
         COALESCE(o.period_days, 7) AS period_days,
         COALESCE(o.period_count, 1) AS period_count,
@@ -329,13 +304,6 @@ FROM (
     LEFT JOIN dim_risk_approval FOR SYSTEM_TIME AS OF o.proc_time AS ra ON ra.order_no = o.order_no
     LEFT JOIN dim_user_repay_paid FOR SYSTEM_TIME AS OF o.proc_time AS ur ON ur.order_no = o.order_no
     LEFT JOIN dim_installment_overdue FOR SYSTEM_TIME AS OF o.proc_time AS ov ON ov.user_order_id = o.id
-    LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_id
-        ON vt_id.vt_type = 'id_number' AND vt_id.status = 1 AND vt_id.raw_value = TRIM(bvn.bvn)
-    LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_g
-        ON vt_g.vt_type = 'gaid_idfa' AND vt_g.status = 1
-        AND vt_g.raw_value = TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), '')))
-    LEFT JOIN dim_vt_token FOR SYSTEM_TIME AS OF o.proc_time AS vt_ba
-        ON vt_ba.vt_type = 'bank_account' AND vt_ba.status = 1 AND vt_ba.raw_value = TRIM(ub.bank_account)
     WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''

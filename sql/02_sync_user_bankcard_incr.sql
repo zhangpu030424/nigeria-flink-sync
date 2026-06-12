@@ -1,8 +1,4 @@
--- 增量（预 VT + 兜底）：CDC user_bank_info + vt_token_cache Lookup → 目标 user_bankcard
--- 全量: ./scripts/run-user-bankcard-fast.sh
--- 过滤: deleted=0；Lookup miss 时 vt_tokenize() 调 /v2t
---
--- 执行: ./scripts/run-sql.sh sql/02_sync_user_bankcard_incr.sql
+-- 增量：CDC user_bank_info → bank_account 直接 vt_tokenize(/v2t)
 
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
@@ -37,22 +33,6 @@ CREATE TABLE IF NOT EXISTS src_user_bank_info (
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_vt_bank_account (
-    vt_type STRING,
-    raw_value STRING,
-    token STRING,
-    status INT,
-    PRIMARY KEY (vt_type, raw_value) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true',
-    'table-name' = 'vt_token_cache',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '2h'
-);
-
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
     id BIGINT,
     group_user_id BIGINT,
@@ -83,16 +63,9 @@ FROM (
         b.id + 100000000 AS id,
         b.user_id + 100000000 AS group_user_id,
         COALESCE(b.bank_code, '') AS bank_code,
-        COALESCE(
-            NULLIF(TRIM(vt.token), ''),
-            vt_tokenize(TRIM(b.bank_account))
-        ) AS bank_account_number,
+        vt_tokenize(TRIM(b.bank_account)) AS bank_account_number,
         CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default
     FROM src_user_bank_info AS b
-    LEFT JOIN dim_vt_bank_account FOR SYSTEM_TIME AS OF b.proc_time AS vt
-        ON vt.vt_type = 'bank_account'
-        AND vt.status = 1
-        AND vt.raw_value = TRIM(b.bank_account)
     WHERE b.deleted = 0
       AND b.bank_account IS NOT NULL
       AND TRIM(b.bank_account) <> ''
