@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS src_user_personal_info (
     sur_name STRING,
     date_of_birth TIMESTAMP(3),
     education_level STRING,
-    gender STRING,
+    gender INT,
     living_address_state STRING,
     living_address_city STRING,
     living_address_first_line STRING,
@@ -126,7 +126,7 @@ FROM (
             'birthday' VALUE DATE_FORMAT(p.date_of_birth, 'yyyy-MM-dd'),
             'job_type' VALUE wr.work_type,
             'education' VALUE p.education_level,
-            'gender' VALUE p.gender,
+            'gender' VALUE CAST(p.gender AS STRING),
             'salary' VALUE CASE
                 WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN CAST(NULL AS STRING)
                 ELSE wr.monthly_income
@@ -140,7 +140,7 @@ FROM (
             'app' VALUE JSON_OBJECT(
                 'name' VALUE ac.app_name,
                 'version' VALUE ac.version,
-                'app_id' VALUE u.app_code
+                'app_id' VALUE CAST(u.app_code AS STRING)
             ),
             'address' VALUE JSON_OBJECT(
                 'province' VALUE p.living_address_state,
