@@ -25,6 +25,7 @@ SKIP_STAGING=0
 SKIP_VT=0
 SKIP_DDL=0
 REBUILD_VT=0
+REBUILD_VT_MODE="drop"
 JOBS_FILTER=""
 
 while [[ $# -gt 0 ]]; do
