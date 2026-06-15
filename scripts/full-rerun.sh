@@ -46,12 +46,13 @@ echo ">> [1/4] 取消全部 Running Flink Job"
 bash scripts/cancel-flink-jobs.sh --yes
 
 echo ""
-echo ">> [2/4] vt_token_cache（TINYINT vt_type，避免 ENUM ALTER 锁表）"
+echo ">> [2/4] vt_token_cache（模式=${REBUILD_VT_MODE}，须 root/DBA）"
 if [[ "$SKIP_VT_REBUILD" -eq 1 ]]; then
-  echo "  跳过 DROP 重建（--skip-vt-rebuild）"
+  echo "  跳过重建（--skip-vt-rebuild）"
 else
-  echo "  ⚠️  DROP 会清空全部 VT token，须 root/DBA；之后流水线会 vt_seed + vt-preload"
-  mysql_source_file sql/ddl/vt_token_cache_rebuild.sql
+  # shellcheck source=scripts/lib/vt-token-cache-rebuild.sh
+  source scripts/lib/vt-token-cache-rebuild.sh
+  vt_token_cache_rebuild "$REBUILD_VT_MODE"
 fi
 
 echo ""

@@ -14,7 +14,9 @@
 #   ./scripts/sync-bulk-auto.sh --jobs user,user_info
 #   ./scripts/sync-bulk-auto.sh --skip-staging          # 宽表已建好
 #   ./scripts/sync-bulk-auto.sh --skip-vt               # 跳过 vt_seed/preload
-#   ./scripts/sync-bulk-auto.sh --rebuild-vt-cache      # root DROP vt_token_cache
+#   ./scripts/sync-bulk-auto.sh --rebuild-vt-swap       # 大表 RENAME 换表（推荐）
+#   ./scripts/sync-bulk-auto.sh --rebuild-vt-purge      # 分批删空再 DROP
+#   ./scripts/sync-bulk-auto.sh --rebuild-vt-cache      # 直接 DROP（小表）
 #   ./scripts/sync-bulk-auto.sh --keep-jobs             # 不 Cancel 存量 Job
 #
 set -euo pipefail
@@ -38,7 +40,9 @@ while [[ $# -gt 0 ]]; do
     --skip-staging) SKIP_STAGING=1 ;;
     --skip-vt) SKIP_VT=1 ;;
     --skip-ddl) SKIP_DDL=1 ;;
-    --rebuild-vt-cache) REBUILD_VT=1 ;;
+    --rebuild-vt-cache) REBUILD_VT=1; REBUILD_VT_MODE="drop" ;;
+    --rebuild-vt-swap) REBUILD_VT=1; REBUILD_VT_MODE="swap" ;;
+    --rebuild-vt-purge|--rebuild-vt-purge-drop) REBUILD_VT=1; REBUILD_VT_MODE="purge-drop" ;;
     --keep-jobs) CANCEL_JOBS=0 ;;
     --user-info-latest-offset|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
     --startup-mode=*|--startup-mode|--incr-startup-mode=*|--incr-startup-mode) ;;  # incr 参数
@@ -88,10 +92,12 @@ fi
 
 if [[ "$REBUILD_VT" -eq 1 ]]; then
   echo ""
-  echo ">> [2] DROP 重建 vt_token_cache（TINYINT，须 root/DBA）"
+  echo ">> [2] 重建 vt_token_cache（${REBUILD_VT_MODE}，须 root/DBA）"
   # shellcheck source=scripts/lib/mysql-source.sh
   source scripts/lib/mysql-source.sh
-  mysql_source_file sql/ddl/vt_token_cache_rebuild.sql
+  # shellcheck source=scripts/lib/vt-token-cache-rebuild.sh
+  source scripts/lib/vt-token-cache-rebuild.sh
+  vt_token_cache_rebuild "$REBUILD_VT_MODE"
 else
   echo ""
   echo ">> [2] 跳过 vt_token_cache 重建（--rebuild-vt-cache 可开启）"

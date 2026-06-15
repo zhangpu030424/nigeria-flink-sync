@@ -54,6 +54,22 @@ mysql -u root ... nigeria_backend < sql/ddl/user_info_dirty_enqueue.sql
 mysql -u root ... nigeria_backend < sql/ddl/user_info_dirty.sql
 ```
 
+### vt_token_cache 大表无法 DROP
+
+先 **Cancel Flink Job + 停 vt-preload**，再选一种：
+
+| 方案 | 命令 | 说明 |
+|------|------|------|
+| **A RENAME 换表（推荐）** | `./scripts/full-rerun.sh` 或 `--rebuild-vt-swap` | 秒级完成，旧表改名 `vt_token_cache_legacy` |
+| **B 分批删除** | `./scripts/vt-token-cache-purge.sh --drop-after` | 按 id 区间每批 1 万行删，删空再 DROP |
+| **C 直接 DROP** | `--rebuild-vt-drop` | 仅小表或已停服时 |
+
+换表后后台清旧表：
+
+```bash
+./scripts/vt-token-cache-purge.sh --table vt_token_cache_legacy --batch 20000 --drop-after
+```
+
 跑完检查：
 
 ```bash
