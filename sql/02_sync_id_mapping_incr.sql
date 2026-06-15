@@ -1,5 +1,5 @@
 -- 增量 id_mapping：CDC id_mapping_sync_staging
--- 新关系需先刷新宽表（重跑 source_all_sync_staging.sql 第 7 段或全量重建）再追 binlog
+-- 新关系需先刷新宽表（重跑 sql/ddl/id_mapping_sync_staging.sql 或 rebuild-all-staging.sh）再追 binlog
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '2s';

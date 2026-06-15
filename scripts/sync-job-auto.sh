@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
-SYNC_SCRIPT_VERSION="monitor-v2-user-pk-dedup"
+SYNC_SCRIPT_VERSION="monitor-v3-sql-job-id-parse"
 
 JOB_KEY="${1:-}"
 shift || true
@@ -144,6 +144,11 @@ list_running_job_ids() {
   docker exec "$JM" ./bin/flink list 2>/dev/null | grep -oE '[a-f0-9]{32}' | sort -u || true
 }
 
+read_submitted_job_id() {
+  local f="${FLINK_LAST_JOB_ID_FILE:-logs/last-flink-job-id}"
+  [[ -f "$f" ]] && tr -d '[:space:]' < "$f" || true
+}
+
 cancel_all_jobs() {
   log "取消所有 RUNNING Job..."
   while read -r job_id; do
@@ -174,7 +179,13 @@ capture_new_job_id() {
   local before="$1"
   local id=""
   local i
-  # 短任务（如 VT miss）可能在单次 sleep 8 内已结束；逐秒轮询，且不用 tail -1 回退
+  local submitted
+  submitted=$(read_submitted_job_id)
+  if [[ -n "$submitted" ]] && ! echo " $before " | grep -q " $submitted "; then
+    echo "$submitted"
+    return 0
+  fi
+  # 短 batch（如 user_bankcard ~10s）sql-client 返回时 Job 常已 FINISHED；再轮询 RUNNING
   for i in $(seq 1 20); do
     sleep 1
     while read -r id; do
@@ -185,6 +196,11 @@ capture_new_job_id() {
       fi
     done < <(list_running_job_ids)
   done
+  submitted=$(read_submitted_job_id)
+  if [[ -n "$submitted" ]] && ! echo " $before " | grep -q " $submitted "; then
+    echo "$submitted"
+    return 0
+  fi
   echo ""
   return 1
 }
@@ -244,7 +260,9 @@ monitor_bulk_until_stable() {
   local round=0
   local grace=0
 
-  [[ -z "$job_id" ]] && { log "[${phase_label}] ✗ 无 Job id，无法监控全量"; return 1; }
+  if [[ -z "$job_id" ]]; then
+    log "[${phase_label}] WARN: 无 Job id（batch 可能已结束），仅按宽表/目标计数监控"
+  fi
 
   while true; do
     round=$((round + 1))
@@ -268,11 +286,12 @@ monitor_bulk_until_stable() {
     fi
 
     job_running=0
-    if list_running_job_ids | grep -qx "$job_id"; then
+    if [[ -n "$job_id" ]] && list_running_job_ids | grep -qx "$job_id"; then
       job_running=1
     fi
     job_state="DONE"
     [[ "$job_running" -eq 1 ]] && job_state="RUNNING"
+    [[ -z "$job_id" ]] && job_state="DONE(no-id)"
 
     local match_hint="需一致"
     [[ "$SYNC_REQUIRE_EXACT_COUNT" != "1" ]] && match_hint="≥${SYNC_THRESHOLD_PCT}%"
@@ -396,7 +415,8 @@ resolve_vt_two_phase() {
       VT_MISS_RUNNER="run-user-info-fast-vt-miss.sh"
       ;;
     user_bankcard)
-      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>''"
+      # sink PK=(group_user_id,bank_account_number)：同 user+token 多行合并，计数须去重
+      VT_SRC_HAS_TOKEN_SQL="SELECT COUNT(*) FROM (SELECT DISTINCT user_id, bank_account_token FROM user_bankcard_sync_staging WHERE bank_account_token IS NOT NULL AND TRIM(bank_account_token)<>'') d"
       VT_SRC_PHASE1_SQL="$VT_SRC_HAS_TOKEN_SQL"
       VT_SRC_MISS_SQL="SELECT COUNT(*) FROM user_bankcard_sync_staging WHERE bank_account_raw IS NOT NULL AND TRIM(bank_account_raw)<>'' AND (bank_account_token IS NULL OR TRIM(bank_account_token)='')"
       VT_MISS_RUNNER="run-user-bankcard-fast-vt-miss.sh"

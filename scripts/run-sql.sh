@@ -128,7 +128,29 @@ if [[ "$SQL_FILE" == *id_add_user_bulk* || "$SQL_FILE" == *_lm_bulk* ]]; then
 fi
 grep -E "^SET 'parallelism|scan.partition.num|'table-name'" "$PREPARED" 2>/dev/null | head -10 || true
 docker cp "$PREPARED" "${CONTAINER}:${REMOTE}"
-docker exec "$CONTAINER" ./bin/sql-client.sh -D "parallelism.default=${FLINK_PARALLELISM}" -f "$REMOTE"
+SQL_LOG="$(mktemp)"
+trap 'rm -f "$PREPARED" "$SQL_LOG"' EXIT
+docker exec "$CONTAINER" ./bin/sql-client.sh -D "parallelism.default=${FLINK_PARALLELISM}" -f "$REMOTE" \
+  2>&1 | tee "$SQL_LOG"
 rm -f "$PREPARED"
+PREPARED=""
 
-echo ">> 完成。INSERT 类语句会提交长期 Job，请到 Web UI 查看 Running Jobs。"
+# batch Job 常在 sql-client 返回前已 FINISHED，flink list 捕不到；从输出解析 Job ID
+FLINK_JOB_ID="$(sed -n 's/.*Job ID: \([a-f0-9]\{32\}\).*/\1/p' "$SQL_LOG" | tail -1)"
+LAST_JOB_FILE="${FLINK_LAST_JOB_ID_FILE:-logs/last-flink-job-id}"
+mkdir -p "$(dirname "$LAST_JOB_FILE")"
+if [[ -n "$FLINK_JOB_ID" ]]; then
+  echo "$FLINK_JOB_ID" > "$LAST_JOB_FILE"
+  echo ">> FLINK_JOB_ID=${FLINK_JOB_ID}"
+else
+  : > "$LAST_JOB_FILE"
+fi
+rm -f "$SQL_LOG"
+SQL_LOG=""
+trap - EXIT
+
+if [[ -n "$FLINK_JOB_ID" ]]; then
+  echo ">> 完成。Job 已提交（batch 可能已结束，见 FLINK_JOB_ID）。"
+else
+  echo ">> 完成。INSERT 类语句会提交长期 Job，请到 Web UI 查看 Running Jobs。"
+fi

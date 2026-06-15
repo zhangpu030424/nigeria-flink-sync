@@ -6,7 +6,7 @@
 #   2. vt_seed_all.sql — INSERT IGNORE 灌明文（status=0，无 VT 脏队列 TRIGGER）
 #   3. vt-preload.sh — 批量 /v2t（status=0 → 1）
 #   4. vt_token_cache_vt_triggers.sql — 增量脏队列入队（seed/preload 后再建，避免百万行触发）
-#   5. source_all_sync_staging.sql — 重建宽表
+#   5. source_all_sync_staging.sql + id_mapping_sync_staging.sql — 重建宽表
 #
 # 用法:
 #   ./scripts/rebuild-all-staging.sh
@@ -37,9 +37,15 @@ SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 run_sql_file() {
   local f=$1
   echo ""
-  echo ">> SQL: $f"
+  echo ">> SQL: $f （$(date '+%H:%M:%S') 开始；大查询可能较久）"
+  local t0=$SECONDS
+  local init="SET SESSION wait_timeout=28800,net_read_timeout=7200,net_write_timeout=7200,sql_log_bin=0;"
   MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT}" \
-    -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" < "$f"
+    -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" \
+    --max-allowed-packet=512M \
+    --init-command="${init}" \
+    < "$f"
+  echo ">> 完成: $f （耗时 $((SECONDS - t0))s）"
 }
 
 echo ">> 源库: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}"
@@ -69,7 +75,7 @@ else
 fi
 
 echo ""
-echo ">> [5/5] 重建全部宽表: sql/ddl/source_all_sync_staging.sql"
+echo ">> [5/5] 重建宽表 1-6: sql/ddl/source_all_sync_staging.sql"
 if [[ "$KEEP_DIRTY" -eq 0 ]]; then
   echo ">> 建宽表前清空 user_info_dirty（vt-preload TRIGGER 可能已写入，全量将覆盖）"
   # shellcheck source=scripts/lib/mysql-source.sh
@@ -81,6 +87,10 @@ else
   echo ">> 保留 user_info_dirty（--keep-user-info-dirty）"
 fi
 run_sql_file sql/ddl/source_all_sync_staging.sql
+
+echo ""
+echo ">> [5/5] 重建 id_mapping: sql/ddl/id_mapping_sync_staging.sql"
+run_sql_file sql/ddl/id_mapping_sync_staging.sql
 
 echo ""
 echo ">> 完成。missing_token 行由全量阶段 2（vt_tokenize）补全"
