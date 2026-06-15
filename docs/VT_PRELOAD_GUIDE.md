@@ -37,9 +37,9 @@ mysql ... < sql/ddl/source_all_sync_staging.sql
 
 | 模式 | 说明 |
 |------|------|
-| **upsert**（默认） | 5 万行一条 `INSERT ... ON DUPLICATE KEY UPDATE`，快 |
-| update_id | 每 3000 行一条 `CASE id` UPDATE，**128 万行极慢** |
-| delete_insert | 已弃用 |
+| **upsert**（默认） | 5 万行一条 `INSERT ... ON DUPLICATE KEY UPDATE` | 快 |
+| delete_insert | DELETE 旧 status=0 行 + 批量 INSERT 新行 | 需 DELETE；**必须** `VT_PRELOAD_ASYNC_WRITE=0` |
+| update_id | 每 3000 行一条 `CASE id` UPDATE | 极慢，仅无 INSERT 时 |
 
 `.env` 确认：
 
@@ -48,6 +48,23 @@ VT_PRELOAD_WRITE_MODE=upsert
 VT_PRELOAD_WRITE_WORKERS=4
 VT_PRELOAD_ASYNC_WRITE=1
 ```
+
+### 使用 DELETE + INSERT
+
+```bash
+# 1. DBA 授权（flink_cdc 或跑 preload 的账号）
+#    GRANT DELETE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'%';
+
+# 2. .env
+VT_PRELOAD_WRITE_MODE=delete_insert
+VT_PRELOAD_ASYNC_WRITE=0          # 必须关异步，否则删完未插会丢行
+VT_PRELOAD_WRITE_WORKERS=1        # 同步写时无意义，保持 1 即可
+
+# 3. 跑 preload（会先 SELECT id，再 DELETE + INSERT）
+./scripts/vt-preload.sh --mode fast --vt-type all --workers 4 --http-batch-size 50000
+```
+
+日志应出现 `SELECT id,raw ... (delete_insert)` 和 `DEL+INS`，而不是 `UPSERT`。
 
 ## 推荐配置（.env）
 

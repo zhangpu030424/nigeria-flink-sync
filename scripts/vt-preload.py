@@ -176,7 +176,7 @@ LIMIT {limit}
 # 写库策略:
 #   upsert=批量 INSERT ON DUPLICATE KEY UPDATE（fast 默认，比 CASE UPDATE 快很多）
 #   update_id=按主键 CASE UPDATE（仅需 UPDATE 权限、无 INSERT 时用）
-#   delete_insert=DELETE+INSERT（需 DELETE，已弃用）
+#   delete_insert=DELETE 旧行 + INSERT 新行（需 DELETE；须 VT_PRELOAD_ASYNC_WRITE=0）
 WRITE_UPSERT = "upsert"
 WRITE_UPDATE_ID = "update_id"
 WRITE_DELETE_INSERT = "delete_insert"
@@ -1117,15 +1117,14 @@ def main() -> int:
     write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_UPSERT)
     if write_mode not in WRITE_MODES:
         write_mode = WRITE_UPSERT
-    # delete_insert 先删后插，异步入库失败会导致数据丢失；强制同步写或改 update_id
+    # delete_insert：须同步写库（删成功插失败会丢行）；且账号需 DELETE 权限
     if write_mode == WRITE_DELETE_INSERT:
-        log(
-            "警告: delete_insert 已弃用（无 DELETE 权限时删成功插失败会丢数据）。"
-            " 自动切换为 update_id。",
-            err=True,
-        )
-        write_mode = WRITE_UPDATE_ID
-        async_write = True
+        if async_write:
+            log(
+                "delete_insert: 关闭异步入库（VT_PRELOAD_ASYNC_WRITE=0），DELETE+INSERT 同事务序执行",
+            )
+            async_write = False
+        log("delete_insert: 需 GRANT DELETE ON vt_token_cache；无权限请用 upsert")
 
     if not all([host, user, password, database]):
         print("缺少 SOURCE_MYSQL_* 配置", file=sys.stderr)
