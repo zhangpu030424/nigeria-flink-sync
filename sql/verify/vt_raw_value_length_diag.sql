@@ -83,3 +83,43 @@ SELECT vt_type,
            AND CHAR_LENGTH(raw_value) <= 128) AS pending_claimable
 FROM vt_token_cache
 GROUP BY vt_type;
+
+-- 8) raw_value 含 \\0 填充（历史 CAST AS BINARY(128) 脏数据）
+SELECT 'cache 含 NUL 填充' AS check_name,
+       vt_type,
+       COUNT(*) AS cnt
+FROM vt_token_cache
+WHERE LOCATE(CHAR(0), raw_value) > 0
+GROUP BY vt_type;
+
+-- 9) 同 vt_type 下去 NUL 后重复（GUI 看起来一样、uk 却有两条）
+SELECT vt_type,
+       REPLACE(raw_value, CHAR(0), '') AS raw_clean,
+       COUNT(*) AS dup_cnt,
+       GROUP_CONCAT(id ORDER BY id) AS ids,
+       GROUP_CONCAT(status ORDER BY id) AS statuses
+FROM vt_token_cache
+GROUP BY vt_type, raw_clean
+HAVING dup_cnt > 1
+ORDER BY dup_cnt DESC
+LIMIT 20;
+
+-- 8) raw_value 含 \\0 填充（历史 CAST AS BINARY(128) 脏数据）
+SELECT 'cache 含 NUL 填充' AS check_name,
+       vt_type,
+       COUNT(*) AS cnt
+FROM vt_token_cache
+WHERE LOCATE(CHAR(0), raw_value) > 0
+GROUP BY vt_type;
+
+-- 9) 同 vt_type 下去 NUL 后重复（GUI 看起来一样、uk 却有两条）
+SELECT vt_type,
+       REPLACE(raw_value, CHAR(0), '') AS raw_clean,
+       COUNT(*) AS dup_cnt,
+       GROUP_CONCAT(id ORDER BY id) AS ids,
+       GROUP_CONCAT(status ORDER BY id) AS statuses
+FROM vt_token_cache
+GROUP BY vt_type, raw_clean
+HAVING dup_cnt > 1
+ORDER BY dup_cnt DESC
+LIMIT 20;
