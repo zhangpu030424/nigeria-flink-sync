@@ -277,6 +277,7 @@ def _mysql_run(host: str, port: str, user: str, password: str, database: str, sq
     env["MYSQL_PWD"] = password
     cmd = ["mysql", "-h", host, "-P", port, "-u", user, database]
     if via_stdin:
+        cmd.append("--binary-mode=1")
         proc = subprocess.run(cmd, input=sql, env=env, capture_output=True, text=True)
     else:
         proc = subprocess.run([*cmd, "-e", sql], env=env, capture_output=True, text=True)
@@ -299,7 +300,13 @@ def mysql_exec(host: str, port: str, user: str, password: str, database: str, sq
     _mysql_run(host, port, user, password, database, sql, via_stdin=via_stdin)
 
 
+def sanitize_vt_str(s: str) -> str:
+    """VT 返回的 token/masking 偶发嵌入 \\0，mysql CLI 与 VARCHAR 均不接受。"""
+    return s.replace("\x00", "")
+
+
 def escape_sql(s: str) -> str:
+    s = sanitize_vt_str(s)
     return s.replace("\\", "\\\\").replace("'", "''")
 
 
@@ -332,10 +339,12 @@ def parse_tokens(body: str, expected: int) -> Tuple[List[str], List[Optional[str
         masking = []
     if len(tokens) != expected:
         raise RuntimeError(f"token count mismatch: sent={expected} got={len(tokens)}")
+    tokens = [sanitize_vt_str(t) for t in tokens]
     mask_list: List[Optional[str]] = list(masking) if masking else [None] * expected
     if len(mask_list) < expected:
         mask_list.extend([None] * (expected - len(mask_list)))
-    return tokens, mask_list[:expected]
+    mask_list = [sanitize_vt_str(m) if m is not None else None for m in mask_list[:expected]]
+    return tokens, mask_list
 
 
 class V2tHttpClient:
