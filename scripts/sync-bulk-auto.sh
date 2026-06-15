@@ -29,6 +29,7 @@ SKIP_DDL=0
 REBUILD_VT=0
 REBUILD_VT_MODE="drop"
 JOBS_FILTER=""
+KEEP_USER_INFO_DIRTY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,7 +45,8 @@ while [[ $# -gt 0 ]]; do
     --rebuild-vt-swap) REBUILD_VT=1; REBUILD_VT_MODE="swap" ;;
     --rebuild-vt-purge|--rebuild-vt-purge-drop) REBUILD_VT=1; REBUILD_VT_MODE="purge-drop" ;;
     --keep-jobs) CANCEL_JOBS=0 ;;
-    --user-info-latest-offset|--keep-user-info-dirty|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
+    --keep-user-info-dirty) KEEP_USER_INFO_DIRTY=1 ;;
+    --user-info-latest-offset|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
     --startup-mode=*|--startup-mode|--incr-startup-mode=*|--incr-startup-mode) ;;  # incr 参数
     -h|--help)
       sed -n '2,20p' "$0"
@@ -126,6 +128,7 @@ if [[ "$SKIP_STAGING" -eq 0 ]]; then
   echo ">> [5] VT + 重建宽表"
   REBUILD_ARGS=()
   [[ "$SKIP_VT" -eq 1 ]] && REBUILD_ARGS+=(--skip-vt)
+  [[ "$KEEP_USER_INFO_DIRTY" -eq 1 ]] && REBUILD_ARGS+=(--keep-user-info-dirty)
   ./scripts/rebuild-all-staging.sh "${REBUILD_ARGS[@]}"
 else
   echo ""

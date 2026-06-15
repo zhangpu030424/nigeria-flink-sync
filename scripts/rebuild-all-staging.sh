@@ -10,13 +10,16 @@
 # 用法:
 #   ./scripts/rebuild-all-staging.sh
 #   ./scripts/rebuild-all-staging.sh --skip-vt   # 跳过 seed/preload（VT 已最新）
+#   ./scripts/rebuild-all-staging.sh --keep-user-info-dirty  # 保留脏队列（一般不推荐）
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SKIP_VT=0
+KEEP_DIRTY=0
 for arg in "$@"; do
   [[ "$arg" == "--skip-vt" ]] && SKIP_VT=1
+  [[ "$arg" == "--keep-user-info-dirty" ]] && KEEP_DIRTY=1
 done
 
 if [[ ! -f .env ]]; then
@@ -65,6 +68,16 @@ fi
 
 echo ""
 echo ">> [5/5] 重建全部宽表: sql/ddl/source_all_sync_staging.sql"
+if [[ "$KEEP_DIRTY" -eq 0 ]]; then
+  echo ">> 建宽表前清空 user_info_dirty（vt-preload TRIGGER 可能已写入，全量将覆盖）"
+  # shellcheck source=scripts/lib/mysql-source.sh
+  source scripts/lib/mysql-source.sh
+  # shellcheck source=scripts/lib/user-info-dirty.sh
+  source scripts/lib/user-info-dirty.sh
+  truncate_user_info_dirty
+else
+  echo ">> 保留 user_info_dirty（--keep-user-info-dirty）"
+fi
 run_sql_file sql/ddl/source_all_sync_staging.sql
 
 echo ""

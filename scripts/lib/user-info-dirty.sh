@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# user_info 脏队列：增量启动前清空（全量已覆盖历史，避免 timestamp 重放积压）
+# user_info 脏队列：增量启动 / 建宽表前清空（全量已覆盖历史，避免 timestamp 重放积压）
 # shellcheck shell=bash
 
 truncate_user_info_dirty() {
