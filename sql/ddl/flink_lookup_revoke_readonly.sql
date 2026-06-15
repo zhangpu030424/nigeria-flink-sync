@@ -40,5 +40,4 @@ END WHILE;
 
 FLUSH PRIVILEGES;
 
-SELECT CONCAT('REVOKE 完成: ', @readonly_user, '@', @readonly_host) AS result;
-SHOW GRANTS FOR 'NGuserReadonly_backend'@'%';
+SELECT CONCAT('REVOKE 完成: ', @readonly_user, '@', @readonly_host, ' — 请执行 SHOW GRANTS 核对') AS result;
