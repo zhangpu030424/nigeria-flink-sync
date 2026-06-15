@@ -16,6 +16,7 @@ mode=cache：旧认领 UPDATE 模式
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import json
 import os
@@ -166,7 +167,7 @@ def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
     return SOURCE_QUERIES[vt_type].format(not_vt=not_vt, limit_clause=clause)
 
 CACHE_PENDING_ID_SQL = """
-SELECT id, raw_value FROM vt_token_cache
+SELECT id, TO_BASE64(raw_value) AS raw_b64 FROM vt_token_cache
 WHERE vt_type = {vt_type} AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
   AND CHAR_LENGTH(raw_value) <= {max_len}
@@ -510,12 +511,22 @@ WHERE vt_type={vt_type_db(vt_type)}
     return n
 
 
-def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
+def parse_id_raw_rows(rows: List[str], *, raw_b64: bool = True) -> List[Tuple[int, str]]:
+    """mysql -B 制表符分隔；raw_value 含 \\n/\\t 会拆行，故 SELECT 用 TO_BASE64 传输。"""
     out: List[Tuple[int, str]] = []
     for row in rows:
         parts = row.split("\t", 1)
-        if len(parts) == 2:
-            out.append((int(parts[0]), parts[1]))
+        if len(parts) != 2:
+            continue
+        try:
+            rid = int(parts[0])
+            if raw_b64:
+                raw = base64.b64decode(parts[1]).decode("utf-8")
+            else:
+                raw = parts[1]
+            out.append((rid, raw))
+        except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+            continue
     return out
 
 
@@ -1056,7 +1067,7 @@ ORDER BY id LIMIT {limit};
 """)
     log(f"[{vt_type}] 认领 UPDATE {time.time() - t0:.1f}s")
     sql = f"""
-SELECT id, raw_value FROM vt_token_cache
+SELECT id, TO_BASE64(raw_value) AS raw_b64 FROM vt_token_cache
 WHERE vt_type={vt} AND status={STATUS_PROCESSING} ORDER BY id LIMIT {limit};
 """
     return parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))

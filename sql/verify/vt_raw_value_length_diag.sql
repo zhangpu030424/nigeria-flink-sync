@@ -67,5 +67,19 @@ WHERE vt_type = 1 AND status = 0
 ORDER BY CHAR_LENGTH(raw_value) DESC
 LIMIT 10;
 
--- 5) 列定义确认
-SHOW CREATE TABLE vt_token_cache\G
+-- 6) status=0 但含换行/制表符（mysql -B 读会拆行，preload 曾认领 0 条）
+SELECT 'cache status=0 含换行或制表符' AS check_name,
+       vt_type,
+       COUNT(*) AS cnt
+FROM vt_token_cache
+WHERE status = 0
+  AND (raw_value LIKE CONCAT('%', CHAR(10), '%') OR raw_value LIKE CONCAT('%', CHAR(9), '%'))
+GROUP BY vt_type;
+
+-- 7) 对比：status=0 总数 vs 可认领（<=128 且无空）
+SELECT vt_type,
+       SUM(status = 0) AS pending_all,
+       SUM(status = 0 AND raw_value IS NOT NULL AND TRIM(raw_value) <> ''
+           AND CHAR_LENGTH(raw_value) <= 128) AS pending_claimable
+FROM vt_token_cache
+GROUP BY vt_type;
