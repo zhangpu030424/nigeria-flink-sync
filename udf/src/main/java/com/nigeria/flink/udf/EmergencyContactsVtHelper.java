@@ -18,6 +18,23 @@ final class EmergencyContactsVtHelper {
     private EmergencyContactsVtHelper() {
     }
 
+    static String mergeIntoInfoJson(String infoJson, String emergencyContactsArray) {
+        if (infoJson == null || infoJson.trim().isEmpty()) {
+            return "{\"emergency_contacts\":" + (emergencyContactsArray == null ? "[]" : emergencyContactsArray) + "}";
+        }
+        String info = infoJson.trim();
+        String contacts = emergencyContactsArray == null || emergencyContactsArray.trim().isEmpty()
+                ? "[]" : emergencyContactsArray.trim();
+        if (!info.endsWith("}")) {
+            return info;
+        }
+        String body = info.substring(0, info.length() - 1);
+        if (body.endsWith("{")) {
+            return "{" + "\"emergency_contacts\":" + contacts + "}";
+        }
+        return body + ",\"emergency_contacts\":" + contacts + "}";
+    }
+
     static String processPayload(String payload, VtBatchClient client) {
         if (payload == null) {
             return null;

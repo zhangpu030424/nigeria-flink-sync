@@ -318,7 +318,63 @@ SELECT CAST(u.id AS SIGNED) AS user_id,
        CAST(cc.credit_limit AS CHAR) AS credit_limit,
        CAST(rip.ip AS CHAR) AS reg_ip,
        CAST(ec.emergency_contacts AS CHAR) AS emergency_contacts,
-       CAST(isrc.install_source AS CHAR) AS install_source
+       CAST(isrc.install_source AS CHAR) AS install_source,
+       -- 与 user_info_sync_staging.info_json 同结构：固定全部 key，无值写 null；emergency_contacts 无数据为 []
+       CAST(JSON_OBJECT(
+               'birthday', DATE_FORMAT(p.date_of_birth, '%Y-%m-%d'),
+               'job_type', wr.work_type,
+               'education', p.education_level,
+               'gender', p.gender,
+               'registration_ip', rip.ip,
+               'salary', CASE
+                             WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN NULL
+                             WHEN LENGTH(REPLACE(TRIM(wr.monthly_income), ',', '')) BETWEEN 1 AND 19
+                                 AND REPLACE(TRIM(wr.monthly_income), ',', '') REGEXP '^[0-9]+$'
+                                 THEN CAST(REPLACE(TRIM(wr.monthly_income), ',', '') AS UNSIGNED)
+                             ELSE NULL
+                   END,
+               'loan_purpose', NULL,
+               'face_similarity', NULL,
+               'pay_cycle', NULL,
+               'salary_yearly', NULL,
+               'credit_limit', CASE
+                                   WHEN cc.credit_limit IS NULL OR TRIM(cc.credit_limit) = '' THEN NULL
+                                   WHEN CAST(cc.credit_limit AS CHAR) REGEXP '^[0-9]{1,19}$'
+                                       THEN CAST(cc.credit_limit AS UNSIGNED)
+                                   ELSE NULL
+                   END,
+               'company', NULLIF(TRIM(wr.company_name), ''),
+               'install_source', isrc.install_source,
+               'registration_time', UNIX_TIMESTAMP(u.create_time),
+               'email', NULL,
+               'ocr', NULL,
+               'profession', wr.occupation,
+               'app', JSON_OBJECT(
+                       'name', ac.app_name,
+                       'version', ac.version,
+                       'app_id', u.app_code
+                      ),
+               'emergency_contacts', COALESCE(CAST(ec.emergency_contacts AS JSON), CAST('[]' AS JSON)),
+               'salary_day', NULL,
+               'address', JSON_OBJECT(
+                       'province', p.living_address_state,
+                       'city', p.living_address_city,
+                       'district', NULL,
+                       'detail', NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
+                                                    COALESCE(p.living_address_second_line, ''))), ''),
+                       'village', NULL
+                      ),
+               'salary_fortnightly', NULL,
+               'salary_daily', NULL,
+               'salary_monthly', 1,
+               'children_num', p.number_of_children,
+               'religion', NULL,
+               'marital', p.marriage,
+               'full_name', NULLIF(TRIM(CONCAT(COALESCE(p.first_name, ''), ' ', COALESCE(p.sur_name, ''))), ''),
+               'salary_weekly', NULL,
+               'survey', NULL,
+               'salary_type', NULL
+       ) AS CHAR) AS info_json
 FROM `user` u
          LEFT JOIN user_personal_latest_lookup p ON p.user_id = u.id
          LEFT JOIN vt_token_cache_lookup vt

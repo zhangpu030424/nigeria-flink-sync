@@ -33,4 +33,14 @@ public class VtTokenizeEmergencyContactsFunction extends ScalarFunction {
         }
         return EmergencyContactsVtHelper.processPayload(trimmed, client);
     }
+
+    /** 增量：info JSON（无 emergency_contacts）+ Lookup 数组 → 合并并 tokenize 明文手机号 */
+    public String eval(String infoJson, String emergencyContactsJson) {
+        String contacts = emergencyContactsJson == null ? "[]" : emergencyContactsJson.trim();
+        if (contacts.isEmpty() || "null".equalsIgnoreCase(contacts)) {
+            contacts = "[]";
+        }
+        String processed = EmergencyContactsVtHelper.processContactsArray(contacts, client);
+        return EmergencyContactsVtHelper.mergeIntoInfoJson(infoJson, processed);
+    }
 }

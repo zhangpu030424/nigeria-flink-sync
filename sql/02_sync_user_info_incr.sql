@@ -1,6 +1,7 @@
 -- 增量 user_info：单路 CDC user_info_dirty + 窗口合并 + bundle Lookup
--- 前置: ./scripts/deploy-source-ddl.sh（含 TRIGGER debounce 存储过程）
--- 并行: FLINK_PARALLELISM_INCR（建议 4）；积压: TRUNCATE dirty + latest-offset
+-- info_json 在 MySQL user_info_incr_bundle_lookup 组装（与宽表 JSON 结构一致，固定全部 key）
+-- Flink 仅：id_number token/UDF 兜底 + emergency_contacts 内明文手机号 VT 兜底
+-- 前置: ./scripts/deploy-source-ddl.sh
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.udf.VtTokenizeEmergencyContactsFunction';
 
@@ -33,39 +34,18 @@ CREATE TABLE IF NOT EXISTS cdc_user_info_dirty (
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'false',
     'debezium.snapshot.mode' = 'schema_only',
-    -- 云 RDS 的 flink_cdc 常无 RELOAD/FLUSH_TABLES；避免 FLUSH TABLES WITH READ LOCK
     'debezium.snapshot.locking.mode' = 'none',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     user_id BIGINT,
-    app_code BIGINT,
-    create_time TIMESTAMP(3),
     bvn STRING,
     first_name STRING,
     sur_name STRING,
-    date_of_birth DATE,
-    education_level BIGINT,
-    gender BIGINT,
-    living_address_state STRING,
-    living_address_city STRING,
-    living_address_first_line STRING,
-    living_address_second_line STRING,
-    number_of_children BIGINT,
-    marriage BIGINT,
     vt_token STRING,
     vt_status BIGINT,
-    work_type STRING,
-    occupation STRING,
-    company_name STRING,
-    monthly_income STRING,
-    app_name STRING,
-    app_version STRING,
-    credit_limit STRING,
-    reg_ip STRING,
-    emergency_contacts STRING,
-    install_source STRING,
+    info_json STRING,
     PRIMARY KEY (user_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -77,7 +57,6 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     'lookup.cache.ttl' = '120s'
 );
 
--- 同 user_id 在窗口内多次 dirty 只保留最新一条，再 Lookup（减轻 binlog 洪水）
 CREATE TEMPORARY VIEW cdc_user_info_dirty_coalesced AS
 SELECT user_id,
        MAX(updated_at) AS updated_at,
@@ -124,81 +103,7 @@ FROM (
             ''
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))), '') AS full_name,
-        JSON_STRING(JSON_OBJECT(
-            KEY 'birthday' VALUE CASE
-                WHEN b.date_of_birth IS NULL THEN CAST(NULL AS STRING)
-                ELSE DATE_FORMAT(CAST(b.date_of_birth AS TIMESTAMP(3)), 'yyyy-MM-dd')
-            END,
-            KEY 'job_type' VALUE CAST(b.work_type AS STRING),
-            KEY 'education' VALUE CAST(b.education_level AS BIGINT),
-            KEY 'gender' VALUE CAST(b.gender AS BIGINT),
-            KEY 'registration_ip' VALUE CAST(b.reg_ip AS STRING),
-            KEY 'salary' VALUE CASE
-                WHEN b.monthly_income IS NULL OR TRIM(b.monthly_income) = '' THEN CAST(NULL AS BIGINT)
-                WHEN CHAR_LENGTH(REPLACE(TRIM(b.monthly_income), ',', '')) BETWEEN 1 AND 19
-                    AND REGEXP(REPLACE(TRIM(b.monthly_income), ',', ''), '^[0-9]+$')
-                    THEN CAST(REPLACE(TRIM(b.monthly_income), ',', '') AS BIGINT)
-                ELSE CAST(NULL AS BIGINT)
-            END,
-            KEY 'loan_purpose' VALUE CAST(NULL AS STRING),
-            KEY 'face_similarity' VALUE CAST(NULL AS STRING),
-            KEY 'pay_cycle' VALUE CAST(NULL AS STRING),
-            KEY 'salary_yearly' VALUE CAST(NULL AS STRING),
-            KEY 'credit_limit' VALUE CASE
-                WHEN b.credit_limit IS NULL OR TRIM(b.credit_limit) = '' THEN CAST(NULL AS BIGINT)
-                WHEN REGEXP(TRIM(b.credit_limit), '^[0-9]{1,19}$') THEN CAST(b.credit_limit AS BIGINT)
-                ELSE CAST(NULL AS BIGINT)
-            END,
-            KEY 'company' VALUE CASE
-                WHEN b.company_name IS NULL OR TRIM(b.company_name) = '' THEN CAST(NULL AS STRING)
-                ELSE TRIM(b.company_name)
-            END,
-            KEY 'install_source' VALUE CAST(b.install_source AS STRING),
-            KEY 'registration_time' VALUE CASE
-                WHEN b.create_time IS NULL THEN CAST(NULL AS BIGINT)
-                ELSE CAST(UNIX_TIMESTAMP(CAST(b.create_time AS STRING)) AS BIGINT)
-            END,
-            KEY 'email' VALUE CAST(NULL AS STRING),
-            KEY 'ocr' VALUE CAST(NULL AS STRING),
-            KEY 'profession' VALUE CAST(b.occupation AS STRING),
-            KEY 'app' VALUE JSON_OBJECT(
-                KEY 'name' VALUE CAST(b.app_name AS STRING),
-                KEY 'version' VALUE CAST(b.app_version AS STRING),
-                KEY 'app_id' VALUE CAST(b.app_code AS BIGINT)
-                NULL ON NULL
-            ),
-            KEY 'emergency_contacts' VALUE CAST(
-                COALESCE(vt_tokenize_emergency_contacts(b.emergency_contacts), '[]') AS JSON
-            ),
-            KEY 'salary_day' VALUE CAST(NULL AS STRING),
-            KEY 'address' VALUE JSON_OBJECT(
-                KEY 'province' VALUE CAST(b.living_address_state AS STRING),
-                KEY 'city' VALUE CAST(b.living_address_city AS STRING),
-                KEY 'district' VALUE CAST(NULL AS STRING),
-                KEY 'detail' VALUE CASE
-                    WHEN TRIM(CONCAT(COALESCE(b.living_address_first_line, ''), ' ', COALESCE(b.living_address_second_line, ''))) = ''
-                        THEN CAST(NULL AS STRING)
-                    ELSE TRIM(CONCAT(COALESCE(b.living_address_first_line, ''), ' ', COALESCE(b.living_address_second_line, '')))
-                END,
-                KEY 'village' VALUE CAST(NULL AS STRING)
-                NULL ON NULL
-            ),
-            KEY 'salary_fortnightly' VALUE CAST(NULL AS STRING),
-            KEY 'salary_daily' VALUE CAST(NULL AS STRING),
-            KEY 'salary_monthly' VALUE CAST(1 AS BIGINT),
-            KEY 'children_num' VALUE CAST(b.number_of_children AS BIGINT),
-            KEY 'religion' VALUE CAST(NULL AS STRING),
-            KEY 'marital' VALUE CAST(b.marriage AS BIGINT),
-            KEY 'full_name' VALUE CASE
-                WHEN TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))) = ''
-                    THEN CAST(NULL AS STRING)
-                ELSE TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, '')))
-            END,
-            KEY 'salary_weekly' VALUE CAST(NULL AS STRING),
-            KEY 'survey' VALUE CAST(NULL AS STRING),
-            KEY 'salary_type' VALUE CAST(NULL AS STRING)
-            NULL ON NULL
-        )) AS info_json
+        vt_tokenize_emergency_contacts(COALESCE(b.info_json, '{}')) AS info_json
     FROM cdc_user_info_dirty_coalesced AS t
     INNER JOIN dim_user_info_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.user_id = t.user_id
 ) AS e
