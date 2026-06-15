@@ -34,11 +34,7 @@ echo ""
 echo ">> 校验关键对象"
 CHECK_VIEWS=(
   v_adjust_latest_by_adid
-  user_info_user_lookup
   user_personal_latest_lookup
-  user_id_by_bvn_lookup
-  device_uuid_user_lookup
-  session_uuid_user_lookup
   app_config_lookup
   vt_token_cache_lookup
   user_work_latest_lookup
@@ -53,11 +49,16 @@ CHECK_VIEWS=(
   user_bankcard_incr_lookup
   user_product_latest_lookup
   application_order_lookup
-  application_order_id_by_order_no_lookup
   user_order_installment_loan_lookup
   application_user_lookup
   user_order_loan_lookup
   user_repay_paid_by_order_period
+  user_bank_default_lookup
+  user_bvn_lookup
+  device_ids_latest_lookup
+  risk_approval_latest_by_order
+  user_repay_paid_latest_by_order
+  user_order_installment_overdue
 )
 failed=0
 for v in "${CHECK_VIEWS[@]}"; do

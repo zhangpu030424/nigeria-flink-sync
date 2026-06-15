@@ -1,6 +1,6 @@
 # 多 Job 流水线同步
 
-基于 `docs/中台数据迁移 — 源库 → 目标库字段映射 (3).md`。
+基于 `docs/中台数据迁移 — 源库 → 目标库字段映射 (3).md`。架构原理见 [FLINK_IMPLEMENTATION.md](FLINK_IMPLEMENTATION.md)。
 
 ## 脚本总览
 

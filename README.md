@@ -16,6 +16,7 @@ nigeria-flink-sync/
 │       ├── source_user_sync_staging.sql  # 宽表含 mobile_token
 │       └── vt_token_cache.sql
 ├── docs/
+│   ├── FLINK_IMPLEMENTATION.md  # Flink 原理与实现（架构、CDC、VT、脏队列）
 │   ├── VT_PRELOAD_GUIDE.md        # VT 预加载操作手册
 │   └── FIELD_MAPPING.md
 └── scripts/
@@ -46,6 +47,8 @@ chmod +x scripts/*.sh
 **前置（源库 DBA 一次）**：`source_views_adjust.sql` → `source_materialize_user_adjust.sql` → `vt_token_cache` 灌满 → `source_user_sync_staging.sql`。
 
 详见 [docs/VT_PRELOAD_GUIDE.md](docs/VT_PRELOAD_GUIDE.md)。
+
+架构与实现详见 [docs/FLINK_IMPLEMENTATION.md](docs/FLINK_IMPLEMENTATION.md)。
 
 ## 前置条件
 
