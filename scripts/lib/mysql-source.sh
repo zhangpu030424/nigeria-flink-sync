@@ -4,13 +4,16 @@
 
 mysql_source_cmd() {
   local -a args=("$@")
+  local connect_timeout="${SOURCE_MYSQL_CONNECT_TIMEOUT:-15}"
   if command -v mysql >/dev/null 2>&1; then
-    MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+    MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql --connect-timeout="${connect_timeout}" \
+      -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
       -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" "${args[@]}"
   else
     docker run --rm -i \
       -e MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" \
-      mysql:8.0 mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
+      mysql:8.0 mysql --connect-timeout="${connect_timeout}" \
+      -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT:-3306}" \
       -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" "${args[@]}"
   fi
 }

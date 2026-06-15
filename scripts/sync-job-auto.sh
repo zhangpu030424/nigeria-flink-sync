@@ -191,8 +191,10 @@ capture_new_job_id() {
 
 start_incr() {
   local bulk_start_ms="${1:-}"
-  local bulk_parallel="${FLINK_PARALLELISM:-8}"
-  local incr_parallel="${FLINK_PARALLELISM_INCR:-1}"
+  local bulk_parallel
+  bulk_parallel=$(sync_job_parallelism "$JOB_KEY" bulk)
+  local incr_parallel
+  incr_parallel=$(sync_job_parallelism "$JOB_KEY" incr)
 
   # 有 bulk-start-ms 时默认 timestamp：只追 binlog，不重扫全表（每行 vt_tokenize 全表极慢）
   # 全量已写入历史数据；漏写窗口由 bulk-start-ms 覆盖。需全表快照补漏可 export CDC_STARTUP_MODE=initial
@@ -207,15 +209,15 @@ start_incr() {
   fi
 
   export FLINK_PARALLELISM="${incr_parallel}"
-  log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}"
+  log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}（job=${JOB_KEY}）"
   if [[ "$JOB_KEY" == "user_info" && "${SKIP_TRUNCATE_USER_INFO_DIRTY:-0}" != "1" ]]; then
     log "清空 user_info_dirty（增量启动，全量已覆盖历史）"
     # shellcheck source=scripts/lib/user-info-dirty.sh
     source "$(dirname "$0")/lib/user-info-dirty.sh"
     truncate_user_info_dirty >> "$LOG_FILE" 2>&1
   fi
-  log "源库 DDL: deploy-source-ddl.sh"
-  ./scripts/deploy-source-ddl.sh >> "$LOG_FILE" 2>&1
+  log "源库 DDL: deploy-source-ddl.sh --skip-if-ok"
+  ./scripts/deploy-source-ddl.sh --skip-if-ok >> "$LOG_FILE" 2>&1
   log "增量 SQL: ${INCR_SQL} mode=${CDC_STARTUP_MODE} bulk-start-ms=${CDC_STARTUP_TIMESTAMP_MILLIS}"
   ./scripts/run-sql.sh "$INCR_SQL"
   log "增量 Job 已提交。监控: ./scripts/monitor-sync.sh ${MONITOR_TABLE} 60"
@@ -454,6 +456,9 @@ if [[ "$INCR_ONLY" -eq 1 && "$BULK_ONLY" -eq 1 ]]; then
   exit 1
 fi
 
+# shellcheck source=scripts/lib/sync-jobs.sh
+source "$(dirname "$0")/lib/sync-jobs.sh"
+
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
   if [[ "$KEEP_OTHER" -eq 0 ]]; then
@@ -480,9 +485,9 @@ else
 fi
 
 BEFORE_JOBS=$(list_running_job_ids | tr '\n' ' ')
-BULK_PARALLEL="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+BULK_PARALLEL=$(sync_job_parallelism "$JOB_KEY" bulk)
 SLOTS="${FLINK_TASK_SLOTS:-16}"
-INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
+INCR_PAR=$(sync_job_parallelism "$JOB_KEY" incr)
 SLOT_BUFFER="${SYNC_SLOT_BUFFER:-2}"
 
 if [[ "$KEEP_OTHER" -eq 1 ]]; then
@@ -491,7 +496,10 @@ if [[ "$KEEP_OTHER" -eq 1 ]]; then
     [[ -z "$_jid" ]] && continue
     running_n=$((running_n + 1))
   done < <(list_running_job_ids)
-  reserved=$((running_n * INCR_PAR + SLOT_BUFFER))
+  max_incr_par="${FLINK_PARALLELISM_INCR:-1}"
+  ui_incr_par=$(sync_job_parallelism user_info incr)
+  (( ui_incr_par > max_incr_par )) && max_incr_par=$ui_incr_par
+  reserved=$((running_n * max_incr_par + SLOT_BUFFER))
   max_bulk=$((SLOTS - reserved))
   (( max_bulk < 1 )) && max_bulk=1
   if (( BULK_PARALLEL > max_bulk )); then
@@ -501,7 +509,7 @@ if [[ "$KEEP_OTHER" -eq 1 ]]; then
 fi
 
 export FLINK_PARALLELISM="${BULK_PARALLEL}"
-log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（slots=${SLOTS}）"
+log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（job=${JOB_KEY} slots=${SLOTS}）"
 
 resolve_vt_two_phase
 if [[ -n "$VT_MISS_RUNNER" ]]; then

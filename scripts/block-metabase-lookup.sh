@@ -86,27 +86,10 @@ fi
 
 if [[ "$KILL" -eq 1 ]]; then
   echo ""
-  echo ">> 杀连接（USER=${READONLY_USER} 或查 Lookup，Time>=${MIN_TIME_SEC}s）..."
-  blockers=$(mysql_source_cmd -N -e "
-    SELECT ID
-    FROM information_schema.PROCESSLIST
-    WHERE DB = '${SOURCE_MYSQL_DATABASE}'
-      AND ID <> CONNECTION_ID()
-      AND COMMAND != 'Daemon'
-      AND TIME >= ${MIN_TIME_SEC}
-      AND (
-        USER = '${READONLY_USER}' AND ${lookup_like}
-      );
-  " 2>/dev/null || true)
-  if [[ -n "$blockers" ]]; then
-    while read -r pid; do
-      [[ -z "$pid" ]] && continue
-      echo ">> KILL ${pid}"
-      [[ "$DRY_RUN" -eq 0 ]] && mysql_source_query "KILL ${pid};" || true
-    done <<< "$blockers"
-  else
-    echo ">> 未发现需杀的连接"
-  fi
+  echo ">> 杀连接（Lookup 长查询，Time>=${MIN_TIME_SEC}s）..."
+  # shellcheck source=scripts/lib/mysql-source-ddl.sh
+  source scripts/lib/mysql-source-ddl.sh
+  mysql_source_kill_ddl_blockers "$MIN_TIME_SEC" "$DRY_RUN"
 fi
 
 if [[ "$REVOKE" -eq 1 ]]; then

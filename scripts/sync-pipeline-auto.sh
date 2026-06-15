@@ -37,7 +37,7 @@ mkdir -p "$LOG_DIR"
 echo "=========================================="
 echo "步骤 A: 源库 DDL（adjust + Lookup 视图）"
 echo "=========================================="
-./scripts/deploy-source-ddl.sh
+./scripts/deploy-source-ddl.sh --skip-if-ok
 
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   if ! load_bulk_start_ms "${LOG_DIR}/bulk-start-ms.env"; then
@@ -52,19 +52,21 @@ fi
 
 SHARED_MS="${BULK_START_MS}"
 
+# shellcheck source=scripts/lib/sync-jobs.sh
+source scripts/lib/sync-jobs.sh
+
 BULK_PAR="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
 INCR_PAR="${FLINK_PARALLELISM_INCR:-1}"
+USER_INFO_PAR=$(sync_job_parallelism user_info incr)
 SLOTS="${FLINK_TASK_SLOTS:-16}"
 
 echo "=========================================="
 echo "流水线同步"
 echo "  bulk-start-ms=${SHARED_MS}"
-echo "  bulk并行=${BULK_PAR}  incr并行=${INCR_PAR}  slots=${SLOTS}"
+echo "  bulk并行=${BULK_PAR}  incr并行=${INCR_PAR}  user_info=${USER_INFO_PAR}  slots=${SLOTS}"
 echo "  增量模式: CDC initial（先快照补全量漏写，再追 binlog）"
 echo "=========================================="
 
-# shellcheck source=scripts/lib/sync-jobs.sh
-source scripts/lib/sync-jobs.sh
 sync_jobs_load "$JOBS_FILTER"
 ENABLED_JOBS=("${SYNC_ENABLED_JOBS[@]}")
 

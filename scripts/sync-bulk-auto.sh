@@ -106,7 +106,11 @@ fi
 if [[ "$SKIP_DDL" -eq 0 ]]; then
   echo ""
   echo ">> [3] 源库 DDL（adjust + Lookup + user_info_dirty）"
-  ./scripts/deploy-source-ddl.sh
+  if [[ "$CANCEL_JOBS" -eq 0 ]]; then
+    ./scripts/deploy-source-ddl.sh --skip-if-ok
+  else
+    ./scripts/deploy-source-ddl.sh --force-views
+  fi
 else
   echo ""
   echo ">> [3] 跳过 DDL（--skip-ddl）"

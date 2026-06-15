@@ -249,6 +249,7 @@ Flink 增量 Job 通过 JDBC Lookup 读这些视图（**唯一 DDL 入口** `sql
 |------|------|
 | `FLINK_PARALLELISM_BULK` | 全量并行（如 20~40） |
 | `FLINK_PARALLELISM_INCR` | 增量并行（建议 4） |
+| `FLINK_PARALLELISM_USER_INFO` | user_info 专用（默认 2× INCR，建议 8~12） |
 | `FLINK_TASK_SLOTS` | TaskManager slot 总数 |
 | `FLINK_TM_MEMORY` | TaskManager 内存 |
 | `USER_INFO_DIRTY_COALESCE_SEC` | user_info 脏队列 Flink 侧合并窗口 |

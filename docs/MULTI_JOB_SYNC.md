@@ -126,14 +126,15 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 
 ## Slot 规划
 
-峰值 ≈ `FLINK_PARALLELISM_BULK + N个增量Job × FLINK_PARALLELISM_INCR`
+峰值 ≈ `FLINK_PARALLELISM_BULK + Σ各增量Job并行度`（**user_info 默认 2× `FLINK_PARALLELISM_INCR`**，可用 `FLINK_PARALLELISM_USER_INFO` 固定）
 
 | 配置 | 示例 |
 |------|------|
 | `FLINK_TASK_SLOTS` | 30 |
 | `FLINK_PARALLELISM_BULK` | 20 |
-| `FLINK_PARALLELISM_INCR` | 1 |
-| 6 表全跑完 | 20 + 6×1 = 26 slots |
+| `FLINK_PARALLELISM_INCR` | 4 |
+| `FLINK_PARALLELISM_USER_INFO` | 8（可选，不设则 2× INCR） |
+| 6 表全跑完 | 20 + 5×4 + 8 = 48 slots（user_info 占 8） |
 
 ## 宽表一览
 
@@ -177,7 +178,7 @@ Flink **只 CDC 一张表** `user_info_dirty`；下列源表变更时由 **MySQL
 
 DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。
 
-组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 `FLINK_PARALLELISM_INCR=4`。
+组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 **`FLINK_PARALLELISM_USER_INFO=8`**（或 `FLINK_PARALLELISM_INCR` 的 2 倍），Lookup + VT UDF 比其它增量 Job 更重。
 
 `CDC_SERVER_ID_UI_DIRTY` 须为**单值**（如 `5401`）；脏队列 CDC 关闭 incremental snapshot 时写 `5401-5404` 会报 `NumberFormatException`。
 
@@ -257,7 +258,7 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 **消费侧（Flink）**
 
 - `USER_INFO_DIRTY_COALESCE_SEC=5`：窗口内同 user 只 Lookup 一次
-- `FLINK_PARALLELISM_INCR=4`（或更高，受 slot 限制）
+- `FLINK_PARALLELISM_USER_INFO=8`（或 `FLINK_PARALLELISM_USER_INFO_INCR`；默认 2× `FLINK_PARALLELISM_INCR`）
 - Lookup cache TTL 120s
 
 **清积压（全量已覆盖缺口时）**

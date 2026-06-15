@@ -87,6 +87,7 @@ source scripts/lib/mysql-source.sh
 echo "=========================================="
 echo "增量迁移 sync-incr-auto"
 echo "  FLINK_PARALLELISM_INCR=${FLINK_PARALLELISM_INCR:-?}"
+echo "  FLINK_PARALLELISM_USER_INFO=$(sync_job_parallelism user_info incr)（user_info 专用）"
 echo "  CDC_STARTUP_MODE=${STARTUP_MODE}"
 echo "=========================================="
 
@@ -97,7 +98,7 @@ echo ">> bulk-start-ms=${SHARED_MS}"
 if [[ "$SKIP_DDL" -eq 0 ]]; then
   echo ""
   echo ">> [1] 源库 DDL"
-  ./scripts/deploy-source-ddl.sh
+  ./scripts/deploy-source-ddl.sh --skip-if-ok
 else
   echo ""
   echo ">> [1] 跳过 DDL（--skip-ddl）"
