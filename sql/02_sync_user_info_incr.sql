@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
 CREATE TEMPORARY VIEW cdc_user_info_dirty_coalesced AS
 SELECT user_id,
        MAX(updated_at) AS updated_at,
-       window_end AS proc_time
+       PROCTIME() AS proc_time
 FROM TABLE(
     TUMBLE(TABLE cdc_user_info_dirty, DESCRIPTOR(proc_time), INTERVAL '${USER_INFO_DIRTY_COALESCE_SEC}' SECOND)
 )
