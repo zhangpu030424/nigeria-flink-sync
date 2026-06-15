@@ -16,7 +16,7 @@ mode=cache：旧认领 UPDATE 模式
 from __future__ import annotations
 
 import argparse
-import base64
+import binascii
 import http.client
 import json
 import os
@@ -166,10 +166,11 @@ def _source_sql(vt_type: str, not_vt: str, limit: Optional[int]) -> str:
     clause = f"LIMIT {int(limit)}" if limit is not None else ""
     return SOURCE_QUERIES[vt_type].format(not_vt=not_vt, limit_clause=clause)
 
+# mysql -B 制表符分隔：raw_value 含 \\n/\\t/\\0 会拆行或截断，须 HEX 传输
 CACHE_PENDING_ID_SQL = """
-SELECT id, TO_BASE64(raw_value) AS raw_b64 FROM vt_token_cache
+SELECT id, HEX(raw_value) AS raw_hex FROM vt_token_cache
 WHERE vt_type = {vt_type} AND status = {status}
-  AND raw_value IS NOT NULL AND raw_value <> ''
+  AND raw_value IS NOT NULL AND TRIM(raw_value) <> ''
   AND CHAR_LENGTH(raw_value) <= {max_len}
 ORDER BY id
 LIMIT {limit}
@@ -511,23 +512,27 @@ WHERE vt_type={vt_type_db(vt_type)}
     return n
 
 
-def parse_id_raw_rows(rows: List[str], *, raw_b64: bool = True) -> List[Tuple[int, str]]:
-    """mysql -B 制表符分隔；raw_value 含 \\n/\\t 会拆行，故 SELECT 用 TO_BASE64 传输。"""
+def decode_raw_hex(hex_str: str) -> str:
+    return bytes.fromhex(hex_str).decode("utf-8", errors="surrogateescape")
+
+
+def parse_id_raw_rows(rows: List[str]) -> Tuple[List[Tuple[int, str]], int]:
+    """解析 id\\traw_hex 行；返回 (成功行, 丢弃行数)。"""
     out: List[Tuple[int, str]] = []
+    dropped = 0
     for row in rows:
         parts = row.split("\t", 1)
         if len(parts) != 2:
+            dropped += 1
             continue
         try:
             rid = int(parts[0])
-            if raw_b64:
-                raw = base64.b64decode(parts[1]).decode("utf-8")
-            else:
-                raw = parts[1]
+            raw = decode_raw_hex(parts[1].strip())
             out.append((rid, raw))
-        except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            dropped += 1
             continue
-    return out
+    return out, dropped
 
 
 def update_success_by_id(
@@ -670,23 +675,58 @@ ON DUPLICATE KEY UPDATE
         mysql_exec(host, port, user, password, database, sql)
 
 
+def diagnose_pending_gap(
+    host: str, port: str, user: str, password: str, database: str, vt_type: str,
+) -> Dict[str, int]:
+    sql = f"""
+SELECT
+  SUM(status = {STATUS_PENDING}) AS pending_all,
+  SUM(status = {STATUS_PENDING} AND (raw_value IS NULL OR TRIM(raw_value) = '')) AS empty_raw,
+  SUM(status = {STATUS_PENDING} AND CHAR_LENGTH(raw_value) > {RAW_VALUE_MAX_LEN}) AS too_long,
+  SUM(status = {STATUS_PENDING} AND raw_value IS NOT NULL AND TRIM(raw_value) <> ''
+      AND CHAR_LENGTH(raw_value) <= {RAW_VALUE_MAX_LEN}) AS claimable
+FROM vt_token_cache WHERE vt_type = {vt_type_db(vt_type)};
+"""
+    rows = mysql_query(host, port, user, password, database, sql)
+    if not rows:
+        return {}
+    parts = rows[0].split("\t")
+    keys = ("pending_all", "empty_raw", "too_long", "claimable")
+    return {k: int(parts[i] or 0) for i, k in enumerate(keys) if i < len(parts)}
+
+
 def fetch_fast_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, limit: int, retry_failed: bool,
     write_mode: str = WRITE_UPSERT,
 ) -> List[Tuple[int, str]]:
-    """fast 模式从 vt_token_cache 认领。始终 SELECT id+raw（seed 后按 id UPDATE token，避免 upsert 重插 raw_value）。"""
+    """fast 模式从 vt_token_cache 认领。SELECT id+HEX(raw) 传输，按 id UPDATE token。"""
     vt, lim = vt_type_db(vt_type), int(limit)
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
     fmt = dict(vt_type=vt, status=status, limit=lim, max_len=RAW_VALUE_MAX_LEN)
     sql = CACHE_PENDING_ID_SQL.format(**fmt)
-    log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ({write_mode})...")
+    claimable = count_fast_pending(host, port, user, password, database, vt_type, retry_failed)
+    log(
+        f"[{vt_type}] fast: SELECT id,HEX(raw) status={status} "
+        f"可认领={claimable} LIMIT {lim} ({write_mode})..."
+    )
     t0 = time.time()
-    rows = [
-        (rid, raw) for rid, raw in parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
-        if raw_value_len_ok(raw)
-    ]
-    log(f"[{vt_type}] SELECT {time.time() - t0:.2f}s，{len(rows)} 条")
+    raw_lines = mysql_query(host, port, user, password, database, sql)
+    parsed, dropped = parse_id_raw_rows(raw_lines)
+    rows = [(rid, raw) for rid, raw in parsed if raw_value_len_ok(raw)]
+    elapsed = time.time() - t0
+    log(f"[{vt_type}] SELECT {elapsed:.2f}s，mysql {len(raw_lines)} 行 → 解析 {len(parsed)} 条（丢弃 {dropped}）→ 可用 {len(rows)} 条")
+    if claimable > 0 and len(rows) == 0:
+        gap = diagnose_pending_gap(host, port, user, password, database, vt_type)
+        if gap:
+            log(
+                f"[{vt_type}] 诊断: pending_all={gap.get('pending_all', 0)} "
+                f"claimable={gap.get('claimable', 0)} empty_raw={gap.get('empty_raw', 0)} "
+                f"too_long={gap.get('too_long', 0)}",
+                err=True,
+            )
+        if raw_lines:
+            log(f"[{vt_type}] mysql 首行样例: {raw_lines[0][:160]!r}", err=True)
     return rows
 
 
@@ -726,7 +766,7 @@ def count_fast_pending(
     sql = f"""
 SELECT COUNT(*) FROM vt_token_cache
 WHERE vt_type={vt_type_db(vt_type)} AND status={status}
-  AND raw_value IS NOT NULL AND raw_value <> ''
+  AND raw_value IS NOT NULL AND TRIM(raw_value) <> ''
   AND CHAR_LENGTH(raw_value) <= {RAW_VALUE_MAX_LEN};
 """
     rows = mysql_query(host, port, user, password, database, sql)
@@ -1067,10 +1107,11 @@ ORDER BY id LIMIT {limit};
 """)
     log(f"[{vt_type}] 认领 UPDATE {time.time() - t0:.1f}s")
     sql = f"""
-SELECT id, TO_BASE64(raw_value) AS raw_b64 FROM vt_token_cache
+SELECT id, HEX(raw_value) AS raw_hex FROM vt_token_cache
 WHERE vt_type={vt} AND status={STATUS_PROCESSING} ORDER BY id LIMIT {limit};
 """
-    return parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
+    parsed, _ = parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
+    return parsed
 
 
 def mark_success_cache(
@@ -1245,7 +1286,7 @@ def main() -> int:
 
     log(
         f"VT 预加载 mode={mode} | types={vt_types} | workers={workers} | "
-        f"每轮={round_batch} | http={http_batch} | url={base_url}"
+        f"每轮={round_batch} | http={http_batch} | url={base_url} | transport=hex"
     )
     if mode == "fast":
         wlabel = {"upsert": "SELECT+UPSERT", "update_id": "SELECT+UPDATE-by-id", "delete_insert": "SELECT+DELETE+INSERT"}.get(
