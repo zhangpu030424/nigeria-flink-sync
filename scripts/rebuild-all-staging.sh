@@ -65,5 +65,5 @@ run_sql_file sql/ddl/source_all_sync_staging.sql
 
 echo ""
 echo ">> 完成。missing_token 行由全量阶段 2（vt_tokenize）补全"
-echo ">> 紧接: ./scripts/sync-pipeline-auto.sh --skip-staging"
-echo ">> 完整一键: ./scripts/sync-pipeline-auto.sh"
+echo ">> 紧接: ./scripts/sync-bulk-auto.sh --skip-staging"
+echo ">> 完整一键: ./scripts/sync-migrate-auto.sh"

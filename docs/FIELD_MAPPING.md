@@ -40,9 +40,9 @@ INNER JOIN user u ON acr.adid = u.adid
 
 **`mapUtmSource`：** 空/unattributed→NULL；organic；google；tiktok；facebook/instagram/messenger→facebook；kuai/kwai/kuaishou→kwai；否则原值小写。
 
-实现：`sql/02_sync_user_test.sql` + Java `AdjustCallbackUtmAssembler#mapUtmSource` 同逻辑。
+实现：`sql/02_sync_user_incr.sql` 中 UTM 映射逻辑。
 
-### VT 字段（统一：两阶段全量 + 增量 Lookup/UDF 兜底）
+### VT 字段（两阶段全量 + 增量 Lookup/UDF 兜底）
 
 | 表 | VT 字段 | 阶段 1（有 token） | 阶段 2（运行时 /v2t） | 增量 |
 |----|---------|-------------------|------------------------|------|
@@ -51,6 +51,6 @@ INNER JOIN user u ON acr.adid = u.adid
 | `user_bankcard` | bank_account | `02_sync_user_bankcard_fast` | `02_sync_user_bankcard_fast_vt_miss` | `02_sync_user_bankcard_incr` |
 | `application` | mobile/id_number/bank/gaid | `02_sync_application_fast` | `02_sync_application_fast_vt_miss` | CDC 宽表（新单需重建宽表段） |
 
-编排：`sync-all-auto.sh` / `sync-pipeline-auto.sh` → `sync-job-auto.sh` 对上述 4 表 **自动阶段 1→2→增量**。  
+编排：`sync-migrate-auto.sh` → `sync-job-auto.sh` 对含 VT 的表 **自动阶段 1→2→增量**。  
 `user_product` / `loan` 无 VT，仍单阶段全量。  
 可选 `vt-preload.sh` 扩大阶段 1、减少阶段 2 对 VT 接口压力。

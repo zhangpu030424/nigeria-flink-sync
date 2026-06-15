@@ -5,8 +5,7 @@
 #   ./scripts/sync-job-auto.sh user
 #   ./scripts/sync-job-auto.sh user --incr-only
 #   ./scripts/sync-job-auto.sh user --bulk-only    # 只全量，不切增量
-#   ./scripts/sync-job-auto.sh user --no-vt
-#   ./scripts/sync-job-auto.sh user --keep-other-jobs    # 不取消其他 RUNNING Job（多 Job 串联用）
+#   ./scripts/sync-job-auto.sh user [--incr-only|--bulk-only] [--keep-other-jobs] [--bulk-start-ms MS]
 #   ./scripts/sync-job-auto.sh user --bulk-start-ms 1710000000000
 #
 set -euo pipefail
@@ -17,18 +16,16 @@ SYNC_SCRIPT_VERSION="monitor-v2-user-pk-dedup"
 
 JOB_KEY="${1:-}"
 shift || true
-[[ -z "$JOB_KEY" ]] && { echo "用法: $0 <job_key> [--incr-only|--bulk-only] [--no-vt] [--keep-other-jobs] [--bulk-start-ms MS]"; exit 1; }
+[[ -z "$JOB_KEY" ]] && { echo "用法: $0 <job_key> [--incr-only|--bulk-only] [--keep-other-jobs] [--bulk-start-ms MS]"; exit 1; }
 
 INCR_ONLY=0
 BULK_ONLY=0
-NO_VT=0
 KEEP_OTHER=0
 BULK_START_MS_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --incr-only) INCR_ONLY=1 ;;
     --bulk-only) BULK_ONLY=1 ;;
-    --no-vt) NO_VT=1 ;;
     --keep-other-jobs) KEEP_OTHER=1 ;;
     --bulk-start-ms=*) BULK_START_MS_ARG="${1#--bulk-start-ms=}" ;;
     --bulk-start-ms)
@@ -61,19 +58,6 @@ IFS='|' read -r _key _desc FULL_SQL INCR_SQL FULL_RUNNER SRC_CNT_SQL TGT_CNT_SQL
 if [[ "$ENABLED" != "1" ]]; then
   echo "Job [$JOB_KEY] ENABLED=0，跳过。SQL 就绪后在 $CONF 改为 1"
   exit 0
-fi
-
-if [[ "$NO_VT" -eq 1 ]]; then
-  case "$JOB_KEY" in
-    user)
-      FULL_SQL="sql/02_sync_user_fast_no_vt.sql"
-      INCR_SQL="sql/02_sync_user_incr_no_vt.sql"
-      ;;
-    *)
-      echo "Job [$JOB_KEY] 暂无 --no-vt SQL，请补 *_no_vt.sql"
-      exit 1
-      ;;
-  esac
 fi
 
 [[ -f "$FULL_SQL" ]] || { echo "全量 SQL 不存在: $FULL_SQL"; exit 1; }

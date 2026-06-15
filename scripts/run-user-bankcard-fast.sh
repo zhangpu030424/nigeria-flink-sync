@@ -9,5 +9,5 @@ if [[ ! -f .env ]]; then
 fi
 
 echo ">> 提交 user_bankcard 全量 Job（sql/02_sync_user_bankcard_fast.sql）"
-echo ">> 前置: vt_token_cache bank_account 已灌满 + source_user_bankcard_sync_staging.sql 已重建"
+echo ">> 前置: vt_token_cache bank_account 已灌满 + source_all_sync_staging.sql 已重建"
 ./scripts/run-sql.sh sql/02_sync_user_bankcard_fast.sql

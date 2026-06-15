@@ -877,7 +877,7 @@ def _run_vt_rounds(
     if progress.ok > 0 and ok_tokens == 0:
         log(
             f"[{vt_type}] 严重: VT 报告成功 {progress.ok} 条但库内 token=0！"
-            " 若曾用 delete_insert 可能已删未插。请执行 sql/ddl/vt_seed_mobile.sql 后改用 update_id 重跑。",
+            " 若曾用 delete_insert 可能已删未插。请执行 sql/ddl/vt_seed_all.sql 后改用 update_id 重跑。",
             err=True,
         )
         exit_code = 2
@@ -897,7 +897,7 @@ def process_vt_type_fast(
         host, port, user, password, database, vt_type, retry_failed,
     )
     if initial == 0 and not skip_count and not retry_failed:
-        log(f"[{vt_type}] cache 无 status=0。请先: mysql ... < sql/ddl/vt_token_cache_init_all.sql")
+        log(f"[{vt_type}] cache 无 status=0。请先: mysql ... < sql/ddl/vt_seed_all.sql")
         log(f"[{vt_type}] 或改用 --mode stream（慢）从源表反查")
         return 0
     progress = ProgressTracker(vt_type, initial)

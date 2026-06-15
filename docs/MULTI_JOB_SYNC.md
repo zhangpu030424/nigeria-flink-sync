@@ -6,11 +6,11 @@
 
 | 脚本 | 用途 |
 |------|------|
-| **`sync-bulk-auto.sh`** | **全量迁移**：DDL → 锁定 bulk-start-ms → VT+宽表 → 各表全量（不切增量） |
-| **`sync-incr-auto.sh`** | **增量迁移**：读 bulk-start-ms → DDL → 提交各表增量 Job |
 | **`sync-migrate-auto.sh`** | **完整迁移**：先 `sync-bulk-auto` 再 `sync-incr-auto`（**推荐**） |
-| `sync-pipeline-auto.sh` | 兼容：每表「全量→增量」串行（旧行为） |
+| **`sync-bulk-auto.sh`** | **全量迁移** |
+| **`sync-incr-auto.sh`** | **增量迁移** |
 | `full-rerun.sh` | 从零重跑：Cancel → 重建 VT → 清 dirty → bulk → incr |
+| `sync-pipeline-auto.sh` | 可选：每表「全量→增量」串行（`--incr-only` 补提增量） |
 
 ## 一键执行（推荐）
 
@@ -157,7 +157,7 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | application | 多源 CDC（见下）+ Lookup | mobile/gaid/bank/id_number |
 | loan | 多源 CDC（见下）+ Lookup | 无 |
 
-增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-all-auto.sh` / `sync-pipeline-auto.sh` 已内置，无需 DMS 手动执行）。
+增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-migrate-auto.sh` 已内置）。
 
 **user_info 增量（脏队列方案 B）**
 

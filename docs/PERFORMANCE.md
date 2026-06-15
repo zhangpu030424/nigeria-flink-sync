@@ -33,21 +33,9 @@ chmod +x scripts/diagnose-job.sh
 
 `http://<IP>:8089` → Job → **Overview** → 各算子颜色（红=反压）→ 点算子 **Metrics** → `numRecordsOutPerSecond`
 
-### 方法三：对比实验（隔离瓶颈）
+### 方法三：单 Job 对比
 
-先 cancel 当前 Job，分别跑（测完 cancel，避免多 Job 抢 slot）：
-
-| SQL | 测什么 |
-|-----|--------|
-| `03_bench_cdc_read.sql` | 只 CDC 读 + print，**读上限** |
-| `04_bench_sink_no_join.sql` | CDC 读 + 写目标，**无 Lookup** |
-| `02_sync_user_test.sql` | 完整链路 |
-
-对比 monitor-sync 速率：
-
-- 03 快、04 慢 → **写慢** → 调 JDBC / 目标 MySQL
-- 03 快、04 快、02 慢 → **Lookup Join 慢** → 加大 cache 或全量去掉 Join
-- 03 就慢 → **CDC/源库/网络慢** → 调 snapshot parallelism、chunk、源库
+用 `./scripts/diagnose-job.sh <job_id>` 看反压算子；全量用 `monitor-sync.sh` 对比速率。
 
 ## 32C64G 默认配置（`.env`）
 
@@ -63,7 +51,7 @@ chmod +x scripts/diagnose-job.sh
 
 内存分配：JobManager 2G + TaskManager 40G + 系统预留 ~22G。
 
-## 已在 `02_sync_user_test.sql` 里的优化
+## SQL 中的优化项
 
 以上 `FLINK_*` 由 `run-sql.sh` 注入 SQL；与 `docker-compose` 中 slot/内存一致。
 
@@ -86,11 +74,11 @@ docker compose --env-file .env up -d --build
 # 2. 取消旧 Job
 docker exec nigeria-flink-jobmanager ./bin/flink cancel <job_id>
 
-# 3. DROP TABLE 后重新提交
-./scripts/run-sql.sh sql/02_sync_user_test.sql
+# 3. 重新提交
+./scripts/sync-job-auto.sh user --bulk-only
 
 # 4. 监控
-./scripts/monitor-sync.sh user 60 <job_id>
+./scripts/monitor-sync.sh user 60
 ```
 
 ## 服务器 / MySQL 侧

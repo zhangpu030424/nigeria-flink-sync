@@ -143,6 +143,5 @@ fi
 
 echo ""
 echo "完成。"
-echo "  • Job 状态 CANCELED / 无 RUNNING → ./scripts/run-user-fast.sh 重新提交"
-echo "  • missing_token_cnt>0 → 先 vt-preload，再重建 source_user_sync_staging.sql"
-echo "  • 先验证最小链路 → ./scripts/run-sql.sh sql/03_sync_user_minimal.sql"
+echo "  • Job 状态 CANCELED → ./scripts/sync-job-auto.sh user --bulk-only"
+echo "  • missing_token_cnt>0 → ./scripts/rebuild-all-staging.sh"
