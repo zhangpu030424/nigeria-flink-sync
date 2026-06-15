@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
-SYNC_SCRIPT_VERSION="monitor-v3-sql-job-id-parse"
+SYNC_SCRIPT_VERSION="monitor-v4-count-deficit-job-id"
 
 JOB_KEY="${1:-}"
 shift || true
@@ -91,7 +91,7 @@ mysql_count() {
   MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
 }
 
-# 全量达标：默认宽表计数 == 目标；允许目标略多（全量期间增量 Job 并行写入，见 SYNC_COUNT_MAX_SURPLUS）
+# 全量达标：默认宽表计数 == 目标；允许目标略多/略少（PK 去重、sink 幂等等）
 bulk_count_reached() {
   local src="$1"
   local tgt="$2"
@@ -102,6 +102,10 @@ bulk_count_reached() {
       local surplus=$((tgt - src))
       local max_surplus="${SYNC_COUNT_MAX_SURPLUS:-100}"
       [[ "$surplus" -le "$max_surplus" ]] && return 0
+    elif [[ "$tgt" -lt "$src" ]]; then
+      local deficit=$((src - tgt))
+      local max_deficit="${SYNC_COUNT_MAX_DEFICIT:-10}"
+      [[ "$deficit" -le "$max_deficit" ]] && return 0
     fi
     return 1
   else
@@ -117,7 +121,7 @@ count_match_reason() {
   elif [[ "$tgt" -gt "$src" ]]; then
     echo "目标多$((tgt - src))（增量并行写入，≤${SYNC_COUNT_MAX_SURPLUS:-100}视为达标）"
   else
-    echo "目标少$((src - tgt))"
+    echo "目标少$((src - tgt))（PK 去重/sink 幂等，≤${SYNC_COUNT_MAX_DEFICIT:-10}视为达标）"
   fi
 }
 
@@ -362,8 +366,11 @@ monitor_bulk_with_retry() {
     if [[ "$attempt" -gt 0 ]]; then
       log "[${phase_label}] 未达标，重提 batch Job (${attempt}/${BULK_SHORT_RETRY_MAX})"
       submit_bulk
-      job_id=$(capture_new_job_id "$(list_running_job_ids | tr '\n' ' ')")
-      [[ -z "$job_id" ]] && { log "[${phase_label}] ✗ 重试后未捕获 Job id"; return 1; }
+      job_id=$(read_submitted_job_id)
+      if [[ -z "$job_id" ]]; then
+        job_id=$(capture_new_job_id "$(list_running_job_ids | tr '\n' ' ')")
+      fi
+      [[ -z "$job_id" ]] && { log "[${phase_label}] ✗ 重试后未捕获 Job id（请 git pull 更新 run-sql.sh）"; return 1; }
       log "[${phase_label}] 重试 Job id=${job_id}"
     fi
     if monitor_bulk_until_stable "$phase_label" "$src_sql" "$job_id"; then
@@ -385,8 +392,12 @@ phase1_done_with_miss_pending() {
     "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$VT_SRC_MISS_SQL")
   tgt_cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
     "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
-  [[ "$hit_cnt" =~ ^[0-9]+$ && "$miss_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ ]] || return 1
-  [[ "$miss_cnt" -gt 0 && "$tgt_cnt" -eq "$hit_cnt" ]]
+  [[ "$hit_cnt" =~ ^[0-9]+$ && "$miss_cnt" -gt 0 && "$tgt_cnt" =~ ^[0-9]+$ ]] || return 1
+  local max_deficit="${SYNC_COUNT_MAX_DEFICIT:-10}"
+  if [[ "$tgt_cnt" -eq "$hit_cnt" ]]; then
+    return 0
+  fi
+  [[ "$tgt_cnt" -le "$hit_cnt" && $((hit_cnt - tgt_cnt)) -le "$max_deficit" ]]
 }
 
 # VT 两阶段全量：阶段 1 已有 token；阶段 2 无 token 行 UDF 调 /v2t
@@ -491,7 +502,7 @@ fi
 resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
 BULK_START_MS_ARG="$BULK_START_MS"
 log "========== 全量 ${FULL_SQL} =========="
-log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 宽表=目标一致=${SYNC_REQUIRE_EXACT_COUNT}"
+log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100}"
 log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
 
 if [[ "$KEEP_OTHER" -eq 0 ]]; then
