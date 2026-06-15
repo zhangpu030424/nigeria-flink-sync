@@ -1,7 +1,9 @@
--- 增量：从源表补灌 vt_token_cache（INSERT IGNORE，只增新值）
--- 建议 cron：先本脚本 → vt-preload.sh --vt-type all → 刷新各宽表
+-- 从源表灌 vt_token_cache 明文（INSERT IGNORE，status=0 待 /v2t）
+-- 类型: 1=mobile  2=gaid  3=bank_account  4=id_number(BVN)  5=emergency_contact(紧急联系人手机)
+-- 下一步: ./scripts/vt-preload.sh --vt-type all  →  source_all_sync_staging.sql
 -- mysql -h <host> -u ... -p nigeria_backend < sql/ddl/vt_seed_all.sql
 
+-- ---------- 1 mobile（user.mobile）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 1, norm.mobile_norm, 0
 FROM (
@@ -17,6 +19,7 @@ FROM (
 ) norm
 WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 
+-- ---------- 2 gaid_idfa ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 2, v.val, 0
 FROM (
@@ -33,6 +36,7 @@ FROM (
     WHERE d.idfa IS NOT NULL AND TRIM(d.idfa) <> ''
 ) v;
 
+-- ---------- 3 bank_account ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 3, TRIM(b.bank_account), 0
 FROM user_bank_info b
@@ -40,12 +44,14 @@ WHERE b.deleted = 0
   AND b.bank_account IS NOT NULL
   AND TRIM(b.bank_account) <> '';
 
+-- ---------- 4 id_number (BVN) ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 4, TRIM(p.bvn), 0
 FROM user_personal_info p
 WHERE p.bvn IS NOT NULL
   AND TRIM(p.bvn) <> '';
 
+-- ---------- 5 emergency_contact（user_emergency_contact.contact_number，+234 规范化）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 5, norm.mobile_norm, 0
 FROM (

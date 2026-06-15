@@ -33,11 +33,28 @@ mysql ... < sql/ddl/source_all_sync_staging.sql
 
 首次空库可用一步初始化：`sql/ddl/vt_token_cache_init_all.sql`（建表 + 灌明文）。
 
+## 写库模式（慢多半是用了 update_id）
+
+| 模式 | 说明 |
+|------|------|
+| **upsert**（默认） | 5 万行一条 `INSERT ... ON DUPLICATE KEY UPDATE`，快 |
+| update_id | 每 3000 行一条 `CASE id` UPDATE，**128 万行极慢** |
+| delete_insert | 已弃用 |
+
+`.env` 确认：
+
+```bash
+VT_PRELOAD_WRITE_MODE=upsert
+VT_PRELOAD_WRITE_WORKERS=4
+VT_PRELOAD_ASYNC_WRITE=1
+```
+
 ## 推荐配置（.env）
 
 ```bash
 VT_PRELOAD_MODE=fast
-VT_PRELOAD_WRITE_MODE=update_id
+VT_PRELOAD_WRITE_MODE=upsert   # upsert 快；无 INSERT 权限时用 update_id
+VT_PRELOAD_WRITE_WORKERS=4
 VT_PRELOAD_WORKERS=4
 VT_PRELOAD_HTTP_BATCH=50000
 ```

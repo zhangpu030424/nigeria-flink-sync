@@ -3,8 +3,8 @@
 VT 字典预加载：批量 /v2t 写入 vt_token_cache。
 
 默认 fast 模式（目标 20万/分钟）：
-  认领 status=0 → 4路×5万 并行 /v2t（HTTP长连接）→ 异步入库 UPSERT
-  需 init_all 预灌；勿用 stream 源表反查（极慢）
+  认领 status=0 → 4路×5万 并行 /v2t → 批量 INSERT ON DUPLICATE KEY UPDATE（upsert，默认）
+  update_id 模式每 3000 行一条 CASE UPDATE，大表极慢，勿用除非无 INSERT 权限
 
 mode=stream：源表 NOT EXISTS 反查（极慢，仅无预灌时用）
 mode=cache：旧认领 UPDATE 模式
@@ -165,14 +165,22 @@ ORDER BY id
 LIMIT {limit}
 """
 
-# 写库策略（均需先 SELECT id）:
-#   update_id=按主键批量 UPDATE（默认，仅需 UPDATE 权限，flink_cdc 可用）
-#   delete_insert=DELETE+INSERT（需 DELETE 权限）
-#   upsert=ON DUPLICATE KEY UPDATE（stream 无 id 时用）
+CACHE_PENDING_RAW_SQL = """
+SELECT raw_value FROM vt_token_cache
+WHERE vt_type = {vt_type} AND status = {status}
+  AND raw_value IS NOT NULL AND raw_value <> ''
+ORDER BY id
+LIMIT {limit}
+"""
+
+# 写库策略:
+#   upsert=批量 INSERT ON DUPLICATE KEY UPDATE（fast 默认，比 CASE UPDATE 快很多）
+#   update_id=按主键 CASE UPDATE（仅需 UPDATE 权限、无 INSERT 时用）
+#   delete_insert=DELETE+INSERT（需 DELETE，已弃用）
+WRITE_UPSERT = "upsert"
 WRITE_UPDATE_ID = "update_id"
 WRITE_DELETE_INSERT = "delete_insert"
-WRITE_UPSERT = "upsert"
-WRITE_MODES = (WRITE_UPDATE_ID, WRITE_DELETE_INSERT, WRITE_UPSERT)
+WRITE_MODES = (WRITE_UPSERT, WRITE_UPDATE_ID, WRITE_DELETE_INSERT)
 DB_ID_CHUNK = 3000
 DB_DELETE_CHUNK = 5000
 
@@ -267,7 +275,7 @@ def _mysql_run(host: str, port: str, user: str, password: str, database: str, sq
             )
             if "DELETE" in err:
                 hint += (
-                    "\n  delete_insert 模式还需 DELETE；或改用 VT_PRELOAD_WRITE_MODE=update_id（默认）"
+                    "\n  delete_insert 模式还需 DELETE；推荐 VT_PRELOAD_WRITE_MODE=upsert（默认）"
                 )
             err += "\n提示: vt-preload 权限不足。" + hint + "\n  见 sql/ddl/vt_token_cache_grants.sql"
         raise RuntimeError(err)
@@ -605,14 +613,23 @@ ON DUPLICATE KEY UPDATE
 def fetch_fast_batch(
     host: str, port: str, user: str, password: str, database: str,
     vt_type: str, limit: int, retry_failed: bool,
+    write_mode: str = WRITE_UPSERT,
 ) -> List[Tuple[int, str]]:
-    """只 SELECT id+raw_value（无认领 UPDATE），VT 后 DELETE+INSERT。"""
+    """fast 模式取待 VT 明文。upsert 只 SELECT raw_value；update_id 需 id。"""
     vt, lim = vt_type_db(vt_type), int(limit)
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
-    sql = CACHE_PENDING_ID_SQL.format(vt_type=vt, status=status, limit=lim)
-    log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ...")
+    if write_mode == WRITE_UPSERT:
+        sql = CACHE_PENDING_RAW_SQL.format(vt_type=vt, status=status, limit=lim)
+        log(f"[{vt_type}] fast: SELECT raw_value status={status} LIMIT {lim} (upsert)...")
+    else:
+        sql = CACHE_PENDING_ID_SQL.format(vt_type=vt, status=status, limit=lim)
+        log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ({write_mode})...")
     t0 = time.time()
-    rows = parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
+    if write_mode == WRITE_UPSERT:
+        raws = mysql_query(host, port, user, password, database, sql)
+        rows = [(0, r) for r in raws if r]
+    else:
+        rows = parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
     log(f"[{vt_type}] SELECT {time.time() - t0:.2f}s，{len(rows)} 条")
     return rows
 
@@ -901,10 +918,14 @@ def process_vt_type_fast(
         log(f"[{vt_type}] 或改用 --mode stream（慢）从源表反查")
         return 0
     progress = ProgressTracker(vt_type, initial)
+
+    def _fetch(h: str, p: str, u: str, pw: str, db: str, vt: str, lim: int, retry: bool) -> List[Tuple[int, str]]:
+        return fetch_fast_batch(h, p, u, pw, db, vt, lim, retry, write_mode=write_mode)
+
     return _run_vt_rounds(
         vt_type, "fast", host, port, user, password, database, base_url,
         round_batch, http_batch_size, workers, timeout_sec, max_retries,
-        max_rounds, retry_failed, dry_run, heartbeat_sec, progress, fetch_fast_batch,
+        max_rounds, retry_failed, dry_run, heartbeat_sec, progress, _fetch,
         write_workers, async_write, write_mode,
     )
 
@@ -1093,9 +1114,9 @@ def main() -> int:
     heartbeat_sec = int(os.environ.get("VT_PRELOAD_HEARTBEAT_SEC", str(DEFAULT_HEARTBEAT_SEC)))
     write_workers = int(os.environ.get("VT_PRELOAD_WRITE_WORKERS", "2"))
     async_write = os.environ.get("VT_PRELOAD_ASYNC_WRITE", "1").strip() not in ("0", "false", "no")
-    write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_UPDATE_ID)
+    write_mode = os.environ.get("VT_PRELOAD_WRITE_MODE", WRITE_UPSERT)
     if write_mode not in WRITE_MODES:
-        write_mode = WRITE_UPDATE_ID
+        write_mode = WRITE_UPSERT
     # delete_insert 先删后插，异步入库失败会导致数据丢失；强制同步写或改 update_id
     if write_mode == WRITE_DELETE_INSERT:
         log(
@@ -1134,12 +1155,12 @@ def main() -> int:
         f"每轮={round_batch} | http={http_batch} | url={base_url}"
     )
     if mode == "fast":
-        wlabel = {"update_id": "SELECT+UPDATE-by-id", "delete_insert": "SELECT+DELETE+INSERT"}.get(
-            write_mode, "UPSERT",
+        wlabel = {"upsert": "SELECT+UPSERT", "update_id": "SELECT+UPDATE-by-id", "delete_insert": "SELECT+DELETE+INSERT"}.get(
+            write_mode, write_mode,
         )
         log(
-            f"fast: SELECT status=0 → {workers}路VT×{http_batch} → 异步{wlabel} | "
-            f"目标 {TARGET_RATE_PER_MIN}/min"
+            f"fast: {wlabel} | {workers}路VT×{http_batch} | "
+            f"目标 {TARGET_RATE_PER_MIN}/min（慢请确认 write_mode=upsert）"
         )
     elif mode == "stream":
         log("stream慢路径: 源表 NOT EXISTS 反查，大表慎用")
