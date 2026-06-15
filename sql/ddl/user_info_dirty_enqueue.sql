@@ -20,7 +20,7 @@ END;;
 
 DROP PROCEDURE IF EXISTS sp_user_info_dirty_enqueue_bvn;;
 
-CREATE PROCEDURE sp_user_info_dirty_enqueue_bvn(IN p_bvn VARCHAR(64), IN p_debounce_sec INT)
+CREATE PROCEDURE sp_user_info_dirty_enqueue_bvn(IN p_bvn VARCHAR(128), IN p_debounce_sec INT)
 BEGIN
     IF p_bvn IS NOT NULL AND TRIM(p_bvn) <> '' THEN
         INSERT INTO user_info_dirty (user_id, updated_at)
@@ -28,7 +28,8 @@ BEGIN
         FROM user_personal_info p
         WHERE p.user_id IS NOT NULL
           AND p.bvn IS NOT NULL
-          AND TRIM(p.bvn) COLLATE utf8mb4_bin = TRIM(p_bvn) COLLATE utf8mb4_bin
+          AND CONVERT(TRIM(p.bvn) USING utf8mb4) COLLATE utf8mb4_bin
+              = CONVERT(TRIM(p_bvn) USING utf8mb4) COLLATE utf8mb4_bin
         ON DUPLICATE KEY UPDATE updated_at = IF(
                 user_info_dirty.updated_at <= DATE_SUB(NOW(3), INTERVAL p_debounce_sec SECOND),
                 CURRENT_TIMESTAMP(3),

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # 一键重建全部宽表
 #
-# 顺序（与 sql/ddl/vt_seed_all.sql 注释一致）:
-#   1. vt_token_cache 建表 + TRIGGER
-#   2. vt_seed_all.sql — INSERT IGNORE 灌明文（status=0）
+# 顺序:
+#   1. vt_token_cache 建表
+#   2. vt_seed_all.sql — INSERT IGNORE 灌明文（status=0，无 VT 脏队列 TRIGGER）
 #   3. vt-preload.sh — 批量 /v2t（status=0 → 1）
-#   4. source_all_sync_staging.sql — 重建宽表（JOIN token）
+#   4. vt_token_cache_vt_triggers.sql — 增量脏队列入队（seed/preload 后再建，避免百万行触发）
+#   5. source_all_sync_staging.sql — 重建宽表
 #
 # 用法:
 #   ./scripts/rebuild-all-staging.sh
@@ -49,21 +50,22 @@ if [[ "$SKIP_VT" -eq 0 ]]; then
   run_sql_file sql/ddl/vt_token_cache.sql
 
   echo ""
-  echo ">> [2/5] 重建 vt_token_cache TRIGGER（user_info 脏队列入队）"
-  run_sql_file sql/ddl/vt_token_cache_vt_triggers.sql
-
-  echo ""
-  echo ">> [3/5] 灌明文 vt_seed_all.sql（status=0）"
+  echo ">> [2/5] 灌明文 vt_seed_all.sql（status=0）"
   run_sql_file sql/ddl/vt_seed_all.sql
 
   echo ""
-  echo ">> [4/5] VT 批量 /v2t（vt-preload.sh --vt-type all）"
+  echo ">> [3/5] VT 批量 /v2t（vt-preload.sh --vt-type all）"
   ./scripts/vt-preload.sh --mode fast --vt-type all --skip-count \
     --workers "${VT_PRELOAD_WORKERS:-4}" \
     --http-batch-size "${VT_PRELOAD_HTTP_BATCH:-50000}"
+
+  echo ""
+  echo ">> [4/5] 部署 vt_token_cache 脏队列 TRIGGER（seed/preload 完成后再建）"
+  run_sql_file sql/ddl/vt_token_cache_vt_triggers.sql
 else
   echo ""
   echo ">> 跳过 VT seed/preload（--skip-vt）"
+  echo ">> 确保 vt_token_cache VT TRIGGER 已部署: sql/ddl/vt_token_cache_vt_triggers.sql"
 fi
 
 echo ""

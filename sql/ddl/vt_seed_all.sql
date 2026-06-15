@@ -7,6 +7,10 @@
 
 SET NAMES utf8mb4;
 
+-- 全量 seed 期间勿触发 vt_token_cache 脏队列入队（rebuild-all-staging 在 preload 后才建 TRIGGER）
+DROP TRIGGER IF EXISTS trg_user_info_dirty_vt_ai;
+DROP TRIGGER IF EXISTS trg_user_info_dirty_vt_au;
+
 -- ---------- 1 mobile（user.mobile）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 1,
