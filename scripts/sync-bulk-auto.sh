@@ -18,6 +18,7 @@
 #   ./scripts/sync-bulk-auto.sh --rebuild-vt-purge      # 分批删空再 DROP
 #   ./scripts/sync-bulk-auto.sh --rebuild-vt-cache      # 直接 DROP（小表）
 #   ./scripts/sync-bulk-auto.sh --keep-jobs             # 不 Cancel 存量 Job
+#   ./scripts/sync-bulk-auto.sh --bulk-submit-only-jobs id_mapping  # 只提交不监控（默认 id_mapping）
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,6 +31,7 @@ REBUILD_VT=0
 REBUILD_VT_MODE="drop"
 JOBS_FILTER=""
 KEEP_USER_INFO_DIRTY=0
+BULK_SUBMIT_ONLY_JOBS="${BULK_SUBMIT_ONLY_JOBS:-id_mapping}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,6 +47,11 @@ while [[ $# -gt 0 ]]; do
     --rebuild-vt-swap) REBUILD_VT=1; REBUILD_VT_MODE="swap" ;;
     --rebuild-vt-purge|--rebuild-vt-purge-drop) REBUILD_VT=1; REBUILD_VT_MODE="purge-drop" ;;
     --keep-jobs) CANCEL_JOBS=0 ;;
+    --bulk-submit-only-jobs=*) BULK_SUBMIT_ONLY_JOBS="${1#--bulk-submit-only-jobs=}" ;;
+    --bulk-submit-only-jobs)
+      shift
+      BULK_SUBMIT_ONLY_JOBS="${1:-id_mapping}"
+      ;;
     --keep-user-info-dirty) KEEP_USER_INFO_DIRTY=1 ;;
     --user-info-latest-offset|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
     --startup-mode=*|--startup-mode|--incr-startup-mode=*|--incr-startup-mode) ;;  # incr 参数
@@ -151,17 +158,22 @@ fi
 
 echo ""
 echo ">> [6] 顺序全量（--bulk-only，不切增量）"
+echo ">> 仅提交不监控: ${BULK_SUBMIT_ONLY_JOBS:-（无）}"
 first=1
 for job in "${SYNC_ENABLED_JOBS[@]}"; do
   echo ""
   echo "########################################"
   echo "# 全量 Job: ${job}"
   echo "########################################"
+  extra=()
+  if [[ -n "$BULK_SUBMIT_ONLY_JOBS" ]] && echo ",${BULK_SUBMIT_ONLY_JOBS}," | grep -q ",${job},"; then
+    extra+=(--bulk-submit-only)
+  fi
   if [[ "$first" -eq 1 ]]; then
-    ./scripts/sync-job-auto.sh "$job" --bulk-only --bulk-start-ms "$SHARED_MS"
+    ./scripts/sync-job-auto.sh "$job" --bulk-only --bulk-start-ms "$SHARED_MS" "${extra[@]}"
     first=0
   else
-    ./scripts/sync-job-auto.sh "$job" --bulk-only --bulk-start-ms "$SHARED_MS" --keep-other-jobs
+    ./scripts/sync-job-auto.sh "$job" --bulk-only --bulk-start-ms "$SHARED_MS" --keep-other-jobs "${extra[@]}"
   fi
 done
 

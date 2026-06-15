@@ -5,6 +5,7 @@
 #   ./scripts/sync-job-auto.sh user
 #   ./scripts/sync-job-auto.sh user --incr-only
 #   ./scripts/sync-job-auto.sh user --bulk-only    # 只全量，不切增量
+#   ./scripts/sync-job-auto.sh id_mapping --bulk-only --bulk-submit-only  # 提交后不监控
 #   ./scripts/sync-job-auto.sh user [--incr-only|--bulk-only] [--keep-other-jobs] [--bulk-start-ms MS]
 #   ./scripts/sync-job-auto.sh user --bulk-start-ms 1710000000000
 #
@@ -20,12 +21,14 @@ shift || true
 
 INCR_ONLY=0
 BULK_ONLY=0
+BULK_SUBMIT_ONLY=0
 KEEP_OTHER=0
 BULK_START_MS_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --incr-only) INCR_ONLY=1 ;;
     --bulk-only) BULK_ONLY=1 ;;
+    --bulk-submit-only) BULK_SUBMIT_ONLY=1; BULK_ONLY=1 ;;
     --keep-other-jobs) KEEP_OTHER=1 ;;
     --bulk-start-ms=*) BULK_START_MS_ARG="${1#--bulk-start-ms=}" ;;
     --bulk-start-ms)
@@ -544,11 +547,22 @@ log "全量并行度: FLINK_PARALLELISM=${FLINK_PARALLELISM}（job=${JOB_KEY} sl
 
 resolve_vt_two_phase
 if [[ -n "$VT_MISS_RUNNER" ]]; then
+  if [[ "$BULK_SUBMIT_ONLY" -eq 1 ]]; then
+    log "WARN: --bulk-submit-only 与 VT 两阶段全量不兼容，仍走完整监控"
+  fi
   run_vt_bulk_two_phase
 else
   submit_bulk
   BULK_JOB_ID=$(capture_new_job_id "$BEFORE_JOBS")
+  if [[ -z "$BULK_JOB_ID" ]]; then
+    BULK_JOB_ID=$(read_submitted_job_id)
+  fi
   log "全量 Job 已提交 id=${BULK_JOB_ID:-unknown}，监控 ${MONITOR_TABLE} 达标后 cancel..."
+  if [[ "$BULK_SUBMIT_ONLY" -eq 1 ]]; then
+    log "[$JOB_KEY] --bulk-submit-only：不等待监控，Job 在 Flink 后台继续（id=${BULK_JOB_ID:-n/a}）"
+    log "[$JOB_KEY] 进度: ./scripts/diagnose-job.sh ${BULK_JOB_ID:-}  或 Web UI"
+    exit 0
+  fi
   monitor_bulk_with_retry "bulk" "$SRC_CNT_SQL" "$BULK_JOB_ID"
 fi
 

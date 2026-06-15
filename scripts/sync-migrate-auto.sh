@@ -9,6 +9,7 @@
 #   ./scripts/sync-migrate-auto.sh
 #   ./scripts/sync-migrate-auto.sh --jobs user,user_info
 #   ./scripts/sync-migrate-auto.sh --skip-staging
+#   ./scripts/sync-migrate-auto.sh --bulk-submit-only-jobs id_mapping  # id_mapping 全量提交后不等待
 #   ./scripts/sync-migrate-auto.sh --incr-startup-mode latest-offset
 #   ./scripts/sync-migrate-auto.sh --truncate-user-info-dirty  # 增量前再清 dirty（默认不清）
 #   ./scripts/sync-migrate-auto.sh --keep-user-info-dirty      # 同默认，兼容旧参数
@@ -32,6 +33,13 @@ while [[ $# -gt 0 ]]; do
     --keep-user-info-dirty) ;;  # 默认已保留 dirty
     --truncate-user-info-dirty) INCR_ARGS+=("$1") ;;
     --verify) INCR_ARGS+=("$1") ;;
+    --bulk-submit-only-jobs=*)
+      BULK_ARGS+=("$1")
+      ;;
+    --bulk-submit-only-jobs)
+      shift
+      BULK_ARGS+=(--bulk-submit-only-jobs="${1:-id_mapping}")
+      ;;
     --keep-jobs) BULK_ARGS+=("$1"); INCR_ARGS+=("$1") ;;
     *)
       BULK_ARGS+=("$1")
