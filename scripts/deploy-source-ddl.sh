@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 源库 DDL 一键部署（adjust 视图 + 增量 Lookup 视图；无需 DMS / GRANT）
+# 源库 DDL 一键部署（adjust + Lookup 视图 + user_info 脏队列）
+# 默认用 SOURCE_MYSQL_USER（flink_cdc）；仅权限不足时可用 SOURCE_MYSQL_ROOT_* 兜底
 # 用法: ./scripts/deploy-source-ddl.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,49 +17,21 @@ SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
 
 # shellcheck source=scripts/lib/mysql-source.sh
 source scripts/lib/mysql-source.sh
+# shellcheck source=scripts/lib/user-info-dirty-deploy.sh
+source scripts/lib/user-info-dirty-deploy.sh
 
 echo ">> deploy-source-ddl: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}"
 
-DDL_FILES=(
+VIEW_DDL_FILES=(
   sql/ddl/source_views_adjust.sql
   sql/ddl/source_lookup_views.sql
-  sql/ddl/user_info_dirty_enqueue.sql
-  sql/ddl/user_info_dirty.sql
 )
 
-for f in "${DDL_FILES[@]}"; do
+for f in "${VIEW_DDL_FILES[@]}"; do
   mysql_source_file "$f"
 done
 
-echo ""
-echo ">> 校验 debounce 存储过程（须 CREATE ROUTINE；无权限时请 root 执行 enqueue + dirty SQL）"
-REQUIRED_PROCS=(
-  sp_user_info_dirty_enqueue
-  sp_user_info_dirty_enqueue_bvn
-  sp_user_info_dirty_enqueue_adid
-  sp_user_info_dirty_enqueue_emergency_mobile
-)
-failed=0
-for p in "${REQUIRED_PROCS[@]}"; do
-  proc_cnt=$(mysql_source_query \
-    "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema='${SOURCE_MYSQL_DATABASE}' AND routine_name='${p}' AND routine_type='PROCEDURE';" \
-    2>/dev/null || echo "0")
-  proc_cnt=$(echo "$proc_cnt" | tr -d '[:space:]')
-  if [[ "${proc_cnt:-0}" -ge 1 ]]; then
-    echo "  ✓ ${p}"
-  else
-    echo "  ✗ ${p} 缺失"
-    failed=1
-  fi
-done
-if [[ "$failed" -ne 0 ]]; then
-  echo ""
-  echo "ERR: 存储过程未创建。${SOURCE_MYSQL_USER} 可能无 CREATE ROUTINE 权限。"
-  echo "  请 DBA 用 root 执行:"
-  echo "    mysql ... ${SOURCE_MYSQL_DATABASE} < sql/ddl/user_info_dirty_enqueue.sql"
-  echo "    mysql ... ${SOURCE_MYSQL_DATABASE} < sql/ddl/user_info_dirty.sql"
-  exit 1
-fi
+ensure_user_info_dirty_deploy
 
 echo ""
 echo ">> 校验关键对象"
@@ -106,22 +79,11 @@ if [[ "$failed" -ne 0 ]]; then
 fi
 
 echo ""
-echo ">> 校验 user_info_dirty（增量脏队列）"
+echo ">> 校验 user_info_dirty 表"
 if table_exists user_info_dirty; then
   echo "  ✓ user_info_dirty 表"
 else
   echo "  ✗ user_info_dirty 表缺失"
-  failed=1
-fi
-trg_cnt=$(mysql_source_query \
-  "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${SOURCE_MYSQL_DATABASE}' AND trigger_name LIKE 'trg_user_info_dirty_%';" \
-  2>/dev/null || echo "0")
-trg_cnt=$(echo "$trg_cnt" | tr -d '[:space:]')
-if [[ "${trg_cnt:-0}" -ge 14 ]]; then
-  echo "  ✓ user_info_dirty TRIGGER 数量=${trg_cnt}"
-else
-  echo "  ✗ user_info_dirty TRIGGER 不足（当前 ${trg_cnt:-0}，期望≥14）"
-  echo "    请用具备 TRIGGER 权限的账号执行: mysql ... < sql/ddl/user_info_dirty.sql"
   failed=1
 fi
 
