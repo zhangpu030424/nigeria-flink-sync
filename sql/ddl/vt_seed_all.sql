@@ -1,13 +1,13 @@
 -- 从源表灌 vt_token_cache 明文（INSERT IGNORE，status=0 待 /v2t）
 -- 类型: 1=mobile  2=gaid  3=bank_account  4=id_number(BVN)  5=emergency_contact(紧急联系人手机)
--- 源表多为 utf8mb3，raw_value 为 utf8mb4_bin，SELECT 须显式 CAST 避免 1253
+-- 源表多为 utf8mb3，raw_value 列为 utf8mb4：INSERT 用 CONVERT(… USING utf8mb4)，勿加 COLLATE utf8mb4_bin（1253）
 -- 下一步: ./scripts/vt-preload.sh --vt-type all  →  source_all_sync_staging.sql
 -- mysql -h <host> -u ... -p nigeria_backend < sql/ddl/vt_seed_all.sql
 
 -- ---------- 1 mobile（user.mobile）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 1,
-       CAST(norm.mobile_norm AS CHAR(128) CHARACTER SET utf8mb4) COLLATE utf8mb4_bin,
+       CONVERT(norm.mobile_norm USING utf8mb4),
        0
 FROM (
     SELECT DISTINCT
@@ -25,7 +25,7 @@ WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
 -- ---------- 2 gaid_idfa ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 2,
-       CAST(v.val AS CHAR(128) CHARACTER SET utf8mb4) COLLATE utf8mb4_bin,
+       CONVERT(v.val USING utf8mb4),
        0
 FROM (
     SELECT DISTINCT TRIM(u.gps_adid) AS val FROM `user` u
@@ -44,7 +44,7 @@ FROM (
 -- ---------- 3 bank_account ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 3,
-       CAST(TRIM(b.bank_account) AS CHAR(128) CHARACTER SET utf8mb4) COLLATE utf8mb4_bin,
+       CONVERT(TRIM(b.bank_account) USING utf8mb4),
        0
 FROM user_bank_info b
 WHERE b.deleted = 0
@@ -54,7 +54,7 @@ WHERE b.deleted = 0
 -- ---------- 4 id_number (BVN) ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 4,
-       CAST(TRIM(p.bvn) AS CHAR(128) CHARACTER SET utf8mb4) COLLATE utf8mb4_bin,
+       CONVERT(TRIM(p.bvn) USING utf8mb4),
        0
 FROM user_personal_info p
 WHERE p.bvn IS NOT NULL
@@ -63,7 +63,7 @@ WHERE p.bvn IS NOT NULL
 -- ---------- 5 emergency_contact（user_emergency_contact.contact_number，+234 规范化）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
 SELECT 5,
-       CAST(norm.mobile_norm AS CHAR(128) CHARACTER SET utf8mb4) COLLATE utf8mb4_bin,
+       CONVERT(norm.mobile_norm USING utf8mb4),
        0
 FROM (
     SELECT DISTINCT
