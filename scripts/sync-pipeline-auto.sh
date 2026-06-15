@@ -63,24 +63,10 @@ echo "  bulk并行=${BULK_PAR}  incr并行=${INCR_PAR}  slots=${SLOTS}"
 echo "  增量模式: CDC initial（先快照补全量漏写，再追 binlog）"
 echo "=========================================="
 
-ENABLED_JOBS=()
-while IFS= read -r row || [[ -n "$row" ]]; do
-  row="${row%%#*}"
-  row="$(echo "$row" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -z "$row" ]] && continue
-  key="${row%%|*}"
-  enabled="${row##*|}"
-  [[ "$enabled" != "1" ]] && continue
-  if [[ -n "$JOBS_FILTER" ]]; then
-    echo ",${JOBS_FILTER}," | grep -q ",${key}," || continue
-  fi
-  ENABLED_JOBS+=("$key")
-done < config/sync-jobs.conf
-
-if [[ ${#ENABLED_JOBS[@]} -eq 0 ]]; then
-  echo "无 ENABLED=1 的 Job"
-  exit 1
-fi
+# shellcheck source=scripts/lib/sync-jobs.sh
+source scripts/lib/sync-jobs.sh
+sync_jobs_load "$JOBS_FILTER"
+ENABLED_JOBS=("${SYNC_ENABLED_JOBS[@]}")
 
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   echo ">> --incr-only：跳过宽表/全量，提交增量 Job: ${ENABLED_JOBS[*]}"

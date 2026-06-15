@@ -2,12 +2,37 @@
 
 基于 `docs/中台数据迁移 — 源库 → 目标库字段映射 (3).md`。
 
+## 脚本总览
+
+| 脚本 | 用途 |
+|------|------|
+| **`sync-bulk-auto.sh`** | **全量迁移**：DDL → 锁定 bulk-start-ms → VT+宽表 → 各表全量（不切增量） |
+| **`sync-incr-auto.sh`** | **增量迁移**：读 bulk-start-ms → DDL → 提交各表增量 Job |
+| **`sync-migrate-auto.sh`** | **完整迁移**：先 `sync-bulk-auto` 再 `sync-incr-auto`（**推荐**） |
+| `sync-pipeline-auto.sh` | 兼容：每表「全量→增量」串行（旧行为） |
+| `full-rerun.sh` | 从零重跑：Cancel → 重建 VT → 清 dirty → bulk → incr |
+
 ## 一键执行（推荐）
 
 ```bash
-./scripts/sync-pipeline-auto.sh
-# 或同义入口
-./scripts/sync-all-auto.sh
+# 两阶段：先全部全量，再全部增量（便于中间对账）
+./scripts/sync-migrate-auto.sh
+```
+
+### 分步执行
+
+```bash
+# 1. 全量（会写入 logs/bulk-start-ms.env，增量必用）
+./scripts/sync-bulk-auto.sh
+
+# 2. 可选：全量后对账
+bash scripts/verify-user-info-reconcile.sh --sample 500
+
+# 3. 增量（默认 timestamp，正确性优先）
+./scripts/sync-incr-auto.sh
+
+# 全量已覆盖缺口、要提速 user_info 时：
+./scripts/sync-incr-auto.sh --user-info-latest-offset --truncate-user-info-dirty
 ```
 
 ### 从零重跑（全量 + 增量全部重来）
@@ -20,7 +45,7 @@ chmod +x scripts/full-rerun.sh
 ./scripts/full-rerun.sh
 ```
 
-脚本会自动：**Cancel Job → DROP 重建 vt_token_cache(TINYINT) → TRUNCATE dirty → sync-pipeline-auto.sh**
+脚本会自动：**Cancel Job → DROP 重建 vt_token_cache(TINYINT) → TRUNCATE dirty → sync-bulk-auto → sync-incr-auto**
 
 TRIGGER 须 root 时，流水线前执行：
 
@@ -36,13 +61,16 @@ docker exec nigeria-flink-jobmanager ./bin/flink list -r   # 应有 6 个 RUNNIN
 bash scripts/verify-user-info-incr.sh 211038
 ```
 
-**全自动顺序（勿拆开手动执行）：**
+**全自动顺序（`sync-bulk-auto` + `sync-incr-auto`）：**
 
-| 步骤 | 动作 |
-|------|------|
-| 0 | **锁定** `bulk-start-ms` → `logs/bulk-start-ms.env`（增量 CDC 从此刻起补 binlog） |
-| 1 | 重建 6 张宽表 `source_all_sync_staging.sql` |
-| 2 | 按 `config/sync-jobs.conf` 顺序全量 → 切增量 |
+| 阶段 | 步骤 | 动作 |
+|------|------|------|
+| 全量 | 0 | **锁定** `bulk-start-ms` → `logs/bulk-start-ms.env` |
+| 全量 | 1 | VT 补灌 + 重建 6 张宽表 |
+| 全量 | 2 | 按 `config/sync-jobs.conf` 顺序跑各表全量（`--bulk-only`） |
+| 增量 | 3 | 按同顺序提交各表增量 Job（默认 `timestamp`） |
+
+**兼容模式**（`sync-pipeline-auto.sh`）：每表全量完成后立刻切增量，再跑下一表。
 
 宽表重建可能耗时很久；期间源库 binlog **不会丢**，因增量 Job 使用步骤 0 的时间戳（`scan.startup.mode=timestamp`），而非「切增量那一刻」。
 
@@ -53,19 +81,22 @@ VT 表全量两阶段：先有 token → 无 token 运行时 `/v2t` → 增量 L
 仅宽表已建好、且 **沿用同一次** `bulk-start-ms`：
 
 ```bash
-./scripts/sync-pipeline-auto.sh --skip-staging
+./scripts/sync-bulk-auto.sh --skip-staging
+./scripts/sync-incr-auto.sh
 ```
 
-全量已完成、只补提交增量：
+全量已完成、只提交增量：
 
 ```bash
+./scripts/sync-incr-auto.sh
+# 或兼容入口
 ./scripts/sync-pipeline-auto.sh --incr-only
 ```
 
 只跑部分表：
 
 ```bash
-./scripts/sync-pipeline-auto.sh --skip-staging --jobs=user,user_bankcard
+./scripts/sync-migrate-auto.sh --jobs=user,user_bankcard
 ```
 
 ## 单独重建宽表

@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
-# 从零重跑：Cancel Job → DROP 重建 vt_token_cache(TINYINT) → 清 dirty → 一键流水线
+# 从零重跑：Cancel Job → 重建 vt_token_cache(TINYINT) → 清 dirty → 全量 → 增量
 #
 # 用法:
 #   ./scripts/full-rerun.sh
-#   ./scripts/full-rerun.sh --skip-vt-rebuild    # 表已是 TINYINT 且不想清空 VT 缓存
+#   ./scripts/full-rerun.sh --rebuild-vt-swap        # 大表推荐：RENAME 换表（默认）
+#   ./scripts/full-rerun.sh --rebuild-vt-purge       # 分批删空再 DROP
+#   ./scripts/full-rerun.sh --rebuild-vt-drop        # 直接 DROP（小表）
+#   ./scripts/full-rerun.sh --skip-vt-rebuild
 #   ./scripts/full-rerun.sh --jobs user,user_info
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SKIP_VT_REBUILD=0
+REBUILD_VT_MODE="swap"
 PIPELINE_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --skip-vt-rebuild|--skip-vt-emergency-enum) SKIP_VT_REBUILD=1 ;;
+    --rebuild-vt-swap) REBUILD_VT_MODE="swap" ;;
+    --rebuild-vt-purge|--rebuild-vt-purge-drop) REBUILD_VT_MODE="purge-drop" ;;
+    --rebuild-vt-drop) REBUILD_VT_MODE="drop" ;;
     *) PIPELINE_ARGS+=("$arg") ;;
   esac
 done
@@ -56,8 +63,12 @@ else
 fi
 
 echo ""
-echo ">> [4/4] sync-pipeline-auto.sh（DDL → bulk-start-ms → VT+宽表 → 全量→增量）"
+echo ">> [4/5] sync-bulk-auto.sh（DDL → bulk-start-ms → VT+宽表 → 全量）"
 echo "    日志: logs/sync-<job>-auto.log"
 echo ""
 
-exec ./scripts/sync-pipeline-auto.sh "${PIPELINE_ARGS[@]}"
+./scripts/sync-bulk-auto.sh "${PIPELINE_ARGS[@]}"
+
+echo ""
+echo ">> [5/5] sync-incr-auto.sh（timestamp 增量，正确性优先）"
+./scripts/sync-incr-auto.sh "${PIPELINE_ARGS[@]}"

@@ -1,7 +1,13 @@
 -- 删表重建 vt_token_cache（TINYINT vt_type）
+-- ⚠️ 大表 DROP 可能长时间无响应或锁等待失败，请改用:
+--   方案 A（推荐）: sql/ddl/vt_token_cache_rebuild_swap.sql  （RENAME 秒级换表）
+--   方案 B: ./scripts/vt-token-cache-purge.sh --drop-after  （分批删空再 DROP）
+--
 -- ⚠️ 清空全部 VT token 缓存；须 root/DBA 执行，之后必须:
 --   ./scripts/rebuild-all-staging.sh   或  vt_seed_all + vt-preload + source_all_sync_staging
 --   再跑全量 Flink Job
+--
+-- 执行前请先 Cancel Flink Job + 停止 vt-preload
 --
 -- mysql -h <host> -u root -p nigeria_backend < sql/ddl/vt_token_cache_rebuild.sql
 
