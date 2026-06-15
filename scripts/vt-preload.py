@@ -4,7 +4,7 @@ VT 字典预加载：批量 /v2t 写入 vt_token_cache。
 
 默认 fast 模式（目标 20万/分钟）：
   认领 status=0 → 4路×5万 并行 /v2t → 批量 INSERT ON DUPLICATE KEY UPDATE（upsert，默认）
-  update_id 模式每 3000 行一条 CASE UPDATE，大表极慢，勿用除非无 INSERT 权限
+  update_id 模式用临时表 JOIN UPDATE；旧版巨型 CASE 已废弃
 
 mode=stream：源表 NOT EXISTS 反查（极慢，仅无预灌时用）
 mode=cache：旧认领 UPDATE 模式
@@ -187,7 +187,7 @@ LIMIT {limit}
 
 # 写库策略:
 #   upsert=批量 INSERT ON DUPLICATE KEY UPDATE（fast 默认，比 CASE UPDATE 快很多）
-#   update_id=按主键 CASE UPDATE（仅需 UPDATE 权限、无 INSERT 时用）
+#   update_id=临时表 JOIN UPDATE by id（fast 默认路径，比 CASE 稳）
 #   delete_insert=DELETE 旧行 + INSERT 新行（需 DELETE；须 VT_PRELOAD_ASYNC_WRITE=0）
 WRITE_UPSERT = "upsert"
 WRITE_UPDATE_ID = "update_id"
@@ -195,6 +195,7 @@ WRITE_DELETE_INSERT = "delete_insert"
 WRITE_MODES = (WRITE_UPSERT, WRITE_UPDATE_ID, WRITE_DELETE_INSERT)
 DB_ID_CHUNK = 3000
 DB_DELETE_CHUNK = 5000
+DB_INSERT_CHUNK = 5000
 
 
 def log(msg: str, *, err: bool = False) -> None:
@@ -535,39 +536,54 @@ def parse_id_raw_rows(rows: List[str]) -> Tuple[List[Tuple[int, str]], int]:
     return out, dropped
 
 
-def update_success_by_id(
+def _mask_lit(mask: Optional[str]) -> str:
+    if mask is None:
+        return "NULL"
+    return f"'{escape_sql(mask[:RAW_VALUE_MAX_LEN])}'"
+
+
+def batch_update_tokens_by_id(
     host: str, port: str, user: str, password: str, database: str,
-    vt_type: str, rows: List[Tuple[int, str, str, Optional[str]]],
+    rows: List[Tuple[int, str, Optional[str]]], *, log_prefix: str = "",
 ) -> None:
-    """按主键 id 批量 UPDATE token（无需 DELETE，flink_cdc 仅需 UPDATE）。"""
+    """临时表 JOIN UPDATE（比巨型 CASE id 稳，支持 5 万/批）。"""
     if not rows:
         return
     for i in range(0, len(rows), DB_UPSERT_CHUNK):
         chunk = rows[i:i + DB_UPSERT_CHUNK]
-        for j in range(0, len(chunk), DB_ID_CHUNK):
-            sub = chunk[j:j + DB_ID_CHUNK]
-            token_cases = " ".join(
-                f"WHEN {rid} THEN '{escape_sql(tok)}'" for rid, _raw, tok, _mask in sub
+        stmts = [
+            "DROP TEMPORARY TABLE IF EXISTS _vt_preload_batch;",
+            """CREATE TEMPORARY TABLE _vt_preload_batch (
+                id BIGINT PRIMARY KEY, token VARCHAR(128) NOT NULL, masking VARCHAR(128) NULL
+            ) ENGINE=MEMORY;""",
+        ]
+        for j in range(0, len(chunk), DB_INSERT_CHUNK):
+            sub = chunk[j:j + DB_INSERT_CHUNK]
+            vals = ",\n".join(
+                f"({rid},'{escape_sql(tok)}',{_mask_lit(mask)})" for rid, tok, mask in sub
             )
-            mask_parts = []
-            for rid, _raw, _tok, mask in sub:
-                if mask is None:
-                    mask_parts.append(f"WHEN {rid} THEN NULL")
-                else:
-                    mask_parts.append(f"WHEN {rid} THEN '{escape_sql(mask)}'")
-            mask_cases = " ".join(mask_parts)
-            id_list = ",".join(str(rid) for rid, *_ in sub)
-            sql = f"""
-UPDATE vt_token_cache SET
-  status = {STATUS_OK},
-  last_error = NULL,
-  retry_count = 0,
-  token = CASE id {token_cases} END,
-  masking = CASE id {mask_cases} END
-WHERE id IN ({id_list});
-"""
-            with _db_write_lock:
-                mysql_exec(host, port, user, password, database, sql)
+            stmts.append(f"INSERT INTO _vt_preload_batch (id, token, masking) VALUES\n{vals};")
+        stmts.append(f"""
+UPDATE vt_token_cache v INNER JOIN _vt_preload_batch t ON v.id=t.id
+SET v.status={STATUS_OK}, v.token=t.token, v.masking=t.masking,
+    v.last_error=NULL, v.retry_count=0;
+DROP TEMPORARY TABLE IF EXISTS _vt_preload_batch;
+""")
+        with _db_write_lock:
+            mysql_exec(host, port, user, password, database, "\n".join(stmts))
+    if log_prefix:
+        log(f"{log_prefix} | JOIN UPDATE {len(rows)} 条")
+
+
+def update_success_by_id(
+    host: str, port: str, user: str, password: str, database: str,
+    vt_type: str, rows: List[Tuple[int, str, str, Optional[str]]],
+) -> None:
+    """按主键 id 批量 UPDATE token（临时表 JOIN，勿用巨型 CASE）。"""
+    batch_update_tokens_by_id(
+        host, port, user, password, database,
+        [(rid, tok, mask) for rid, _raw, tok, mask in rows],
+    )
 
 
 def delete_insert_success(
@@ -1118,26 +1134,9 @@ def mark_success_cache(
     host: str, port: str, user: str, password: str, database: str,
     updates: List[Tuple[int, str, Optional[str]]], log_prefix: str = "",
 ) -> None:
-    if not updates:
-        return
-    stmts = [
-        "DROP TEMPORARY TABLE IF EXISTS _vt_preload_batch;",
-        """CREATE TEMPORARY TABLE _vt_preload_batch (
-            id BIGINT PRIMARY KEY, token VARCHAR(128) NOT NULL, masking VARCHAR(128) NULL
-        ) ENGINE=MEMORY;""",
-    ]
-    for i in range(0, len(updates), DB_INSERT_CHUNK):
-        chunk = updates[i:i + DB_INSERT_CHUNK]
-        vals = ",\n".join(f"({rid},'{escape_sql(tok)}',{_sql_lit(mask)})" for rid, tok, mask in chunk)
-        stmts.append(f"INSERT INTO _vt_preload_batch (id, token, masking) VALUES\n{vals};")
-    stmts.append(f"""
-UPDATE vt_token_cache v INNER JOIN _vt_preload_batch t ON v.id=t.id
-SET v.status={STATUS_OK}, v.token=t.token, v.masking=t.masking, v.last_error=NULL;
-DROP TEMPORARY TABLE IF EXISTS _vt_preload_batch;
-""")
-    if log_prefix:
-        log(f"{log_prefix} | cache JOIN UPDATE {len(updates)} 条")
-    mysql_exec(host, port, user, password, database, "\n".join(stmts))
+    batch_update_tokens_by_id(
+        host, port, user, password, database, updates, log_prefix=log_prefix,
+    )
 
 
 def process_cache_chunk(
