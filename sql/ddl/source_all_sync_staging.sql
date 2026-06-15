@@ -233,7 +233,17 @@ FROM `user` u
                                              THEN CAST(NULL AS JSON)
                                          WHEN vt.token IS NOT NULL AND TRIM(vt.token) <> ''
                                              THEN vt.token
-                                         ELSE CAST(NULL AS JSON)
+                                         ELSE (
+                                             CASE
+                                                 WHEN TRIM(ec.contact_number) LIKE '+%'
+                                                     THEN TRIM(ec.contact_number)
+                                                 WHEN TRIM(ec.contact_number) LIKE '234%'
+                                                     THEN CONCAT('+', TRIM(ec.contact_number))
+                                                 WHEN TRIM(ec.contact_number) LIKE '0%'
+                                                     THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+                                                 ELSE CONCAT('+234', TRIM(ec.contact_number))
+                                             END
+                                         )
                                    END,
                            'relation', ec.contact_relationship
                    )

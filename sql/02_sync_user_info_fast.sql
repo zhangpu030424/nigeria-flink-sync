@@ -1,5 +1,6 @@
--- 全量阶段 1 user_info：宽表已有 id_number_token；无 token 见 02_sync_user_info_fast_vt_miss.sql
--- 原始 bvn 为空 → id_number 写 ''（目标列 NOT NULL）；有 bvn 无 token → 阶段 2 补
+-- 全量阶段 1 user_info：宽表 id_number_token + info_json；紧急联系人 mobile 无 token 时 UDF 调 VT
+CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.udf.VtTokenizeEmergencyContactsFunction';
+
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
@@ -55,7 +56,7 @@ SELECT
     CAST('' AS STRING),
     CAST('' AS STRING),
     CAST('' AS STRING),
-    COALESCE(CAST(info_json AS STRING), '{}')
+    COALESCE(vt_tokenize_emergency_contacts(COALESCE(CAST(info_json AS STRING), '{}')), '{}')
 FROM src_user_info_staging
 WHERE (bvn_raw IS NULL OR TRIM(bvn_raw) = '')
    OR (id_number_token IS NOT NULL AND TRIM(id_number_token) <> '');

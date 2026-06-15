@@ -233,7 +233,17 @@ SELECT CAST(ec.user_id AS SIGNED) AS user_id,
                                                          THEN CAST(NULL AS JSON)
                                                      WHEN vt.token IS NOT NULL AND TRIM(vt.token) <> ''
                                                          THEN vt.token
-                                                     ELSE CAST(NULL AS JSON)
+                                                     ELSE (
+                                                         CASE
+                                                             WHEN TRIM(ec.contact_number) LIKE '+%'
+                                                                 THEN TRIM(ec.contact_number)
+                                                             WHEN TRIM(ec.contact_number) LIKE '234%'
+                                                                 THEN CONCAT('+', TRIM(ec.contact_number))
+                                                             WHEN TRIM(ec.contact_number) LIKE '0%'
+                                                                 THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+                                                             ELSE CONCAT('+234', TRIM(ec.contact_number))
+                                                         END
+                                                     )
                                            END,
                                        'relation', ec.contact_relationship
                                )
@@ -312,7 +322,7 @@ SELECT CAST(u.id AS SIGNED) AS user_id,
 FROM `user` u
          LEFT JOIN user_personal_latest_lookup p ON p.user_id = u.id
          LEFT JOIN vt_token_cache_lookup vt
-                   ON vt.vt_type = 4
+                   ON vt.vt_type = 'id_number'
                        AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
          LEFT JOIN user_work_latest_lookup wr ON wr.user_id = u.id

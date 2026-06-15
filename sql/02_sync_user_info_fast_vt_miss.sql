@@ -1,5 +1,6 @@
--- 全量阶段 2：user_info 宽表无 id_number_token，运行时 UDF 调 VT /v2t（bvn_raw）
+-- 全量阶段 2：user_info 宽表无 id_number_token，运行时 UDF 调 VT /v2t（bvn_raw）；紧急联系人同理
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.udf.VtTokenizeEmergencyContactsFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
@@ -59,7 +60,7 @@ FROM (
         s.user_id + 100000000 AS user_id,
         COALESCE(vt_tokenize(s.bvn_raw), '') AS id_number,
         COALESCE(s.full_name, '') AS full_name,
-        COALESCE(CAST(s.info_json AS STRING), '{}') AS info_json
+        COALESCE(vt_tokenize_emergency_contacts(COALESCE(CAST(s.info_json AS STRING), '{}')), '{}') AS info_json
     FROM src_user_info_staging_miss s
     WHERE (s.id_number_token IS NULL OR TRIM(s.id_number_token) = '')
       AND s.bvn_raw IS NOT NULL

@@ -2,6 +2,7 @@
 -- 前置: ./scripts/deploy-source-ddl.sh（含 TRIGGER debounce 存储过程）
 -- 并行: FLINK_PARALLELISM_INCR（建议 4）；积压: TRUNCATE dirty + latest-offset
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.udf.VtTokenizeEmergencyContactsFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -166,7 +167,9 @@ FROM (
                 KEY 'app_id' VALUE CAST(b.app_code AS BIGINT)
                 NULL ON NULL
             ),
-            KEY 'emergency_contacts' VALUE COALESCE(b.emergency_contacts, '[]'),
+            KEY 'emergency_contacts' VALUE CAST(
+                COALESCE(vt_tokenize_emergency_contacts(b.emergency_contacts), '[]') AS JSON
+            ),
             KEY 'salary_day' VALUE CAST(NULL AS STRING),
             KEY 'address' VALUE JSON_OBJECT(
                 KEY 'province' VALUE CAST(b.living_address_state AS STRING),
