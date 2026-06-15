@@ -170,19 +170,55 @@ mysql_source_ddl_views_file() {
   [[ -f "$f" ]] || { echo "ERR: SQL 文件不存在: $f" >&2; return 1; }
 
   local total=0 ok=0 fail=0
-  local stmt view_name t0 elapsed
+  local view_name t0 elapsed sqlf tmpdir
+  local -a files=()
 
   echo ">> 源库视图 DDL: $f （逐视图部署；lock_wait=${SOURCE_DDL_LOCK_WAIT_TIMEOUT}s）"
   _mysql_source_ddl_preamble
 
-  while IFS= read -r stmt; do
-    [[ -z "$stmt" ]] && continue
-    view_name=$(echo "$stmt" | sed -n "s/^CREATE OR REPLACE VIEW \`\?\([a-zA-Z0-9_]*\)\`\?.*/\1/p" | head -1)
-    [[ -z "$view_name" ]] && view_name="(unknown)"
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/nigeria-ddl-views.XXXXXX")
+
+  awk -v dir="$tmpdir" '
+    BEGIN { n=0; buf="" }
+    /^CREATE OR REPLACE VIEW/ {
+      if (buf != "") {
+        n++
+        f=sprintf("%s/%03d.sql", dir, n)
+        print buf > f
+        close(f)
+        buf=""
+      }
+      buf=$0
+      next
+    }
+    { if (buf != "") buf=buf "\n" $0 }
+    END {
+      if (buf != "") {
+        n++
+        f=sprintf("%s/%03d.sql", dir, n)
+        print buf > f
+        close(f)
+      }
+    }
+  ' "$f"
+
+  shopt -s nullglob
+  files=("$tmpdir"/*.sql)
+  shopt -u nullglob
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    rm -rf "$tmpdir"
+    echo "ERR: 未从 $f 解析出任何 CREATE VIEW 语句"
+    return 1
+  fi
+
+  for sqlf in "${files[@]}"; do
+    view_name=$(sed -n "s/^CREATE OR REPLACE VIEW \`\?\([a-zA-Z0-9_]*\)\`\?.*/\1/p" "$sqlf" | head -1)
+    [[ -z "$view_name" ]] && view_name="$(basename "$sqlf")"
     total=$((total + 1))
     t0=$SECONDS
     printf "  [%02d] %s ... " "$total" "$view_name"
-    if printf '%s\n' "$stmt" | mysql_source_cmd 2>/tmp/nigeria-ddl-err-$$.log; then
+    if mysql_source_cmd < "$sqlf" 2>/tmp/nigeria-ddl-err-$$.log; then
       elapsed=$((SECONDS - t0))
       echo "OK (${elapsed}s)"
       ok=$((ok + 1))
@@ -192,23 +228,16 @@ mysql_source_ddl_views_file() {
       sed 's/^/      /' /tmp/nigeria-ddl-err-$$.log 2>/dev/null || true
       fail=$((fail + 1))
       rm -f /tmp/nigeria-ddl-err-$$.log
+      rm -rf "$tmpdir"
       echo "ERR: 视图 ${view_name} 部署失败"
       echo "  常见原因: Flink 增量 Job 正在 JDBC Lookup（flink_cdc 占 SHARED_READ）"
       echo "  处理: cancel-flink-jobs → deploy-source-ddl.sh --force-views"
       echo "  排查: ./scripts/deploy-source-ddl.sh --list-blockers"
       return 1
     fi
-  done < <(awk '
-    BEGIN { buf="" }
-    /^CREATE OR REPLACE VIEW/ {
-      if (buf != "") print buf;
-      buf=$0;
-      next
-    }
-    { if (buf != "") buf=buf "\n" $0 }
-    END { if (buf != "") print buf }
-  ' "$f")
+  done
 
+  rm -rf "$tmpdir"
   rm -f /tmp/nigeria-ddl-err-$$.log
   echo ">> 完成: $f （${ok}/${total} 视图 OK）"
   [[ "$fail" -eq 0 ]]
