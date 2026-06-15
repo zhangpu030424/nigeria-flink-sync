@@ -210,8 +210,8 @@ start_incr() {
 
   export FLINK_PARALLELISM="${incr_parallel}"
   log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}（job=${JOB_KEY}）"
-  if [[ "$JOB_KEY" == "user_info" && "${SKIP_TRUNCATE_USER_INFO_DIRTY:-0}" != "1" ]]; then
-    log "清空 user_info_dirty（增量启动，全量已覆盖历史）"
+  if [[ "$JOB_KEY" == "user_info" && "${TRUNCATE_USER_INFO_DIRTY:-0}" == "1" ]]; then
+    log "清空 user_info_dirty（--truncate-user-info-dirty）"
     # shellcheck source=scripts/lib/user-info-dirty.sh
     source "$(dirname "$0")/lib/user-info-dirty.sh"
     truncate_user_info_dirty >> "$LOG_FILE" 2>&1

@@ -28,12 +28,11 @@
 # 2. 可选：全量后对账
 bash scripts/verify-user-info-reconcile.sh --sample 500
 
-# 3. 增量（默认 timestamp，正确性优先）
+# 3. 增量（默认保留 dirty；bulk 期间变更由 timestamp 消费）
 ./scripts/sync-incr-auto.sh
 
-# 全量已覆盖缺口、要提速 user_info 时：
-./scripts/sync-incr-auto.sh
-# 默认会 TRUNCATE user_info_dirty；保留积压: --keep-user-info-dirty
+# 全量已覆盖、单独重提 incr 且要清 dirty 积压：
+./scripts/sync-incr-auto.sh --truncate-user-info-dirty
 ```
 
 ### 从零重跑（全量 + 增量全部重来）
@@ -261,14 +260,14 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 - `FLINK_PARALLELISM_USER_INFO=8`（或 `FLINK_PARALLELISM_USER_INFO_INCR`；默认 2× `FLINK_PARALLELISM_INCR`）
 - Lookup cache TTL 120s
 
-**清积压（全量已覆盖缺口时）**
+**清积压**
 
-`sync-incr-auto.sh` / `sync-migrate-auto.sh` **增量阶段默认自动 TRUNCATE** `user_info_dirty`。若需保留积压：`--keep-user-info-dirty`。
+`sync-migrate-auto.sh` 默认：**建宽表前** TRUNCATE `user_info_dirty`（`rebuild-all-staging.sh`），**增量提交前不清**（保留 bulk 期间入队变更，由 CDC `timestamp` + `bulk-start-ms` 消费）。
 
-手动清队列（可选）：
+单独重提增量、且全量已覆盖、要丢弃脏队列积压时：
 
-```sql
-TRUNCATE TABLE user_info_dirty;
+```bash
+./scripts/sync-incr-auto.sh --truncate-user-info-dirty
 ```
 
 ```bash
