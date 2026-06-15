@@ -555,7 +555,7 @@ def batch_update_tokens_by_id(
             "DROP TEMPORARY TABLE IF EXISTS _vt_preload_batch;",
             """CREATE TEMPORARY TABLE _vt_preload_batch (
                 id BIGINT PRIMARY KEY, token VARCHAR(128) NOT NULL, masking VARCHAR(128) NULL
-            ) ENGINE=MEMORY;""",
+            );""",
         ]
         for j in range(0, len(chunk), DB_INSERT_CHUNK):
             sub = chunk[j:j + DB_INSERT_CHUNK]
