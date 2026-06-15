@@ -11,7 +11,7 @@
 SET SESSION wait_timeout = 28800;
 SET SESSION net_read_timeout = 7200;
 SET SESSION net_write_timeout = 7200;
-SET SESSION max_execution_time = 0;
+-- 勿设 max_execution_time / sql_log_bin（RDS 无 SUPER 会 1227）
 
 -- ---------- 1. user_sync_staging ----------
 DROP TABLE IF EXISTS user_sync_staging;

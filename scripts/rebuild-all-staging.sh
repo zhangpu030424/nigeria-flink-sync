@@ -39,7 +39,7 @@ run_sql_file() {
   echo ""
   echo ">> SQL: $f （$(date '+%H:%M:%S') 开始；大查询可能较久）"
   local t0=$SECONDS
-  local init="SET SESSION wait_timeout=28800,net_read_timeout=7200,net_write_timeout=7200,sql_log_bin=0;"
+  local init="SET SESSION wait_timeout=28800,net_read_timeout=7200,net_write_timeout=7200;"
   MYSQL_PWD="${SOURCE_MYSQL_PASSWORD}" mysql -h "${SOURCE_MYSQL_HOST}" -P "${SOURCE_MYSQL_PORT}" \
     -u "${SOURCE_MYSQL_USER}" "${SOURCE_MYSQL_DATABASE}" \
     --max-allowed-packet=512M \

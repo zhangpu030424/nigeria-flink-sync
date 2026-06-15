@@ -8,7 +8,7 @@
 SET SESSION wait_timeout = 28800;
 SET SESSION net_read_timeout = 7200;
 SET SESSION net_write_timeout = 7200;
-SET SESSION max_execution_time = 0;
+-- 勿设 max_execution_time / sql_log_bin（RDS 无 SUPER 会 1227）
 
 -- 敏感 ID 关系双写（不去重，每条源事件保留一行有向边）；type = id 的类型；mobile/gaid/bank/id_number 为 VT token
 -- device_uuid 为原始 UUID（flink.md 未要求 VT）；id2 源字段待确认，暂不产出
