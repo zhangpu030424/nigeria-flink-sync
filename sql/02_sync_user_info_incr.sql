@@ -1,4 +1,6 @@
--- 增量 user_info：单路 CDC user_info_dirty + 窗口合并 + bundle Lookup
+-- 增量 user_info：单路 CDC user_info_dirty + bundle Lookup
+-- dirty 表 PK=user_id，TRIGGER debounce 后 CDC 多为 UPDATE，不能用 TUMBLE 窗口（仅支持 append-only）
+-- 去重：源库 sp_user_info_dirty_enqueue* debounce + 本 Job mini-batch
 -- info_json 在 MySQL user_info_incr_bundle_lookup 组装（与宽表 JSON 结构一致，固定全部 key）
 -- Flink 仅：id_number token/UDF 兜底 + emergency_contacts 内明文手机号 VT 兜底
 -- 前置: ./scripts/deploy-source-ddl.sh
@@ -57,15 +59,6 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     'lookup.cache.ttl' = '120s'
 );
 
-CREATE TEMPORARY VIEW cdc_user_info_dirty_coalesced AS
-SELECT user_id,
-       MAX(updated_at) AS updated_at,
-       PROCTIME() AS proc_time
-FROM TABLE(
-    TUMBLE(TABLE cdc_user_info_dirty, DESCRIPTOR(proc_time), INTERVAL '${USER_INFO_DIRTY_COALESCE_SEC}' SECOND)
-)
-GROUP BY user_id, window_start, window_end;
-
 CREATE TABLE IF NOT EXISTS sink_user_info (
     user_id BIGINT, id_number STRING, full_name STRING, password STRING,
     live_image STRING, id_card STRING, info STRING,
@@ -104,7 +97,7 @@ FROM (
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))), '') AS full_name,
         vt_tokenize_emergency_contacts(COALESCE(b.info_json, '{}')) AS info_json
-    FROM cdc_user_info_dirty_coalesced AS t
+    FROM cdc_user_info_dirty AS t
     INNER JOIN dim_user_info_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.user_id = t.user_id
 ) AS e
 WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')
