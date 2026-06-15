@@ -70,6 +70,10 @@ ENABLED_JOBS=("${SYNC_ENABLED_JOBS[@]}")
 
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   echo ">> --incr-only：跳过宽表/全量，提交增量 Job: ${ENABLED_JOBS[*]}"
+  echo ">> 清空 user_info_dirty（增量启动默认）"
+  # shellcheck source=scripts/lib/user-info-dirty.sh
+  source scripts/lib/user-info-dirty.sh
+  truncate_user_info_dirty
   first=1
   for job in "${ENABLED_JOBS[@]}"; do
     if [[ "$first" -eq 1 ]]; then

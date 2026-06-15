@@ -9,7 +9,8 @@
 #   ./scripts/sync-migrate-auto.sh
 #   ./scripts/sync-migrate-auto.sh --jobs user,user_info
 #   ./scripts/sync-migrate-auto.sh --skip-staging
-#   ./scripts/sync-migrate-auto.sh --incr-startup-mode latest-offset --truncate-user-info-dirty
+#   ./scripts/sync-migrate-auto.sh --incr-startup-mode latest-offset
+#   ./scripts/sync-migrate-auto.sh --keep-user-info-dirty   # 增量阶段保留脏队列（一般不推荐）
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,7 +28,8 @@ while [[ $# -gt 0 ]]; do
       INCR_ARGS+=(--startup-mode="${1:-timestamp}")
       ;;
     --user-info-latest-offset) INCR_ARGS+=("$1") ;;
-    --truncate-user-info-dirty) INCR_ARGS+=("$1") ;;
+    --keep-user-info-dirty) INCR_ARGS+=("$1") ;;
+    --truncate-user-info-dirty) ;;  # 默认已清空，兼容旧参数
     --verify) INCR_ARGS+=("$1") ;;
     --keep-jobs) BULK_ARGS+=("$1"); INCR_ARGS+=("$1") ;;
     *)

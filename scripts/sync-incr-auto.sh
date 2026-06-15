@@ -4,16 +4,17 @@
 # 流程:
 #   1. 读取 logs/bulk-start-ms.env（或 --bulk-start-ms）
 #   2. deploy-source-ddl
-#   3. 可选 Cancel 存量 Job
-#   4. 默认 CDC_STARTUP_MODE=timestamp（正确性优先，补 bulk-start 后 binlog）
-#   5. 按 config/sync-jobs.conf 顺序提交各表增量 Job
+#   3. 默认 TRUNCATE user_info_dirty（全量已覆盖，避免 timestamp 重放积压）
+#   4. 可选 Cancel 存量 Job
+#   5. 默认 CDC_STARTUP_MODE=timestamp（正确性优先，补 bulk-start 后 binlog）
+#   6. 按 config/sync-jobs.conf 顺序提交各表增量 Job
 #
 # 用法:
 #   ./scripts/sync-incr-auto.sh
 #   ./scripts/sync-incr-auto.sh --jobs user_info
 #   ./scripts/sync-incr-auto.sh --startup-mode latest-offset    # 仅追新变更（全量已覆盖缺口时）
 #   ./scripts/sync-incr-auto.sh --user-info-latest-offset       # 仅 user_info 用 latest-offset
-#   ./scripts/sync-incr-auto.sh --truncate-user-info-dirty      # 清脏队列（配合 latest-offset）
+#   ./scripts/sync-incr-auto.sh --keep-user-info-dirty          # 保留脏队列（一般不推荐）
 #   ./scripts/sync-incr-auto.sh --bulk-start-ms 1781240247171
 #   ./scripts/sync-incr-auto.sh --keep-jobs                     # 不 Cancel
 #   ./scripts/sync-incr-auto.sh --verify                        # 提交后跑 user_info 对账
@@ -27,7 +28,7 @@ JOBS_FILTER=""
 BULK_START_MS_ARG=""
 STARTUP_MODE="${CDC_STARTUP_MODE:-timestamp}"
 USER_INFO_LATEST=0
-TRUNCATE_DIRTY=0
+TRUNCATE_DIRTY=1
 RUN_VERIFY=0
 
 while [[ $# -gt 0 ]]; do
@@ -50,7 +51,8 @@ while [[ $# -gt 0 ]]; do
       STARTUP_MODE="${1:-timestamp}"
       ;;
     --user-info-latest-offset) USER_INFO_LATEST=1 ;;
-    --truncate-user-info-dirty) TRUNCATE_DIRTY=1 ;;
+    --keep-user-info-dirty) TRUNCATE_DIRTY=0 ;;
+    --truncate-user-info-dirty) TRUNCATE_DIRTY=1 ;;  # 兼容旧参数（默认已清空）
     --skip-ddl) SKIP_DDL=1 ;;
     --keep-jobs) CANCEL_JOBS=0 ;;
     --verify) RUN_VERIFY=1 ;;
@@ -103,16 +105,13 @@ fi
 
 if [[ "$TRUNCATE_DIRTY" -eq 1 ]]; then
   echo ""
-  echo ">> [2] TRUNCATE user_info_dirty"
-  if table_exists user_info_dirty; then
-    mysql_source_query "TRUNCATE TABLE user_info_dirty;"
-    echo "  ✓ 已清空"
-  else
-    echo "  user_info_dirty 不存在，跳过"
-  fi
+  echo ">> [2] 清空 user_info_dirty（增量启动默认，全量已覆盖历史）"
+  # shellcheck source=scripts/lib/user-info-dirty.sh
+  source scripts/lib/user-info-dirty.sh
+  truncate_user_info_dirty
 else
   echo ""
-  echo ">> [2] 保留 user_info_dirty（--truncate-user-info-dirty 可清空）"
+  echo ">> [2] 保留 user_info_dirty（--keep-user-info-dirty）"
 fi
 
 if [[ "$CANCEL_JOBS" -eq 1 ]]; then
@@ -134,6 +133,9 @@ fi
 
 echo ""
 echo ">> [4] 提交增量 Job"
+if [[ "$TRUNCATE_DIRTY" -eq 0 ]]; then
+  export SKIP_TRUNCATE_USER_INFO_DIRTY=1
+fi
 first=1
 for job in "${SYNC_ENABLED_JOBS[@]}"; do
   job_mode="$STARTUP_MODE"

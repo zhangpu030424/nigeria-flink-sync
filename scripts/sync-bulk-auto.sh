@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
     --rebuild-vt-swap) REBUILD_VT=1; REBUILD_VT_MODE="swap" ;;
     --rebuild-vt-purge|--rebuild-vt-purge-drop) REBUILD_VT=1; REBUILD_VT_MODE="purge-drop" ;;
     --keep-jobs) CANCEL_JOBS=0 ;;
-    --user-info-latest-offset|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
+    --user-info-latest-offset|--keep-user-info-dirty|--truncate-user-info-dirty|--verify) ;;  # incr 参数，bulk 忽略
     --startup-mode=*|--startup-mode|--incr-startup-mode=*|--incr-startup-mode) ;;  # incr 参数
     -h|--help)
       sed -n '2,20p' "$0"

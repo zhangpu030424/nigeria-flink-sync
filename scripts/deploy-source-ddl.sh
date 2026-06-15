@@ -31,6 +31,36 @@ for f in "${DDL_FILES[@]}"; do
 done
 
 echo ""
+echo ">> 校验 debounce 存储过程（须 CREATE ROUTINE；无权限时请 root 执行 enqueue + dirty SQL）"
+REQUIRED_PROCS=(
+  sp_user_info_dirty_enqueue
+  sp_user_info_dirty_enqueue_bvn
+  sp_user_info_dirty_enqueue_adid
+  sp_user_info_dirty_enqueue_emergency_mobile
+)
+failed=0
+for p in "${REQUIRED_PROCS[@]}"; do
+  proc_cnt=$(mysql_source_query \
+    "SELECT COUNT(*) FROM information_schema.routines WHERE routine_schema='${SOURCE_MYSQL_DATABASE}' AND routine_name='${p}' AND routine_type='PROCEDURE';" \
+    2>/dev/null || echo "0")
+  proc_cnt=$(echo "$proc_cnt" | tr -d '[:space:]')
+  if [[ "${proc_cnt:-0}" -ge 1 ]]; then
+    echo "  ✓ ${p}"
+  else
+    echo "  ✗ ${p} 缺失"
+    failed=1
+  fi
+done
+if [[ "$failed" -ne 0 ]]; then
+  echo ""
+  echo "ERR: 存储过程未创建。${SOURCE_MYSQL_USER} 可能无 CREATE ROUTINE 权限。"
+  echo "  请 DBA 用 root 执行:"
+  echo "    mysql ... ${SOURCE_MYSQL_DATABASE} < sql/ddl/user_info_dirty_enqueue.sql"
+  echo "    mysql ... ${SOURCE_MYSQL_DATABASE} < sql/ddl/user_info_dirty.sql"
+  exit 1
+fi
+
+echo ""
 echo ">> 校验关键对象"
 CHECK_VIEWS=(
   v_adjust_latest_by_adid

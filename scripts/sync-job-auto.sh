@@ -208,6 +208,12 @@ start_incr() {
 
   export FLINK_PARALLELISM="${incr_parallel}"
   log "切换增量：并行度 ${bulk_parallel} → ${FLINK_PARALLELISM}"
+  if [[ "$JOB_KEY" == "user_info" && "${SKIP_TRUNCATE_USER_INFO_DIRTY:-0}" != "1" ]]; then
+    log "清空 user_info_dirty（增量启动，全量已覆盖历史）"
+    # shellcheck source=scripts/lib/user-info-dirty.sh
+    source "$(dirname "$0")/lib/user-info-dirty.sh"
+    truncate_user_info_dirty >> "$LOG_FILE" 2>&1
+  fi
   log "源库 DDL: deploy-source-ddl.sh"
   ./scripts/deploy-source-ddl.sh >> "$LOG_FILE" 2>&1
   log "增量 SQL: ${INCR_SQL} mode=${CDC_STARTUP_MODE} bulk-start-ms=${CDC_STARTUP_TIMESTAMP_MILLIS}"

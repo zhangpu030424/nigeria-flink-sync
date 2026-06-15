@@ -32,7 +32,8 @@ bash scripts/verify-user-info-reconcile.sh --sample 500
 ./scripts/sync-incr-auto.sh
 
 # 全量已覆盖缺口、要提速 user_info 时：
-./scripts/sync-incr-auto.sh --user-info-latest-offset --truncate-user-info-dirty
+./scripts/sync-incr-auto.sh
+# 默认会 TRUNCATE user_info_dirty；保留积压: --keep-user-info-dirty
 ```
 
 ### 从零重跑（全量 + 增量全部重来）
@@ -261,13 +262,16 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 
 **清积压（全量已覆盖缺口时）**
 
+`sync-incr-auto.sh` / `sync-migrate-auto.sh` **增量阶段默认自动 TRUNCATE** `user_info_dirty`。若需保留积压：`--keep-user-info-dirty`。
+
+手动清队列（可选）：
+
 ```sql
 TRUNCATE TABLE user_info_dirty;
 ```
 
 ```bash
-CDC_STARTUP_MODE=latest-offset FLINK_PARALLELISM_INCR=4 \
-  ./scripts/sync-job-auto.sh user_info --incr-only --keep-other-jobs
+./scripts/sync-incr-auto.sh --user-info-latest-offset
 ```
 
 debounce 窗口内最后一次业务变更仍会被合并后的 Lookup 读到最新宽表；极端情况（变更后永不再入队且 Job 未消费）可手动 `UPDATE user_info_dirty` 补一枪。
