@@ -62,6 +62,9 @@ def vt_type_db(name: str) -> int:
 
 # 源表与 vt_token_cache 排序规则可能不同（0900_ai_ci vs unicode_ci），比较时统一 COLLATE
 COLLATE_CMP = "utf8mb4_bin"
+# 与 vt_token_cache.raw_value VARCHAR(128) 一致
+RAW_VALUE_MAX_LEN = 128
+RAW_VALUE_LEN_FILTER = f"CHAR_LENGTH(raw_value) <= {RAW_VALUE_MAX_LEN}"
 
 SOURCE_NOT_VT = """
 AND NOT EXISTS (
@@ -86,6 +89,7 @@ SELECT src.raw_value FROM (
   FROM `user` u
 ) src
 WHERE src.raw_value IS NOT NULL AND src.raw_value <> ''
+  AND CHAR_LENGTH(src.raw_value) <= 128
 {not_vt}
 {limit_clause}
 """,
@@ -104,6 +108,7 @@ SELECT src.raw_value FROM (
   WHERE d.idfa IS NOT NULL AND TRIM(d.idfa) <> ''
 ) src
 WHERE src.raw_value IS NOT NULL AND src.raw_value <> ''
+  AND CHAR_LENGTH(src.raw_value) <= 128
 {not_vt}
 {limit_clause}
 """,
@@ -115,6 +120,7 @@ SELECT src.raw_value FROM (
     AND b.bank_account IS NOT NULL AND TRIM(b.bank_account) <> ''
 ) src
 WHERE 1=1
+  AND CHAR_LENGTH(src.raw_value) <= 128
 {not_vt}
 {limit_clause}
 """,
@@ -125,6 +131,7 @@ SELECT src.raw_value FROM (
   WHERE p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
 ) src
 WHERE 1=1
+  AND CHAR_LENGTH(src.raw_value) <= 128
 {not_vt}
 {limit_clause}
 """,
@@ -141,6 +148,7 @@ SELECT src.raw_value FROM (
   FROM user_emergency_contact ec
 ) src
 WHERE src.raw_value IS NOT NULL AND src.raw_value <> ''
+  AND CHAR_LENGTH(src.raw_value) <= 128
 {not_vt}
 {limit_clause}
 """,
@@ -161,6 +169,7 @@ CACHE_PENDING_ID_SQL = """
 SELECT id, raw_value FROM vt_token_cache
 WHERE vt_type = {vt_type} AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
+  AND CHAR_LENGTH(raw_value) <= {max_len}
 ORDER BY id
 LIMIT {limit}
 """
@@ -169,6 +178,7 @@ CACHE_PENDING_RAW_SQL = """
 SELECT raw_value FROM vt_token_cache
 WHERE vt_type = {vt_type} AND status = {status}
   AND raw_value IS NOT NULL AND raw_value <> ''
+  AND CHAR_LENGTH(raw_value) <= {max_len}
 ORDER BY id
 LIMIT {limit}
 """
@@ -470,6 +480,36 @@ def _sql_lit(s: Optional[str]) -> str:
     return "NULL" if s is None else f"'{escape_sql(s)}'"
 
 
+def raw_value_len_ok(s: Optional[str]) -> bool:
+    return bool(s) and len(s) <= RAW_VALUE_MAX_LEN
+
+
+def mark_oversized_raw_failed(
+    host: str, port: str, user: str, password: str, database: str, vt_type: str,
+) -> int:
+    """跳过超长明文（源库脏数据），避免 INSERT raw_value 1406。"""
+    cnt_sql = f"""
+SELECT COUNT(*) FROM vt_token_cache
+WHERE vt_type={vt_type_db(vt_type)}
+  AND status IN ({STATUS_PENDING},{STATUS_FAIL})
+  AND raw_value IS NOT NULL AND CHAR_LENGTH(raw_value) > {RAW_VALUE_MAX_LEN};
+"""
+    rows = mysql_query(host, port, user, password, database, cnt_sql)
+    n = int(rows[0]) if rows else 0
+    if n <= 0:
+        return 0
+    sql = f"""
+UPDATE vt_token_cache SET status={STATUS_FAIL}, retry_count=retry_count+1,
+  last_error='raw_value too long (>{RAW_VALUE_MAX_LEN})'
+WHERE vt_type={vt_type_db(vt_type)}
+  AND status IN ({STATUS_PENDING},{STATUS_FAIL})
+  AND raw_value IS NOT NULL AND CHAR_LENGTH(raw_value) > {RAW_VALUE_MAX_LEN};
+"""
+    with _db_write_lock:
+        mysql_exec(host, port, user, password, database, sql)
+    return n
+
+
 def parse_id_raw_rows(rows: List[str]) -> List[Tuple[int, str]]:
     out: List[Tuple[int, str]] = []
     for row in rows:
@@ -521,6 +561,9 @@ def delete_insert_success(
     """DELETE 旧 status=0 行 + INSERT 新 token 行，比 UPDATE/UPSERT 更轻。"""
     if not rows:
         return
+    rows = [r for r in rows if raw_value_len_ok(r[1])]
+    if not rows:
+        return
     vt = vt_type_db(vt_type)
     for i in range(0, len(rows), DB_UPSERT_CHUNK):
         chunk = rows[i:i + DB_UPSERT_CHUNK]
@@ -565,6 +608,9 @@ def upsert_success(
 ) -> None:
     if not rows:
         return
+    rows = [(raw, tok, mask) for raw, tok, mask in rows if raw_value_len_ok(raw)]
+    if not rows:
+        return
     vt = vt_type_db(vt_type)
     for i in range(0, len(rows), DB_UPSERT_CHUNK):
         chunk = rows[i:i + DB_UPSERT_CHUNK]
@@ -592,6 +638,9 @@ def upsert_failed(
 ) -> None:
     if not raw_values:
         return
+    raw_values = [r for r in raw_values if raw_value_len_ok(r)]
+    if not raw_values:
+        return
     vt, err = vt_type_db(vt_type), escape_sql(error[:500])
     for i in range(0, len(raw_values), DB_UPSERT_CHUNK):
         chunk = raw_values[i:i + DB_UPSERT_CHUNK]
@@ -615,21 +664,17 @@ def fetch_fast_batch(
     vt_type: str, limit: int, retry_failed: bool,
     write_mode: str = WRITE_UPSERT,
 ) -> List[Tuple[int, str]]:
-    """fast 模式取待 VT 明文。upsert 只 SELECT raw_value；update_id 需 id。"""
+    """fast 模式从 vt_token_cache 认领。始终 SELECT id+raw（seed 后按 id UPDATE token，避免 upsert 重插 raw_value）。"""
     vt, lim = vt_type_db(vt_type), int(limit)
     status = STATUS_FAIL if retry_failed else STATUS_PENDING
-    if write_mode == WRITE_UPSERT:
-        sql = CACHE_PENDING_RAW_SQL.format(vt_type=vt, status=status, limit=lim)
-        log(f"[{vt_type}] fast: SELECT raw_value status={status} LIMIT {lim} (upsert)...")
-    else:
-        sql = CACHE_PENDING_ID_SQL.format(vt_type=vt, status=status, limit=lim)
-        log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ({write_mode})...")
+    fmt = dict(vt_type=vt, status=status, limit=lim, max_len=RAW_VALUE_MAX_LEN)
+    sql = CACHE_PENDING_ID_SQL.format(**fmt)
+    log(f"[{vt_type}] fast: SELECT id,raw status={status} LIMIT {lim} ({write_mode})...")
     t0 = time.time()
-    if write_mode == WRITE_UPSERT:
-        raws = mysql_query(host, port, user, password, database, sql)
-        rows = [(0, r) for r in raws if r]
-    else:
-        rows = parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
+    rows = [
+        (rid, raw) for rid, raw in parse_id_raw_rows(mysql_query(host, port, user, password, database, sql))
+        if raw_value_len_ok(raw)
+    ]
     log(f"[{vt_type}] SELECT {time.time() - t0:.2f}s，{len(rows)} 条")
     return rows
 
@@ -670,7 +715,8 @@ def count_fast_pending(
     sql = f"""
 SELECT COUNT(*) FROM vt_token_cache
 WHERE vt_type={vt_type_db(vt_type)} AND status={status}
-  AND raw_value IS NOT NULL AND raw_value <> '';
+  AND raw_value IS NOT NULL AND raw_value <> ''
+  AND CHAR_LENGTH(raw_value) <= {RAW_VALUE_MAX_LEN};
 """
     rows = mysql_query(host, port, user, password, database, sql)
     return int(rows[0]) if rows else 0
@@ -689,7 +735,7 @@ def fetch_stream_batch(
     t0 = time.time()
     raws = mysql_query(host, port, user, password, database, sql)
     log(f"[{vt_type}] SELECT 完成 {time.time() - t0:.1f}s，取得 {len(raws)} 条")
-    return [(0, r) for r in raws]
+    return [(0, r) for r in raws if raw_value_len_ok(r)]
 
 
 def count_stream_pending(
@@ -743,6 +789,11 @@ def heartbeat_loop(stop: threading.Event, monitor: RoundMonitor, progress: Progr
         )
 
 
+def _fast_cache_update_by_id(chunk: List[Tuple[int, str]]) -> bool:
+    """vt_seed 后 cache 行均有 id；按 id UPDATE 勿再 INSERT raw_value（避免 upsert 1406）。"""
+    return bool(chunk) and all(rid > 0 for rid, _ in chunk)
+
+
 def process_stream_chunk(
     chunk: List[Tuple[int, str]], worker_id: int, round_no: int, chunk_no: int, chunk_total: int,
     vt_type: str, base_url: str, timeout_sec: int, max_retries: int,
@@ -751,7 +802,33 @@ def process_stream_chunk(
     writer: Optional[AsyncUpsertWriter] = None,
     write_mode: str = WRITE_UPDATE_ID,
 ) -> Tuple[int, int, bool]:
+    oversize_err = f"raw_value too long (>{RAW_VALUE_MAX_LEN})"
+    ok_chunk: List[Tuple[int, str]] = []
+    bad_chunk: List[Tuple[int, str]] = []
+    for rid, raw in chunk:
+        if raw_value_len_ok(raw):
+            ok_chunk.append((rid, raw))
+        else:
+            bad_chunk.append((rid, raw))
+    if bad_chunk:
+        bad_raws = [r for _, r in bad_chunk]
+        bad_ids = [i for i, _ in bad_chunk if i > 0]
+        use_id_write = write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT) or _fast_cache_update_by_id(chunk)
+        if use_id_write and bad_ids:
+            if writer is not None:
+                writer.enqueue_fail(WRITE_UPDATE_ID, bad_ids, oversize_err)
+            else:
+                mark_failed_by_ids(host, port, user, password, database, bad_ids, oversize_err)
+        elif write_mode == WRITE_UPSERT:
+            if writer is not None:
+                writer.enqueue_fail(write_mode, bad_raws, oversize_err)
+            else:
+                upsert_failed(host, port, user, password, database, vt_type, bad_raws, oversize_err)
+        progress.add(fail=len(bad_chunk))
+    chunk = ok_chunk
     size = len(chunk)
+    if size == 0:
+        return 0, len(bad_chunk), False
     ids = [c[0] for c in chunk]
     values = [c[1] for c in chunk]
     prefix = f"[{vt_type}] r{round_no} w{worker_id} {chunk_no}/{chunk_total} n={size}"
@@ -765,12 +842,14 @@ def process_stream_chunk(
         t0 = time.time()
         try:
             tokens, maskings, http_sec, parse_sec = call_v2t(base_url, values, timeout_sec)
-            if write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
+            use_id_write = write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT) or _fast_cache_update_by_id(chunk)
+            if use_id_write:
                 ok_rows = [
                     (ids[i], values[i], tokens[i], maskings[i]) for i in range(size)
                 ]
+                eff_mode = WRITE_DELETE_INSERT if write_mode == WRITE_DELETE_INSERT else WRITE_UPDATE_ID
                 if writer is not None:
-                    writer.enqueue_ok(write_mode, ok_rows)
+                    writer.enqueue_ok(eff_mode, ok_rows)
                 elif write_mode == WRITE_DELETE_INSERT:
                     delete_insert_success(host, port, user, password, database, vt_type, ok_rows)
                 else:
@@ -785,7 +864,7 @@ def process_stream_chunk(
             rate = snap["rate"]
             flag = "✓" if rate >= TARGET_RATE_PER_MIN * 0.8 else "△"
             wlabel = {"update_id": "UPD-id", "delete_insert": "DEL+INS", "upsert": "UPSERT"}.get(
-                write_mode, write_mode,
+                eff_mode if use_id_write else write_mode, write_mode,
             )
             log(
                 f"{prefix} | VT {http_sec:.1f}s 解析{parse_sec:.3f}s "
@@ -799,10 +878,11 @@ def process_stream_chunk(
             if attempt < max_retries:
                 time.sleep(0.5 * attempt)
 
-    if write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT):
+    use_id_write = write_mode in (WRITE_UPDATE_ID, WRITE_DELETE_INSERT) or _fast_cache_update_by_id(chunk)
+    if use_id_write:
         fail_payload = ids
         if writer is not None:
-            writer.enqueue_fail(write_mode, fail_payload, last_err)
+            writer.enqueue_fail(WRITE_UPDATE_ID, fail_payload, last_err)
         else:
             mark_failed_by_ids(host, port, user, password, database, ids, last_err)
     else:
@@ -910,6 +990,9 @@ def process_vt_type_fast(
     dry_run: bool, heartbeat_sec: int, skip_count: bool,
     write_workers: int, async_write: bool, write_mode: str,
 ) -> int:
+    n_bad = mark_oversized_raw_failed(host, port, user, password, database, vt_type)
+    if n_bad:
+        log(f"[{vt_type}] 已标记超长 raw_value(>{RAW_VALUE_MAX_LEN}) 为失败: {n_bad} 条")
     initial = 0 if skip_count else count_fast_pending(
         host, port, user, password, database, vt_type, retry_failed,
     )

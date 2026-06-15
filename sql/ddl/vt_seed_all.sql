@@ -27,7 +27,8 @@ FROM (
         END AS mobile_norm
     FROM `user` u
 ) norm
-WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
+WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> ''
+  AND CHAR_LENGTH(norm.mobile_norm) <= 128;
 
 -- ---------- 2 gaid_idfa ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
@@ -46,7 +47,8 @@ FROM (
     UNION
     SELECT DISTINCT TRIM(d.idfa) FROM device_ids d
     WHERE d.idfa IS NOT NULL AND TRIM(d.idfa) <> ''
-) v;
+) v
+WHERE CHAR_LENGTH(v.val) <= 128;
 
 -- ---------- 3 bank_account ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
@@ -56,7 +58,8 @@ SELECT 3,
 FROM user_bank_info b
 WHERE b.deleted = 0
   AND b.bank_account IS NOT NULL
-  AND TRIM(b.bank_account) <> '';
+  AND TRIM(b.bank_account) <> ''
+  AND CHAR_LENGTH(TRIM(b.bank_account)) <= 128;
 
 -- ---------- 4 id_number (BVN) ----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
@@ -65,7 +68,8 @@ SELECT 4,
        0
 FROM user_personal_info p
 WHERE p.bvn IS NOT NULL
-  AND TRIM(p.bvn) <> '';
+  AND TRIM(p.bvn) <> ''
+  AND CHAR_LENGTH(TRIM(p.bvn)) <= 128;
 
 -- ---------- 5 emergency_contact（user_emergency_contact.contact_number，+234 规范化）----------
 INSERT IGNORE INTO vt_token_cache (vt_type, raw_value, status)
@@ -83,7 +87,8 @@ FROM (
         END AS mobile_norm
     FROM user_emergency_contact ec
 ) norm
-WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> '';
+WHERE norm.mobile_norm IS NOT NULL AND norm.mobile_norm <> ''
+  AND CHAR_LENGTH(norm.mobile_norm) <= 128;
 
 SELECT vt_type, status, COUNT(*) AS cnt
 FROM vt_token_cache
