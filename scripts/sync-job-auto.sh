@@ -77,6 +77,7 @@ mkdir -p "$LOG_DIR"
 
 SYNC_THRESHOLD_PCT="${SYNC_THRESHOLD_PCT:-100}"
 SYNC_REQUIRE_EXACT_COUNT="${SYNC_REQUIRE_EXACT_COUNT:-1}"
+SYNC_TARGET_BASELINE_AUTO="${SYNC_TARGET_BASELINE_AUTO:-1}"
 POLL_SEC="${SYNC_POLL_SEC:-3}"
 STABLE_ROUNDS="${SYNC_STABLE_ROUNDS:-5}"
 MIN_RATE_TO_STABLE="${SYNC_MIN_RATE:-200}"
@@ -84,6 +85,8 @@ BULK_GRACE_ROUNDS="${BULK_GRACE_ROUNDS:-10}"
 BULK_SHORT_RETRY_MAX="${BULK_SHORT_RETRY_MAX:-2}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
+TARGET_BASELINE=""
+TARGET_BASELINE_FILE="${LOG_DIR}/sync-${JOB_KEY}-target-baseline.count"
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$JOB_KEY] $*" | tee -a "$LOG_FILE"
@@ -94,38 +97,79 @@ mysql_count() {
   MYSQL_PWD="$pass" mysql -h "$host" -P "$port" -u "$user" "$db" -N -e "$sql" 2>/dev/null || echo "ERR"
 }
 
-# 全量达标：默认宽表计数 == 目标；允许目标略多/略少（PK 去重、sink 幂等等）
-bulk_count_reached() {
-  local src="$1"
+# 全量达标（内部）：期望计数 expect_cnt vs 实际目标 tgt
+bulk_count_reached_inner() {
+  local expect_cnt="$1"
   local tgt="$2"
-  [[ "$src" =~ ^[0-9]+$ && "$tgt" =~ ^[0-9]+$ && "$src" -gt 0 ]] || return 1
+  [[ "$expect_cnt" =~ ^[0-9]+$ && "$tgt" =~ ^[0-9]+$ && "$expect_cnt" -gt 0 ]] || return 1
   if [[ "$SYNC_REQUIRE_EXACT_COUNT" == "1" ]]; then
-    [[ "$tgt" -eq "$src" ]] && return 0
-    if [[ "$tgt" -gt "$src" ]]; then
-      local surplus=$((tgt - src))
+    [[ "$tgt" -eq "$expect_cnt" ]] && return 0
+    if [[ "$tgt" -gt "$expect_cnt" ]]; then
+      local surplus=$((tgt - expect_cnt))
       local max_surplus="${SYNC_COUNT_MAX_SURPLUS:-100}"
       [[ "$surplus" -le "$max_surplus" ]] && return 0
-    elif [[ "$tgt" -lt "$src" ]]; then
-      local deficit=$((src - tgt))
+    elif [[ "$tgt" -lt "$expect_cnt" ]]; then
+      local deficit=$((expect_cnt - tgt))
       local max_deficit="${SYNC_COUNT_MAX_DEFICIT:-10}"
       [[ "$deficit" -le "$max_deficit" ]] && return 0
     fi
     return 1
   else
-    awk "BEGIN {exit !(($tgt * 100 / $src) >= $SYNC_THRESHOLD_PCT)}"
+    awk "BEGIN {exit !(($tgt * 100 / $expect_cnt) >= $SYNC_THRESHOLD_PCT)}"
+  fi
+}
+
+# 全量达标：宽表 src 条；目标库已有数据时按「基线 + 宽表 ≈ 目标总数」
+bulk_count_reached() {
+  local src="$1"
+  local tgt="$2"
+  if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+    local expected=$((TARGET_BASELINE + src))
+    bulk_count_reached_inner "$expected" "$tgt"
+  else
+    bulk_count_reached_inner "$src" "$tgt"
   fi
 }
 
 count_match_reason() {
   local src="$1"
   local tgt="$2"
-  if [[ "$tgt" -eq "$src" ]]; then
-    echo "一致"
-  elif [[ "$tgt" -gt "$src" ]]; then
-    echo "目标多$((tgt - src))（增量并行写入，≤${SYNC_COUNT_MAX_SURPLUS:-100}视为达标）"
-  else
-    echo "目标少$((src - tgt))（PK 去重/sink 幂等，≤${SYNC_COUNT_MAX_DEFICIT:-10}视为达标）"
+  local expect_cnt="$src"
+  local prefix=""
+  if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+    expect_cnt=$((TARGET_BASELINE + src))
+    prefix="基线${TARGET_BASELINE}+宽表${src}="
   fi
+  if [[ "$tgt" -eq "$expect_cnt" ]]; then
+    echo "${prefix}一致(目标=${tgt})"
+  elif [[ "$tgt" -gt "$expect_cnt" ]]; then
+    echo "${prefix}目标多$((tgt - expect_cnt))（≤${SYNC_COUNT_MAX_SURPLUS:-100}视为达标）"
+  else
+    echo "${prefix}目标少$((expect_cnt - tgt))（≤${SYNC_COUNT_MAX_DEFICIT:-10}视为达标）"
+  fi
+}
+
+capture_target_baseline() {
+  if [[ "${SYNC_TARGET_BASELINE_AUTO}" != "1" ]]; then
+    TARGET_BASELINE=""
+    return 0
+  fi
+  if [[ -n "${SYNC_TARGET_BASELINE:-}" && "${SYNC_TARGET_BASELINE}" =~ ^[0-9]+$ ]]; then
+    TARGET_BASELINE="${SYNC_TARGET_BASELINE}"
+    log "使用手动目标基线 TARGET_BASELINE=${TARGET_BASELINE}"
+    return 0
+  fi
+  local cnt
+  cnt=$(mysql_count "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL")
+  if [[ ! "$cnt" =~ ^[0-9]+$ ]]; then
+    log "WARN: 无法读取目标基线计数（${cnt}），回退为宽表=目标总数对比"
+    TARGET_BASELINE=""
+    return 0
+  fi
+  TARGET_BASELINE="$cnt"
+  echo "$cnt" > "$TARGET_BASELINE_FILE"
+  log "目标库基线=${TARGET_BASELINE}（全量开始前快照；期望目标≈基线+宽表）"
 }
 
 verify_staging_target_count() {
@@ -282,7 +326,13 @@ monitor_bulk_until_stable() {
     rate="n/a"
     reached=0
     if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-      progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+      if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+        local synced=$((tgt_cnt - TARGET_BASELINE))
+        (( synced < 0 )) && synced=0
+        progress=$(awk "BEGIN {printf \"%.2f\", $synced * 100 / $src_cnt}")
+      else
+        progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+      fi
       if bulk_count_reached "$src_cnt" "$tgt_cnt"; then
         reached=1
       fi
@@ -302,7 +352,14 @@ monitor_bulk_until_stable() {
 
     local match_hint="需一致"
     [[ "$SYNC_REQUIRE_EXACT_COUNT" != "1" ]] && match_hint="≥${SYNC_THRESHOLD_PCT}%"
-    log "[${phase_label}] #${round} 宽表=${src_cnt} 目标=${tgt_cnt} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
+    if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ && "$src_cnt" =~ ^[0-9]+$ ]]; then
+      local synced=$((tgt_cnt - TARGET_BASELINE))
+      (( synced < 0 )) && synced=0
+      local expected=$((TARGET_BASELINE + src_cnt))
+      log "[${phase_label}] #${round} 宽表=${src_cnt} 基线=${TARGET_BASELINE} 目标=${tgt_cnt} 本次+${synced} 期望≈${expected} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
+    else
+      log "[${phase_label}] #${round} 宽表=${src_cnt} 目标=${tgt_cnt} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
+    fi
 
     switch=0
     if [[ "$reached" == "1" ]]; then
@@ -505,8 +562,9 @@ fi
 resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
 BULK_START_MS_ARG="$BULK_START_MS"
 log "========== 全量 ${FULL_SQL} =========="
-log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100}"
+log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100} 目标基线=${SYNC_TARGET_BASELINE_AUTO}"
 log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
+capture_target_baseline
 
 if [[ "$KEEP_OTHER" -eq 0 ]]; then
   if ! ./scripts/check-flink-slots.sh 2>&1 | tee -a "$LOG_FILE"; then
