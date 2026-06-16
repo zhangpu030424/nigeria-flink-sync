@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS sink_application (
     credit_limit BIGINT, loan_amount BIGINT, principal BIGINT, total_amount BIGINT, disbursed_amount BIGINT,
     created_time BIGINT, submited_time BIGINT, reviewed_time BIGINT, disbursed_time BIGINT,
     last_paid_time BIGINT, paid_off_time BIGINT, lock_expire_time BIGINT,
-    due_date DATE, due_date_final DATE, status TINYINT,
+    coupon_code STRING,
+    status TINYINT,
     PRIMARY KEY (mobile, group_user_id, sn) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -102,8 +103,7 @@ SELECT
     CASE WHEN e.last_paid_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(e.last_paid_time AS STRING)) * 1000 END,
     CASE WHEN e.settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(e.settled_time AS STRING)) * 1000 END,
     (UNIX_TIMESTAMP(CAST(e.order_time AS STRING)) + 7 * 86400) * 1000,
-    CAST(e.last_repayment_time AS DATE),
-    CAST(e.last_repayment_time AS DATE),
+    CAST('' AS STRING),
     CAST(e.risk_status AS TINYINT)
 FROM (
     SELECT

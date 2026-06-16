@@ -379,7 +379,8 @@ CREATE TABLE IF NOT EXISTS sink_application (
     credit_limit BIGINT, loan_amount BIGINT, principal BIGINT, total_amount BIGINT, disbursed_amount BIGINT,
     created_time BIGINT, submited_time BIGINT, reviewed_time BIGINT, disbursed_time BIGINT,
     last_paid_time BIGINT, paid_off_time BIGINT, lock_expire_time BIGINT,
-    due_date DATE, due_date_final DATE, status TINYINT,
+    coupon_code STRING,
+    status TINYINT,
     PRIMARY KEY (mobile, group_user_id, sn) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -432,8 +433,7 @@ SELECT
     e.last_paid_time_ms,
     e.paid_off_time_ms,
     e.lock_expire_ms,
-    e.due_date,
-    e.due_date_final,
+    CAST('' AS STRING),
     e.risk_status
 FROM (
     SELECT
@@ -481,8 +481,6 @@ FROM (
         CASE WHEN ur.callback_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(ur.callback_time AS STRING)) * 1000 END AS last_paid_time_ms,
         CASE WHEN o.settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(o.settled_time AS STRING)) * 1000 END AS paid_off_time_ms,
         (UNIX_TIMESTAMP(CAST(o.order_time AS STRING)) + 7 * 86400) * 1000 AS lock_expire_ms,
-        CAST(o.last_repayment_time AS DATE) AS due_date,
-        CAST(o.last_repayment_time AS DATE) AS due_date_final,
         CAST(
             CASE CAST(o.risk_order_status AS INT)
                 WHEN 2 THEN 3
