@@ -1,5 +1,5 @@
 -- 全量阶段 1：已有 bank_account_token；无 token 见 02_sync_user_bankcard_fast_vt_miss.sql
--- 映射: group_user_id=user_id+1亿, bank_account_number=VT token（目标表无 id 列）
+-- 映射: id 暂传 0；group_user_id=user_id+1亿, bank_account_number=VT token
 --
 -- 执行: ./scripts/run-user-bankcard-fast.sh
 
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS src_bankcard_staging (
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
+    id BIGINT,
     group_user_id BIGINT,
     bank_code STRING,
     bank_account_number STRING,
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
+    CAST(0 AS BIGINT),
     user_id + 100000000,
     COALESCE(bank_code, ''),
     bank_account_token,
