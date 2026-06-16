@@ -2,6 +2,9 @@
 # user_info 脏队列：存储过程 + TRIGGER 部署与校验
 # shellcheck shell=bash
 
+# shellcheck source=scripts/lib/user-info-dirty.sh
+source "$(dirname "${BASH_SOURCE[0]}")/user-info-dirty.sh"
+
 USER_INFO_DIRTY_REQUIRED_PROCS=(
   sp_user_info_dirty_upsert_one
   sp_user_info_dirty_enqueue
@@ -56,8 +59,6 @@ deploy_user_info_dirty_sql() {
   echo ">> user_info_dirty SQL（${user}@${SOURCE_MYSQL_HOST}）"
   _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty.sql
   _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty_enqueue.sql
-  # shellcheck source=scripts/lib/user-info-dirty.sh
-  source "$(dirname "${BASH_SOURCE[0]}")/user-info-dirty.sh"
   migrate_user_info_dirty_to_shards
 }
 
@@ -92,7 +93,7 @@ _verify_user_info_dirty_objects() {
 # 自动部署：已齐全则跳过；否则先用 flink_cdc，失败再尝试 SOURCE_MYSQL_ROOT_*（可选）
 ensure_user_info_dirty_deploy() {
   if user_info_dirty_procs_ok && user_info_dirty_triggers_ok && user_info_dirty_shards_ok; then
-    echo ">> user_info_dirty 存储过程 + TRIGGER + 分片表已就绪，跳过分片迁移"
+    echo ">> user_info_dirty 已就绪，跳过 DDL 部署（仍检查旧单表 → 分片迁移）"
     migrate_user_info_dirty_to_shards
     _verify_user_info_dirty_objects
     return 0
