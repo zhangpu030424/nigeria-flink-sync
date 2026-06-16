@@ -1,17 +1,42 @@
--- user_info 增量脏队列：源表 TRIGGER 写入 user_id，Flink 单路 CDC 此表即可
+-- user_info 增量脏队列（4 分片）：源表 TRIGGER → user_info_dirty_{0..3}，Flink 多路 CDC
 -- 部署: ./scripts/deploy-source-ddl.sh（须源库 TRIGGER + PROCEDURE 权限；无权限时请 DBA 用 root 执行）
--- debounce: 同 user 在 N 秒内多次变更只产生一条 binlog（Lookup 仍取最新宽表）
--- 回滚: 先 DROP TRIGGER，再 DROP PROCEDURE，再 DROP TABLE user_info_dirty
+-- debounce: 同 user 在 N 秒内多次变更只 bump 一次 updated_at（Lookup 仍取最新宽表）
+-- 分片键: user_id % 4（须与 USER_INFO_DIRTY_SHARDS=4、02_sync_user_info_incr.sql 一致）
+-- 回滚: 先 DROP TRIGGER，再 DROP PROCEDURE，再 DROP VIEW/TABLE user_info_dirty_*
 
-CREATE TABLE IF NOT EXISTS user_info_dirty (
-    user_id     BIGINT        NOT NULL COMMENT '源库 user.id',
+CREATE TABLE IF NOT EXISTS user_info_dirty_0 (
+    user_id     BIGINT        NOT NULL COMMENT '源库 user.id，shard=user_id%4',
     updated_at  TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (user_id)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
-  COMMENT = 'user_info 增量触发队列（Flink CDC 单表）';
+  COMMENT = 'user_info 脏队列分片 0/4';
 
--- 存储过程见 sql/ddl/user_info_dirty_enqueue.sql（deploy-source-ddl.sh 会先执行）
+CREATE TABLE IF NOT EXISTS user_info_dirty_1 (
+    user_id     BIGINT        NOT NULL,
+    updated_at  TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (user_id)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = 'user_info 脏队列分片 1/4';
+
+CREATE TABLE IF NOT EXISTS user_info_dirty_2 (
+    user_id     BIGINT        NOT NULL,
+    updated_at  TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (user_id)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = 'user_info 脏队列分片 2/4';
+
+CREATE TABLE IF NOT EXISTS user_info_dirty_3 (
+    user_id     BIGINT        NOT NULL,
+    updated_at  TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (user_id)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = 'user_info 脏队列分片 3/4';
+
+-- 存储过程见 sql/ddl/user_info_dirty_enqueue.sql（须先本文件建分片表，再 deploy enqueue）
 
 DROP TRIGGER IF EXISTS trg_user_info_dirty_user_ai;
 DROP TRIGGER IF EXISTS trg_user_info_dirty_user_au;

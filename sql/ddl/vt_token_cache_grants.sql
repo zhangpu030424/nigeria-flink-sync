@@ -4,7 +4,10 @@
 USE nigeria_backend;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON nigeria_backend.vt_token_cache TO 'flink_cdc'@'101.47.31.184';
-GRANT SELECT ON nigeria_backend.user_info_dirty TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.user_info_dirty_0 TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.user_info_dirty_1 TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.user_info_dirty_2 TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.user_info_dirty_3 TO 'flink_cdc'@'101.47.31.184';
 
 -- Lookup 视图（deploy-source-ddl.sh 部署后）
 GRANT SELECT ON nigeria_backend.user_info_incr_bundle_lookup TO 'flink_cdc'@'101.47.31.184';

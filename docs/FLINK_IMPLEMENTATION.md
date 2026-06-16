@@ -157,9 +157,9 @@ Job 编排见 `config/sync-jobs.conf`。
 **方案**：
 
 ```text
-源表变更 → MySQL TRIGGER → user_info_dirty（PK=user_id）
+源表变更 → MySQL TRIGGER → user_info_dirty_{0..3}（PK=user_id，user_id%4）
                               ↓
-                    Flink 单路 CDC dirty
+                    Flink 四路 CDC + UNION
                               ↓
               TUMBLE 窗口合并（USER_INFO_DIRTY_COALESCE_SEC，默认 5s）
                               ↓
@@ -191,7 +191,8 @@ CDC 特殊配置：
 
 - `scan.incremental.snapshot.enabled=false` — 脏表不做全表快照
 - `debezium.snapshot.locking.mode=none` — 云 RDS 无 `FLUSH TABLES` 权限
-- `CDC_SERVER_ID_UI_DIRTY` 须 **单值**（如 `5401`，勿写范围）
+- `CDC_SERVER_ID_UI_DIRTY_0..3` 每片须 **单值** server-id（如 `5401/5411/5421/5431`）
+- `USER_INFO_DIRTY_SHARDS=4` 与 Flink 并行度对齐
 
 ### 6.2 application / loan 多源 CDC
 

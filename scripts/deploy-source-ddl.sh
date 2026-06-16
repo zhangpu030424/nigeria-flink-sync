@@ -133,11 +133,11 @@ if [[ "$failed" -ne 0 ]]; then
 fi
 
 echo ""
-echo ">> 校验 user_info_dirty 表"
-if table_exists user_info_dirty; then
-  echo "  ✓ user_info_dirty 表"
+echo ">> 校验 user_info_dirty 分片表"
+if user_info_dirty_shards_ok 2>/dev/null; then
+  echo "  ✓ user_info_dirty_0..$(( ${USER_INFO_DIRTY_SHARDS:-4} - 1 ))"
 else
-  echo "  ✗ user_info_dirty 表缺失"
+  echo "  ✗ user_info_dirty 分片表缺失（期望 user_info_dirty_0..$(( ${USER_INFO_DIRTY_SHARDS:-4} - 1 ))）"
   failed=1
 fi
 
