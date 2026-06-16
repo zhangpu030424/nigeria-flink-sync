@@ -181,6 +181,15 @@ DDL：`sql/ddl/user_info_dirty.sql` + `user_info_dirty_enqueue.sql`（`deploy-so
 
 每路 CDC 须**独立单值** `server-id`（默认 `5401/5411/5421/5431`，对应 `CDC_SERVER_ID_UI_DIRTY_0..3`）；关闭 incremental snapshot 时勿对单表写 `5401-5404` 范围（会 `NumberFormatException`）。
 
+**分片上线验证**（`git pull` + deploy + 重提 Job 后）：
+
+```bash
+./scripts/verify-user-info-dirty-shards.sh --probe   # DDL + 数据 + 入队路由 + Flink 并行度
+./scripts/verify-user-info-incr.sh <user_id> --e2e   # 单用户端到端
+bash scripts/verify-user-info-reconcile.sh --sample 200
+mysql ... nigeria_backend < sql/verify/user_info_dirty_shards_check.sql
+```
+
 ### `RELOAD or FLUSH_TABLES privilege`（CDC 启动失败）
 
 日志：`Access denied; you need RELOAD or FLUSH_TABLES`。云 RDS 默认不给 `flink_cdc` 锁表权限。

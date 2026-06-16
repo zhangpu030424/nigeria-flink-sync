@@ -18,3 +18,4 @@ source scripts/lib/user-info-dirty.sh
 
 migrate_user_info_dirty_to_shards
 echo ">> 完成。请 cancel 旧 sink_user_info Job 后重提增量。"
+echo ">> 验证: ./scripts/verify-user-info-dirty-shards.sh --probe"

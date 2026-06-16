@@ -232,6 +232,7 @@ if [[ "$E2E" == true ]]; then
   exit 0
 fi
 
+echo "分片验证:   ./scripts/verify-user-info-dirty-shards.sh [--probe]"
 echo "端到端探测: bash scripts/verify-user-info-incr.sh ${SRC_UID} --e2e"
 echo "详细 SQL: mysql ... --init-command=\"SET @uid=${SRC_UID}\" < sql/verify/user_info_incr_expected.sql"
 echo "批量抽样: mysql ... < sql/verify/user_info_incr_sample_check.sql"
