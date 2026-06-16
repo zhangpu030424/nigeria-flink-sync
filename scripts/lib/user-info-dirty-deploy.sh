@@ -59,7 +59,7 @@ deploy_user_info_dirty_sql() {
   echo ">> user_info_dirty SQL（${user}@${SOURCE_MYSQL_HOST}）"
   _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty.sql
   _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty_enqueue.sql
-  migrate_user_info_dirty_to_shards
+  migrate_user_info_dirty_to_shards || return 1
 }
 
 _verify_user_info_dirty_objects() {
@@ -94,7 +94,7 @@ _verify_user_info_dirty_objects() {
 ensure_user_info_dirty_deploy() {
   if user_info_dirty_procs_ok && user_info_dirty_triggers_ok && user_info_dirty_shards_ok; then
     echo ">> user_info_dirty 已就绪，跳过 DDL 部署（仍检查旧单表 → 分片迁移）"
-    migrate_user_info_dirty_to_shards
+    migrate_user_info_dirty_to_shards || return 1
     _verify_user_info_dirty_objects
     return 0
   fi
