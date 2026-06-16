@@ -61,14 +61,11 @@ fi
 echo "[2] Flink: ${job_line:-无 RUNNING 的 sink_user_info Job}"
 echo
 
-dirty_tbl=$(mysql_q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'user_info_dirty_%' AND table_name NOT LIKE '%enqueue%'" | tr -d '[:space:]')
+dirty_tbl=$(mysql_q "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='user_info_dirty'" | tr -d '[:space:]')
 trg_cnt=$(mysql_q "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema=DATABASE() AND trigger_name LIKE 'trg_user_info_dirty_%'" | tr -d '[:space:]')
-dirty_cnt=$(mysql_q "SELECT COUNT(*) FROM user_info_dirty" 2>/dev/null | tr -d '[:space:]')
-dirty_cnt=${dirty_cnt:-$(mysql_q "SELECT SUM(c) FROM (SELECT COUNT(*) c FROM user_info_dirty_0 UNION ALL SELECT COUNT(*) FROM user_info_dirty_1 UNION ALL SELECT COUNT(*) FROM user_info_dirty_2 UNION ALL SELECT COUNT(*) FROM user_info_dirty_3) t" | tr -d '[:space:]')}
-in_dirty=$(mysql_q "SELECT COUNT(*) FROM user_info_dirty WHERE user_id=${SRC_UID}" 2>/dev/null | tr -d '[:space:]')
-in_dirty=${in_dirty:-0}
-shard_tbl="user_info_dirty_$((SRC_UID % 4))"
-echo "[3] 脏队列: 分片表=${dirty_tbl:-ERR}/4, TRIGGER=${trg_cnt:-ERR}(≥14), 总行=${dirty_cnt:-?}, 本用户=${in_dirty:-?}（shard=${shard_tbl}）"
+dirty_cnt=$(mysql_q "SELECT COUNT(*) FROM user_info_dirty" | tr -d '[:space:]')
+in_dirty=$(mysql_q "SELECT COUNT(*) FROM user_info_dirty WHERE user_id=${SRC_UID}" | tr -d '[:space:]')
+echo "[3] 脏队列: 表=${dirty_tbl:-ERR}, TRIGGER=${trg_cnt:-ERR}(≥14), 总行=${dirty_cnt:-?}, 本用户=${in_dirty:-?}"
 echo
 
 # ---------- 静态对账：bundle 期望 vs 目标（多列输出，避免 CONCAT 内嵌 TAB 解析失败）----------
@@ -153,7 +150,7 @@ echo
 echo "=== 验证结论 ==="
 infra_blockers=()
 realtime_blockers=()
-[[ "${dirty_tbl:-0}" -lt 4 ]] && infra_blockers+=("user_info_dirty 分片表不足 4 张")
+[[ "${dirty_tbl:-0}" != "1" ]] && infra_blockers+=("user_info_dirty 表缺失")
 [[ "${trg_cnt:-0}" -lt 14 ]] && infra_blockers+=("TRIGGER 不足")
 [[ "$SINK_ELIGIBLE" == "no" ]] && infra_blockers+=("bundle 无数据")
 [[ -z "$job_line" ]] && realtime_blockers+=("无 RUNNING Job（无法保证后续实时同步）")
@@ -192,12 +189,12 @@ if [[ "$E2E" == true ]]; then
     exit 1
   fi
   if [[ "${in_dirty:-0}" == "0" ]]; then
-    echo "WARN: 用户不在 dirty，先 INSERT 到分片 ${shard_tbl}..."
-    mysql_src -e "INSERT INTO ${shard_tbl} (user_id, updated_at) VALUES (${SRC_UID}, CURRENT_TIMESTAMP(3));" || true
+    echo "WARN: 用户不在 dirty，先 INSERT..."
+    mysql_src -e "INSERT INTO user_info_dirty (user_id, updated_at) VALUES (${SRC_UID}, CURRENT_TIMESTAMP(3));" || true
   else
-    mysql_src -e "UPDATE ${shard_tbl} SET updated_at = CURRENT_TIMESTAMP(3) WHERE user_id = ${SRC_UID};"
+    mysql_src -e "UPDATE user_info_dirty SET updated_at = CURRENT_TIMESTAMP(3) WHERE user_id = ${SRC_UID};"
   fi
-  dirty_ts=$(mysql_q "SELECT updated_at FROM ${shard_tbl} WHERE user_id=${SRC_UID} LIMIT 1")
+  dirty_ts=$(mysql_q "SELECT updated_at FROM user_info_dirty WHERE user_id=${SRC_UID} LIMIT 1;")
   echo "脏队列 updated_at=${dirty_ts}"
   before_upd="$TGT_UPD"
   before_fn="$TGT_FN"
@@ -226,13 +223,12 @@ if [[ "$E2E" == true ]]; then
   if [[ "$e2e_pass" != true ]]; then
     echo "FAIL: ${POLL_SECS}s 内目标未更新"
     echo "  → Web UI 看 Records Sent 是否增加"
-    echo "  → 脏队列 ${dirty_cnt} 行；分片 CDC 后 Web UI 应见 4 路 Source 或 parallelism=${FLINK_PARALLELISM_USER_INFO:-4}"
+    echo "  → 脏队列 ${dirty_cnt} 行 + 并行度 1 时可能要等更久，或 CDC_STARTUP_MODE=latest-offset 重提"
     exit 2
   fi
   exit 0
 fi
 
-echo "分片验证:   ./scripts/verify-user-info-dirty-shards.sh [--probe]"
 echo "端到端探测: bash scripts/verify-user-info-incr.sh ${SRC_UID} --e2e"
 echo "详细 SQL: mysql ... --init-command=\"SET @uid=${SRC_UID}\" < sql/verify/user_info_incr_expected.sql"
 echo "批量抽样: mysql ... < sql/verify/user_info_incr_sample_check.sql"

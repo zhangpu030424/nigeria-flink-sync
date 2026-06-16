@@ -2,11 +2,7 @@
 # user_info 脏队列：存储过程 + TRIGGER 部署与校验
 # shellcheck shell=bash
 
-# shellcheck source=scripts/lib/user-info-dirty.sh
-source "$(dirname "${BASH_SOURCE[0]}")/user-info-dirty.sh"
-
 USER_INFO_DIRTY_REQUIRED_PROCS=(
-  sp_user_info_dirty_upsert_one
   sp_user_info_dirty_enqueue
   sp_user_info_dirty_enqueue_bvn
   sp_user_info_dirty_enqueue_adid
@@ -38,14 +34,6 @@ user_info_dirty_triggers_ok() {
   [[ "$(user_info_dirty_trigger_count)" -ge 14 ]]
 }
 
-user_info_dirty_shards_ok() {
-  local shards="${USER_INFO_DIRTY_SHARDS:-4}" s
-  for ((s = 0; s < shards; s++)); do
-    table_exists "user_info_dirty_${s}" || return 1
-  done
-  return 0
-}
-
 _mysql_source_file_as() {
   local user="$1" pass="$2" file="$3"
   local saved_user="${SOURCE_MYSQL_USER}" saved_pass="${SOURCE_MYSQL_PASSWORD}"
@@ -57,9 +45,8 @@ _mysql_source_file_as() {
 deploy_user_info_dirty_sql() {
   local user="${1:-$SOURCE_MYSQL_USER}" pass="${2:-$SOURCE_MYSQL_PASSWORD}"
   echo ">> user_info_dirty SQL（${user}@${SOURCE_MYSQL_HOST}）"
-  _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty.sql
   _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty_enqueue.sql
-  migrate_user_info_dirty_to_shards || return 1
+  _mysql_source_file_as "$user" "$pass" sql/ddl/user_info_dirty.sql
 }
 
 _verify_user_info_dirty_objects() {
@@ -81,20 +68,13 @@ _verify_user_info_dirty_objects() {
     echo "  ✗ user_info_dirty TRIGGER 不足（当前 ${trg_cnt:-0}，期望≥14）"
     failed=1
   fi
-  if user_info_dirty_shards_ok; then
-    echo "  ✓ user_info_dirty 分片表 0..$(( ${USER_INFO_DIRTY_SHARDS:-4} - 1 ))"
-  else
-    echo "  ✗ user_info_dirty 分片表不完整（期望 user_info_dirty_0..$(( ${USER_INFO_DIRTY_SHARDS:-4} - 1 ))）"
-    failed=1
-  fi
   return "$failed"
 }
 
 # 自动部署：已齐全则跳过；否则先用 flink_cdc，失败再尝试 SOURCE_MYSQL_ROOT_*（可选）
 ensure_user_info_dirty_deploy() {
-  if user_info_dirty_procs_ok && user_info_dirty_triggers_ok && user_info_dirty_shards_ok; then
-    echo ">> user_info_dirty 已就绪，跳过 DDL 部署（仍检查旧单表 → 分片迁移）"
-    migrate_user_info_dirty_to_shards || return 1
+  if user_info_dirty_procs_ok && user_info_dirty_triggers_ok; then
+    echo ">> user_info_dirty 存储过程 + TRIGGER 已就绪，跳过"
     _verify_user_info_dirty_objects
     return 0
   fi

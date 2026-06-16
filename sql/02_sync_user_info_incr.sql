@@ -1,8 +1,9 @@
--- 增量 user_info：4 路 CDC user_info_dirty_{0..3} + UNION + bundle Lookup
--- 分片键 user_id % 4；每片独立 server-id → Flink 可规划到 parallelism=4
+-- 增量 user_info：单路 CDC user_info_dirty + bundle Lookup
 -- dirty 表 PK=user_id，TRIGGER debounce 后 CDC 多为 UPDATE，不能用 TUMBLE 窗口（仅支持 append-only）
 -- 去重：源库 sp_user_info_dirty_enqueue* debounce + 本 Job mini-batch
--- 前置: ./scripts/deploy-source-ddl.sh（含分片迁移）
+-- info_json 在 MySQL user_info_incr_bundle_lookup 组装（与宽表 JSON 结构一致，固定全部 key）
+-- Flink 仅：id_number token/UDF 兜底 + emergency_contacts 内明文手机号 VT 兜底
+-- 前置: ./scripts/deploy-source-ddl.sh
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.udf.VtTokenizeEmergencyContactsFunction';
 
@@ -16,7 +17,7 @@ SET 'execution.checkpointing.min-pause' = '120s';
 SET 'execution.checkpointing.tolerable-failed-checkpoints' = '10';
 SET 'execution.checkpointing.unaligned' = 'true';
 
-CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_0 (
+CREATE TABLE IF NOT EXISTS cdc_user_info_dirty (
     user_id BIGINT,
     updated_at TIMESTAMP(3),
     proc_time AS PROCTIME(),
@@ -28,9 +29,9 @@ CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_0 (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_info_dirty_0',
+    'table-name' = 'user_info_dirty',
     'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DIRTY_0}',
+    'server-id' = '${CDC_SERVER_ID_UI_DIRTY}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'false',
@@ -38,84 +39,6 @@ CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_0 (
     'debezium.snapshot.locking.mode' = 'none',
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
-
-CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_1 (
-    user_id BIGINT,
-    updated_at TIMESTAMP(3),
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_info_dirty_1',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DIRTY_1}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'false',
-    'debezium.snapshot.mode' = 'schema_only',
-    'debezium.snapshot.locking.mode' = 'none',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_2 (
-    user_id BIGINT,
-    updated_at TIMESTAMP(3),
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_info_dirty_2',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DIRTY_2}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'false',
-    'debezium.snapshot.mode' = 'schema_only',
-    'debezium.snapshot.locking.mode' = 'none',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TABLE IF NOT EXISTS cdc_user_info_dirty_3 (
-    user_id BIGINT,
-    updated_at TIMESTAMP(3),
-    proc_time AS PROCTIME(),
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'mysql-cdc',
-    'hostname' = '${SOURCE_MYSQL_HOST}',
-    'port' = '${SOURCE_MYSQL_PORT}',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_info_dirty_3',
-    'server-time-zone' = 'Africa/Lagos',
-    'server-id' = '${CDC_SERVER_ID_UI_DIRTY_3}',
-    'scan.startup.mode' = '${CDC_STARTUP_MODE}',
-    'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
-    'scan.incremental.snapshot.enabled' = 'false',
-    'debezium.snapshot.mode' = 'schema_only',
-    'debezium.snapshot.locking.mode' = 'none',
-    'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
-);
-
-CREATE TEMPORARY VIEW v_user_info_dirty_triggers AS
-SELECT user_id, proc_time FROM cdc_user_info_dirty_0 WHERE user_id IS NOT NULL
-UNION ALL
-SELECT user_id, proc_time FROM cdc_user_info_dirty_1 WHERE user_id IS NOT NULL
-UNION ALL
-SELECT user_id, proc_time FROM cdc_user_info_dirty_2 WHERE user_id IS NOT NULL
-UNION ALL
-SELECT user_id, proc_time FROM cdc_user_info_dirty_3 WHERE user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     user_id BIGINT,
@@ -174,7 +97,7 @@ FROM (
         ) AS id_number,
         COALESCE(TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))), '') AS full_name,
         vt_tokenize_emergency_contacts(COALESCE(b.info_json, '{}')) AS info_json
-    FROM v_user_info_dirty_triggers AS t
+    FROM cdc_user_info_dirty AS t
     INNER JOIN dim_user_info_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.user_id = t.user_id
 ) AS e
 WHERE (e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = '')

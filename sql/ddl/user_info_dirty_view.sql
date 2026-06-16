@@ -1,4 +1,0 @@
--- 脏队列只读视图（UNION 4 分片）— 勿直接 mysql < 本文件
--- user_info_dirty 若仍是基表，DROP VIEW 会报 ERROR 1347
--- 请用: ./scripts/migrate-user-info-dirty-shards.sh
---   或 deploy-source-ddl.sh / sync-incr-auto（内部 migrate_user_info_dirty_to_shards）

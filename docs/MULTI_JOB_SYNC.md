@@ -152,7 +152,7 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | Job | CDC 源表 | VT |
 |-----|---------|-----|
 | user | `user` + `adjust_callback_record` | 运行时 vt_tokenize |
-| user_info | **`user_info_dirty_{0..3}` 四路 CDC** + UNION + Lookup（源表 TRIGGER 入队） | id_number |
+| user_info | **`user_info_dirty` 单路 CDC** + Lookup（源表 TRIGGER 入队） | id_number |
 | user_bankcard | `user_bank_info` + `vt_token_cache` | bank_account |
 | user_product | `user_order` → Lookup 最新 product | 无 |
 | application | 多源 CDC（见下）+ Lookup | mobile/gaid/bank/id_number |
@@ -160,9 +160,9 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 
 增量 Job 启动前由 **`./scripts/deploy-source-ddl.sh`** 自动部署（`sync-migrate-auto.sh` 已内置）。
 
-**user_info 增量（脏队列方案 B，4 分片）**
+**user_info 增量（脏队列方案 B）**
 
-Flink **CDC 四张分片表** `user_info_dirty_0..3`（`user_id % 4`）；`user_info_dirty` 为只读 UNION 视图供对账。下列源表变更时由 **MySQL TRIGGER** 写入对应分片：
+Flink **只 CDC 一张表** `user_info_dirty`；下列源表变更时由 **MySQL TRIGGER** 写入 `user_id`，Flink 收到后 Lookup 组装整行：
 
 | TRIGGER 源表 | 影响字段 |
 |-------------|----------|
@@ -175,20 +175,11 @@ Flink **CDC 四张分片表** `user_info_dirty_0..3`（`user_id % 4`）；`user_
 | `vt_token_cache`（emergency_contact） | info.emergency_contacts[].mobile |
 | `adjust_callback_record` | install_source |
 
-DDL：`sql/ddl/user_info_dirty.sql` + `user_info_dirty_enqueue.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。从旧单表升级时脚本会自动迁移行并建视图。
+DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TRIGGER 须 root/DBA 权限**）。
 
-组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 **`FLINK_PARALLELISM_USER_INFO_INCR=4`**（与 `USER_INFO_DIRTY_SHARDS=4` 对齐），Lookup + VT UDF 较重。
+组装：`user_info_incr_bundle_lookup` **单次 JDBC Lookup**（勿 9 路串行 Lookup）。建议 **`FLINK_PARALLELISM_USER_INFO=8`**（或 `FLINK_PARALLELISM_INCR` 的 2 倍），Lookup + VT UDF 比其它增量 Job 更重。
 
-每路 CDC 须**独立单值** `server-id`（默认 `5401/5411/5421/5431`，对应 `CDC_SERVER_ID_UI_DIRTY_0..3`）；关闭 incremental snapshot 时勿对单表写 `5401-5404` 范围（会 `NumberFormatException`）。
-
-**分片上线验证**（`git pull` + deploy + 重提 Job 后）：
-
-```bash
-./scripts/verify-user-info-dirty-shards.sh --probe   # DDL + 数据 + 入队路由 + Flink 并行度
-./scripts/verify-user-info-incr.sh <user_id> --e2e   # 单用户端到端
-bash scripts/verify-user-info-reconcile.sh --sample 200
-mysql ... nigeria_backend < sql/verify/user_info_dirty_shards_check.sql
-```
+`CDC_SERVER_ID_UI_DIRTY` 须为**单值**（如 `5401`）；脏队列 CDC 关闭 incremental snapshot 时写 `5401-5404` 会报 `NumberFormatException`。
 
 ### `RELOAD or FLUSH_TABLES privilege`（CDC 启动失败）
 
