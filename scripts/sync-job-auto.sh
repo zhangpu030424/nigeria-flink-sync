@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 部署校验：日志里应出现本版本号；若仍见「等待 Job … 已结束」说明服务器脚本未更新
-SYNC_SCRIPT_VERSION="monitor-v4-count-deficit-job-id"
+SYNC_SCRIPT_VERSION="monitor-v5-migrated-absolute"
 
 JOB_KEY="${1:-}"
 shift || true
@@ -70,6 +70,13 @@ fi
 source scripts/lib/load-project-env.sh
 load_project_env "$(pwd)"
 
+USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
+# shellcheck source=scripts/lib/sync-monitor-sql.sh
+source scripts/lib/sync-monitor-sql.sh
+SRC_CNT_SQL=$(expand_monitor_sql "$SRC_CNT_SQL")
+TGT_CNT_SQL=$(expand_monitor_sql "$TGT_CNT_SQL")
+MONITOR_COUNT_MODE=$(resolve_monitor_count_mode "$TGT_CNT_SQL")
+
 JM="${FLINK_JOBMANAGER_CONTAINER:-nigeria-flink-jobmanager}"
 LOG_DIR="logs"
 LOG_FILE="${LOG_DIR}/sync-${JOB_KEY}-auto.log"
@@ -119,10 +126,14 @@ bulk_count_reached_inner() {
   fi
 }
 
-# 全量达标：宽表 src 条；目标库已有数据时按「基线 + 宽表 ≈ 目标总数」
+# 全量达标：absolute=目标迁移口径≈宽表；baseline_delta=基线+宽表≈目标总数（id_mapping 等）
 bulk_count_reached() {
   local src="$1"
   local tgt="$2"
+  if [[ "${MONITOR_COUNT_MODE}" == "absolute" ]]; then
+    bulk_count_reached_inner "$src" "$tgt"
+    return $?
+  fi
   if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
     local expected=$((TARGET_BASELINE + src))
     bulk_count_reached_inner "$expected" "$tgt"
@@ -136,7 +147,9 @@ count_match_reason() {
   local tgt="$2"
   local expect_cnt="$src"
   local prefix=""
-  if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+  if [[ "${MONITOR_COUNT_MODE}" == "absolute" ]]; then
+    prefix="迁移口径目标≈宽表${src}="
+  elif [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
     expect_cnt=$((TARGET_BASELINE + src))
     prefix="基线${TARGET_BASELINE}+宽表${src}="
   fi
@@ -150,6 +163,12 @@ count_match_reason() {
 }
 
 capture_target_baseline() {
+  if [[ "${MONITOR_COUNT_MODE}" == "absolute" ]]; then
+    TARGET_BASELINE=""
+    log "监控口径=absolute（目标计数 SQL 只含本迁移切片；期望 目标≈宽表，不用基线加法）"
+    log "目标计数 SQL: ${TGT_CNT_SQL}"
+    return 0
+  fi
   if [[ "${SYNC_TARGET_BASELINE_AUTO}" != "1" ]]; then
     TARGET_BASELINE=""
     return 0
@@ -170,6 +189,7 @@ capture_target_baseline() {
   TARGET_BASELINE="$cnt"
   echo "$cnt" > "$TARGET_BASELINE_FILE"
   log "目标库基线=${TARGET_BASELINE}（全量开始前快照；期望目标≈基线+宽表）"
+  log "目标计数 SQL: ${TGT_CNT_SQL}"
 }
 
 verify_staging_target_count() {
@@ -326,12 +346,12 @@ monitor_bulk_until_stable() {
     rate="n/a"
     reached=0
     if [[ "$src_cnt" =~ ^[0-9]+$ && "$tgt_cnt" =~ ^[0-9]+$ && "$src_cnt" -gt 0 ]]; then
-      if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+      if [[ "${MONITOR_COUNT_MODE}" == "absolute" || -z "$TARGET_BASELINE" || ! "$TARGET_BASELINE" =~ ^[0-9]+$ ]]; then
+        progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
+      else
         local synced=$((tgt_cnt - TARGET_BASELINE))
         (( synced < 0 )) && synced=0
         progress=$(awk "BEGIN {printf \"%.2f\", $synced * 100 / $src_cnt}")
-      else
-        progress=$(awk "BEGIN {printf \"%.2f\", $tgt_cnt * 100 / $src_cnt}")
       fi
       if bulk_count_reached "$src_cnt" "$tgt_cnt"; then
         reached=1
@@ -352,7 +372,9 @@ monitor_bulk_until_stable() {
 
     local match_hint="需一致"
     [[ "$SYNC_REQUIRE_EXACT_COUNT" != "1" ]] && match_hint="≥${SYNC_THRESHOLD_PCT}%"
-    if [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ && "$src_cnt" =~ ^[0-9]+$ ]]; then
+    if [[ "${MONITOR_COUNT_MODE}" == "absolute" && "$src_cnt" =~ ^[0-9]+$ ]]; then
+      log "[${phase_label}] #${round} 宽表=${src_cnt} 目标=${tgt_cnt} 期望≈${src_cnt} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
+    elif [[ -n "$TARGET_BASELINE" && "$TARGET_BASELINE" =~ ^[0-9]+$ && "$src_cnt" =~ ^[0-9]+$ ]]; then
       local synced=$((tgt_cnt - TARGET_BASELINE))
       (( synced < 0 )) && synced=0
       local expected=$((TARGET_BASELINE + src_cnt))
@@ -562,7 +584,7 @@ fi
 resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
 BULK_START_MS_ARG="$BULK_START_MS"
 log "========== 全量 ${FULL_SQL} =========="
-log "全量监控: ${SYNC_SCRIPT_VERSION} 稳定=${STABLE_ROUNDS}轮 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100} 目标基线=${SYNC_TARGET_BASELINE_AUTO}"
+log "全量监控: ${SYNC_SCRIPT_VERSION} 口径=${MONITOR_COUNT_MODE} 稳定=${STABLE_ROUNDS}轮 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100} offset=${USER_ID_OFFSET}"
 log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
 capture_target_baseline
 

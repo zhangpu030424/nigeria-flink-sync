@@ -94,6 +94,23 @@ bash scripts/verify-user-info-incr.sh 211038
 
 VT 表全量两阶段：先有 token → 无 token 运行时 `/v2t` → 增量 Lookup+UDF。
 
+### 全量监控口径（`sync-job-auto.sh` / `monitor-sync.sh`）
+
+计数 SQL 在 `config/sync-jobs.conf` 的「源库计数 SQL / 目标库计数 SQL」列。
+
+| 表 | 宽表（源） | 目标（迁移切片） | 监控模式 |
+|----|-----------|------------------|----------|
+| user | `DISTINCT(mobile_token,app_code)` 有 token | `user_id > USER_ID_OFFSET` | **absolute**（目标≈宽表） |
+| user_info | 宽表行数 | `user_id > offset` | absolute |
+| user_bankcard | `DISTINCT(user_id,bank_account_token)` | `group_user_id > offset` | absolute |
+| user_product / application | 宽表行数 | `group_user_id > offset` | absolute |
+| loan | 宽表行数 | `application_no LIKE 'ng0%'` | absolute |
+| id_mapping | 宽表行数 | 全表 | **baseline_delta**（基线+宽表≈总数） |
+
+**为何不用「全表总数 = 基线 + 宽表」：** 目标库常有存量，且 UPSERT 主键重叠时只 UPDATE 不增行（如 `user` 的 `(mobile,app_id,closed_time)`）。迁移表改为只数本迁移写入的行，直接与宽表对比。
+
+日志里应出现 `monitor-v5-migrated-absolute 口径=absolute`；`user` 全量达标时 `user_id > 1e8` 应等于宽表 distinct 数。
+
 仅宽表已建好、且 **沿用同一次** `bulk-start-ms`：
 
 ```bash

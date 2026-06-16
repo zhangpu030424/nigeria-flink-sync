@@ -22,16 +22,29 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# shellcheck disable=SC1091
-set -a
-while IFS= read -r line || [[ -n "$line" ]]; do
-  line="${line%%#*}"
-  line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  [[ -z "$line" ]] && continue
-  [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
-  export "$line"
-done < .env
-set +a
+# shellcheck source=scripts/lib/load-project-env.sh
+source scripts/lib/load-project-env.sh
+load_project_env "$(pwd)"
+USER_ID_OFFSET="${USER_ID_OFFSET:-100000000}"
+# shellcheck source=scripts/lib/sync-monitor-sql.sh
+source scripts/lib/sync-monitor-sql.sh
+
+SRC_CNT_SQL=""
+TGT_CNT_SQL=""
+MONITOR_COUNT_MODE="absolute"
+if mapfile -t _sqls < <(lookup_job_monitor_sql "$TABLE"); then
+  SRC_CNT_SQL="${_sqls[0]:-}"
+  TGT_CNT_SQL="${_sqls[1]:-}"
+  MONITOR_COUNT_MODE=$(resolve_monitor_count_mode "$TGT_CNT_SQL")
+fi
+if [[ -z "$TGT_CNT_SQL" ]]; then
+  TGT_CNT_SQL="SELECT COUNT(*) FROM \`${TABLE}\`;"
+  MONITOR_COUNT_MODE="absolute"
+fi
+if [[ -z "$SRC_CNT_SQL" ]]; then
+  SRC_CNT_SQL="SELECT COUNT(*) FROM \`${TABLE}\`;"
+fi
+
 FLINK_WEB_PORT="${FLINK_WEB_PORT:-8089}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
 SOURCE_MYSQL_PORT="${SOURCE_MYSQL_PORT:-3306}"
@@ -48,12 +61,12 @@ mysql_q() {
 
 count_target() {
   mysql_q "$TARGET_MYSQL_HOST" "$TARGET_MYSQL_PORT" "$TARGET_MYSQL_USER" \
-    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "SELECT COUNT(*) FROM \`${TABLE}\`;"
+    "$TARGET_MYSQL_PASSWORD" "$TARGET_MYSQL_DATABASE" "$TGT_CNT_SQL"
 }
 
 count_source() {
   mysql_q "$SOURCE_MYSQL_HOST" "$SOURCE_MYSQL_PORT" "$SOURCE_MYSQL_USER" \
-    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "SELECT COUNT(*) FROM \`${TABLE}\`;"
+    "$SOURCE_MYSQL_PASSWORD" "$SOURCE_MYSQL_DATABASE" "$SRC_CNT_SQL"
 }
 
 flink_records_out() {
@@ -68,9 +81,11 @@ log_line() {
 }
 
 log_line "========================================"
-log_line "[$(date '+%Y-%m-%d %H:%M:%S')] 监控开始 表=${TABLE} 间隔=${INTERVAL}s"
+log_line "[$(date '+%Y-%m-%d %H:%M:%S')] 监控开始 表=${TABLE} 间隔=${INTERVAL}s 口径=${MONITOR_COUNT_MODE}"
 log_line "源库: ${SOURCE_MYSQL_USER}@${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}"
 log_line "目标: ${TARGET_MYSQL_USER}@${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}"
+log_line "源计数 SQL: ${SRC_CNT_SQL}"
+log_line "目标计数 SQL: ${TGT_CNT_SQL}"
 [[ -n "$JOB_ID" ]] && log_line "Flink Job: ${JOB_ID}  Web UI: http://127.0.0.1:${FLINK_WEB_PORT}"
 log_line "日志: ${LOG_FILE}  (Ctrl+C 停止)"
 
@@ -121,7 +136,11 @@ while true; do
 
   flink_out=$(flink_records_out)
 
-  log_line "[${now}] #${round} 目标=${target_cnt} 源=${source_cnt} 进度=${progress} 本段+${delta} 速率≈${rate}条/分钟 Flink写出=${flink_out}"
+  if [[ "${MONITOR_COUNT_MODE}" == "absolute" && "$source_cnt" =~ ^[0-9]+$ ]]; then
+    log_line "[${now}] #${round} 宽表=${source_cnt} 目标=${target_cnt} 期望≈${source_cnt} 进度=${progress} 本段+${delta} 速率≈${rate}条/分钟 Flink写出=${flink_out}"
+  else
+    log_line "[${now}] #${round} 目标=${target_cnt} 源=${source_cnt} 进度=${progress} 本段+${delta} 速率≈${rate}条/分钟 Flink写出=${flink_out}"
+  fi
 
   prev_target="$target_cnt"
   prev_ts=$now_ts
