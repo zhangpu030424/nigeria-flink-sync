@@ -82,6 +82,7 @@ GROUP BY order_no, current_period;
 CREATE OR REPLACE VIEW user_order_loan_lookup AS
 SELECT CAST(id AS SIGNED) AS id,
        CAST(order_no AS CHAR) AS order_no,
+       CAST(app_code AS SIGNED) AS app_code,
        CAST(order_time AS DATETIME(3)) AS order_time,
        CAST(disburse_time AS DATETIME(3)) AS disburse_time,
        CAST(settled_time AS DATETIME(3)) AS settled_time,

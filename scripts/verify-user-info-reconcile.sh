@@ -45,7 +45,8 @@ SELECT
   (SELECT COUNT(*) FROM user_info_dirty) AS dirty_cnt,
   (SELECT COUNT(*) FROM user_info_incr_bundle_lookup b
    INNER JOIN user_info_sync_staging s ON s.user_id = b.user_id
-   WHERE TRIM(COALESCE(s.full_name,'')) <> TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,'')))
+   WHERE TRIM(COALESCE(s.full_name,'')) COLLATE utf8mb4_unicode_ci
+       <> TRIM(CONCAT(COALESCE(b.first_name,''), ' ', COALESCE(b.sur_name,''))) COLLATE utf8mb4_unicode_ci
   ) AS staging_bundle_mismatch;
 " | awk -F'\t' '{printf "  staging=%s dirty=%s staging/bundle不一致=%s\n", $1,$2,$3}'
 

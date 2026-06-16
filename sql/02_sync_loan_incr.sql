@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS dim_installment (
 CREATE TABLE IF NOT EXISTS dim_user_order (
     id BIGINT,
     order_no STRING,
+    app_code BIGINT,
     order_time TIMESTAMP(3),
     disburse_time TIMESTAMP(3),
     settled_time TIMESTAMP(3),
@@ -175,8 +176,12 @@ CREATE TABLE IF NOT EXISTS sink_loan (
 
 INSERT INTO sink_loan
 SELECT
-    i.installment_order_no,
-    o.order_no,
+    CONCAT(
+        'ng-', o.order_no, '-',
+        LPAD(CAST(COALESCE(i.current_period, 1) AS STRING), 2, '0'),
+        LPAD(CAST(CAST(0 AS TINYINT) AS STRING), 3, '0')
+    ),
+    CONCAT('ng0', CAST(o.app_code AS STRING), '-', o.order_no),
     CAST(COALESCE(i.current_period, 1) AS TINYINT),
     CAST(0 AS TINYINT),
     CAST(COALESCE(CAST(o.disburse_time AS DATE), CAST(o.order_time AS DATE), CAST(i.create_time AS DATE)) AS DATE),
@@ -218,6 +223,6 @@ INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i ON i.id = t.in
 INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF t.proc_time AS rp
     ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
-WHERE i.installment_order_no IS NOT NULL AND TRIM(i.installment_order_no) <> ''
+WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
   AND o.risk_order_status IS NOT NULL
   AND CAST(o.risk_order_status AS INT) NOT IN (0, 2, 4, 6, 8);

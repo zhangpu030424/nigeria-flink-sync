@@ -36,7 +36,8 @@ SELECT 'staging_vs_bundle' AS layer,
        TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))) AS bundle_full_name,
        CASE
            WHEN s.user_id IS NULL THEN 'no_staging_row'
-           WHEN TRIM(COALESCE(s.full_name, '')) = TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, '')))
+           WHEN TRIM(COALESCE(s.full_name, '')) COLLATE utf8mb4_unicode_ci
+               = TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))) COLLATE utf8mb4_unicode_ci
                THEN 'match'
            ELSE 'mismatch'
        END AS full_name_check

@@ -296,6 +296,7 @@ WHERE t.rn = 1;
 ALTER TABLE user_product_sync_staging ADD PRIMARY KEY (user_id, product_id);
 
 -- ---------- 5. application_sync_staging ----------
+-- application_no = ng0{app_code}-{order_no}（如 app_code=1 → ng01-xxx）；sn 仍为 order_no
 -- device_ids / user_bank_info 可能一对多，子查询去重保证每单 o.id 一行
 DROP TABLE IF EXISTS application_sync_staging;
 
@@ -357,7 +358,7 @@ SELECT base.id,
        base.repayment_plan_json
 FROM (
          SELECT o.id,
-                o.order_no AS application_no,
+                CONCAT('ng0', TRIM(CAST(o.app_code AS CHAR)), '-', o.order_no) AS application_no,
                 o.order_no AS sn,
                 o.user_id,
                 o.app_code,
@@ -508,6 +509,7 @@ FROM (
 ALTER TABLE application_sync_staging ADD PRIMARY KEY (id);
 
 -- ---------- 6. loan_sync_staging ----------
+-- loan_no = ng-{sn}-{period(2位)}{roll_sequence(3位)}，sn=order_no；例 ng-2605131800000001-01000
 -- 显式列类型，避免 CTAS 推断 UNSIGNED 导致 Flink JDBC 读成 BigInteger
 DROP TABLE IF EXISTS loan_sync_staging;
 
@@ -537,8 +539,12 @@ CREATE TABLE loan_sync_staging (
 
 INSERT INTO loan_sync_staging
 SELECT CAST(i.id AS SIGNED),
-       i.installment_order_no AS loan_no,
-       o.order_no AS application_no,
+       CONCAT(
+               'ng-', o.order_no, '-',
+               LPAD(CAST(COALESCE(i.current_period, 1) AS CHAR), 2, '0'),
+               LPAD(CAST(0 AS CHAR), 3, '0')
+       ) AS loan_no,
+       CONCAT('ng0', TRIM(CAST(o.app_code AS CHAR)), '-', o.order_no) AS application_no,
        CAST(COALESCE(i.current_period, 1) AS SIGNED) AS period,
        CAST(0 AS SIGNED) AS roll_sequence,
        COALESCE(DATE(o.disburse_time), DATE(o.order_time), DATE(i.create_time)) AS start_date,
@@ -589,8 +595,8 @@ FROM user_order_installment i
     GROUP BY order_no, current_period
 ) ur_cb ON ur_cb.order_no = o.order_no
     AND ur_cb.current_period = i.current_period
-WHERE i.installment_order_no IS NOT NULL
-  AND TRIM(i.installment_order_no) <> ''
+WHERE o.order_no IS NOT NULL
+  AND TRIM(o.order_no) <> ''
   AND o.risk_order_status IS NOT NULL
   AND o.risk_order_status NOT IN (0, 2, 4, 6, 8);
 

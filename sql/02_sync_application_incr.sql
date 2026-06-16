@@ -437,7 +437,7 @@ SELECT
     e.risk_status
 FROM (
     SELECT
-        o.order_no AS application_no,
+        CONCAT('ng0', CAST(o.app_code AS STRING), '-', o.order_no) AS application_no,
         o.order_no AS sn,
         o.user_id + 100000000 AS user_id,
         o.user_id + 100000000 AS group_user_id,

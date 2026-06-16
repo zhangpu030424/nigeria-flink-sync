@@ -16,7 +16,8 @@ FROM (
     SELECT COUNT(*) AS mismatch_cnt
     FROM user_info_sync_staging s
              INNER JOIN user_info_incr_bundle_lookup b ON b.user_id = s.user_id
-    WHERE TRIM(COALESCE(s.full_name, '')) <> TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, '')))
+    WHERE TRIM(COALESCE(s.full_name, '')) COLLATE utf8mb4_unicode_ci
+        <> TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))) COLLATE utf8mb4_unicode_ci
 ) t;
 
 SELECT '=== 3. sink 会被过滤的用户（有 BVN 无 token，增量/全量都不写）===' AS section;
@@ -32,7 +33,8 @@ SELECT d.user_id,
        s.full_name AS staging_full_name,
        CASE
            WHEN s.user_id IS NULL THEN 'no_staging'
-           WHEN TRIM(COALESCE(s.full_name, '')) = TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, '')))
+           WHEN TRIM(COALESCE(s.full_name, '')) COLLATE utf8mb4_unicode_ci
+               = TRIM(CONCAT(COALESCE(b.first_name, ''), ' ', COALESCE(b.sur_name, ''))) COLLATE utf8mb4_unicode_ci
                THEN 'match'
            ELSE 'mismatch'
        END AS chk,
