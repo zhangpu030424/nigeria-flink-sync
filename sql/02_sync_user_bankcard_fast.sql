@@ -1,7 +1,9 @@
 -- 全量阶段 1：已有 bank_account_token；无 token 见 02_sync_user_bankcard_fast_vt_miss.sql
--- 映射: id 暂传 0；group_user_id=user_id+1亿, bank_account_number=VT token
+-- 映射: id=snowflake_id()（SNOWFLAKE_* 环境变量）；group_user_id=user_id+1亿
 --
 -- 执行: ./scripts/run-user-bankcard-fast.sh
+
+CREATE TEMPORARY FUNCTION snowflake_id AS 'com.nigeria.flink.udf.SnowflakeIdFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
-    CAST(0 AS BIGINT),
+    snowflake_id(),
     user_id + 100000000,
     COALESCE(bank_code, ''),
     bank_account_token,

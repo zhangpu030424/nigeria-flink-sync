@@ -1,5 +1,6 @@
 -- 增量 user_bankcard：多源 CDC 触发 + Lookup 组装
 -- CDC: user_bank_info, vt_token_cache(bank_account)
+-- id：增量 UPSERT 不覆盖已有雪花 id（占位 0，JDBC 按主键更新时通常不写 id 列）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';

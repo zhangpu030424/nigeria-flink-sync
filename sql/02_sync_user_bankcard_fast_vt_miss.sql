@@ -1,5 +1,6 @@
 -- 全量阶段 2：银行卡无 bank_account_token，运行时 UDF 调 VT /v2t
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+CREATE TEMPORARY FUNCTION snowflake_id AS 'com.nigeria.flink.udf.SnowflakeIdFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
@@ -53,7 +54,7 @@ SELECT
     e.is_default
 FROM (
     SELECT
-        CAST(0 AS BIGINT) AS id,
+        snowflake_id() AS id,
         s.user_id + 100000000 AS group_user_id,
         COALESCE(s.bank_code, '') AS bank_code,
         vt_tokenize(s.bank_account_raw) AS bank_account_number,

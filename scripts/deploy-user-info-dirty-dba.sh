@@ -6,6 +6,9 @@
 #   ./scripts/deploy-user-info-dirty-dba.sh
 #   SOURCE_MYSQL_ROOT_USER=root SOURCE_MYSQL_ROOT_PASSWORD=xxx ./scripts/deploy-user-info-dirty-dba.sh
 #
+# 生产曾用 user_info_dirty_0..3 分片时，先跑:
+#   ./scripts/migrate-user-info-dirty-unshard.sh
+#
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
