@@ -11,13 +11,15 @@ import java.lang.reflect.Field;
 /**
  * 全量/增量写入 user_bankcard.id 时发号（无参，每行一个新 ID）。
  * 与中台对齐：在 TaskManager 容器环境变量配置 SNOWFLAKE_*（见 .env.example）。
- * workerId 默认 = SNOWFLAKE_WORKER_ID_BASE + subtaskIndex，避免与 Java 服务 worker 段冲突。
+ * workerId 默认 = (SNOWFLAKE_WORKER_ID_BASE + subtaskIndex) % 2^workerBits（5bit 时仅 0~31）。
+ * 默认 BASE=16，留给中台 Java 0~15；并行度>16 时会回绕并打 WARN。
  */
 public class SnowflakeIdFunction extends ScalarFunction {
 
     private static final Logger LOG = LoggerFactory.getLogger(SnowflakeIdFunction.class);
 
     private static final long DEFAULT_EPOCH_MS = 1288834974657L;
+    private static final long DEFAULT_WORKER_ID_BASE = 16L;
 
     private transient SnowflakeIdGenerator generator;
 
@@ -29,7 +31,7 @@ public class SnowflakeIdFunction extends ScalarFunction {
         int datacenterIdBits = (int) parseLongEnv("SNOWFLAKE_DATACENTER_ID_BITS", 5L);
         int sequenceBits = (int) parseLongEnv("SNOWFLAKE_SEQUENCE_BITS", 12L);
 
-        int workerId = resolveWorkerId(context);
+        int workerId = resolveWorkerId(context, workerIdBits);
 
         generator = new SnowflakeIdGenerator(
                 epoch, datacenterId, workerId, workerIdBits, datacenterIdBits, sequenceBits);
@@ -44,13 +46,29 @@ public class SnowflakeIdFunction extends ScalarFunction {
         return generator.nextId();
     }
 
-    private static int resolveWorkerId(FunctionContext context) {
+    private static int resolveWorkerId(FunctionContext context, int workerIdBits) {
+        int maxWorkerId = (int) (~(-1L << workerIdBits));
         String fixed = System.getenv("SNOWFLAKE_WORKER_ID");
         if (fixed != null && !fixed.isBlank()) {
-            return (int) Long.parseLong(fixed.trim());
+            int workerId = (int) Long.parseLong(fixed.trim());
+            if (workerId < 0 || workerId > maxWorkerId) {
+                throw new IllegalArgumentException(
+                        "workerId out of range: " + workerId + ", max=" + maxWorkerId);
+            }
+            return workerId;
         }
-        int base = (int) parseLongEnv("SNOWFLAKE_WORKER_ID_BASE", 32L);
-        return base + subtaskIndex(context);
+        int base = (int) parseLongEnv("SNOWFLAKE_WORKER_ID_BASE", DEFAULT_WORKER_ID_BASE);
+        int subtask = subtaskIndex(context);
+        int raw = base + subtask;
+        if (raw > maxWorkerId) {
+            LOG.warn(
+                    "SNOWFLAKE_WORKER_ID_BASE({}) + subtask({}) > max({}); workerId wraps to {}",
+                    base,
+                    subtask,
+                    maxWorkerId,
+                    raw % (maxWorkerId + 1));
+        }
+        return raw % (maxWorkerId + 1);
     }
 
     private static int subtaskIndex(FunctionContext context) {
