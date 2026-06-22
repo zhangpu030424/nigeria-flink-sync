@@ -1,0 +1,21 @@
+# 非 Docker 部署参考；Docker 环境主要用 docker-compose.yml 中的 FLINK_PROPERTIES
+
+jobmanager.rpc.address: jobmanager
+taskmanager.numberOfTaskSlots: 16
+
+rest.port: 8089
+rest.bind-port: 8089
+
+state.backend: rocksdb
+state.checkpoints.dir: file:///tmp/flink-checkpoints
+state.savepoints.dir: file:///tmp/flink-savepoints
+state.checkpoint-storage: filesystem
+execution.checkpointing.interval: 300s
+execution.checkpointing.timeout: 1800s
+execution.checkpointing.min-pause: 120s
+execution.checkpointing.tolerable-failed-checkpoints: 10
+execution.checkpointing.unaligned: true
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+table.local-time-zone: Africa/Lagos

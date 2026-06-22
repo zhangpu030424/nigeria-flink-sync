@@ -1,0 +1,3 @@
+-- vt_token_cache.vt_type TINYINT 编码（全项目统一）
+-- 1 mobile  2 gaid_idfa  3 bank_account  4 id_number  5 emergency_contact  6 id2
+-- 视图 vt_token_cache_lookup 将 code 映射回字符串供 Flink JOIN
