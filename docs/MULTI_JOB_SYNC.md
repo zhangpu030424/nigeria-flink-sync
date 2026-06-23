@@ -162,7 +162,7 @@ mysql -h <源库> -u ... -p nigeria_backend < sql/ddl/source_all_sync_staging.sq
 | `user_product_sync_staging` | — | user_order 最新 product 聚合 |
 | `application_sync_staging` | mobile/id_number/gaid/bank VT | user_order 多表 JOIN |
 | `loan_sync_staging` | — | user_order_installment + user_order |
-| `id_mapping_sync_staging` | mobile/gaid/bank/id_number VT；device 原始 UUID | application + user + bankcard + device_ids 双向边 |
+| `id_mapping_sync_staging` | `type`=mapping_id 类型；mobile/gaid/bank/id_number 为 VT token，device 为原始 UUID | application + user + bankcard + device_ids 双向边 |
 
 ## 增量模式（统一）
 

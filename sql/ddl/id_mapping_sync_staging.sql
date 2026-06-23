@@ -10,8 +10,8 @@ SET SESSION net_read_timeout = 7200;
 SET SESSION net_write_timeout = 7200;
 -- 勿设 max_execution_time / sql_log_bin（RDS 无 SUPER 会 1227）
 
--- 敏感 ID 关系双写（不去重，每条源事件保留一行有向边）；type = id 的类型；mobile/gaid/bank/id_number 为 VT token
--- device_uuid 为原始 UUID（flink.md 未要求 VT）；id2 源字段待确认，暂不产出
+-- 敏感 ID 关系双写（不去重，每条源事件保留一行有向边）；type = mapping_id 的类型
+-- mapping_id 为 mobile/gaid/bank/id_number 时用 VT token；device_uuid 为原始 UUID（不做 VT）；id2 暂不产出
 DROP TABLE IF EXISTS id_mapping_sync_staging;
 
 CREATE TABLE id_mapping_sync_staging (
@@ -35,7 +35,7 @@ FROM (
          SELECT a.mobile_token AS id,
                 CAST(a.app_code AS UNSIGNED) AS app_id,
                 a.gaid_idfa_token AS mapping_id,
-                'mobile' AS type,
+                'gaid_idfa' AS type,
                 UNIX_TIMESTAMP(a.order_time) * 1000 AS event_time
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -45,7 +45,7 @@ FROM (
          SELECT a.gaid_idfa_token,
                 CAST(a.app_code AS UNSIGNED),
                 a.mobile_token,
-                'gaid_idfa',
+                'mobile',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -57,7 +57,7 @@ FROM (
          SELECT a.mobile_token,
                 CAST(a.app_code AS UNSIGNED),
                 a.bank_account_token,
-                'mobile',
+                'bank_account',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -67,7 +67,7 @@ FROM (
          SELECT a.bank_account_token,
                 CAST(a.app_code AS UNSIGNED),
                 a.mobile_token,
-                'bank_account',
+                'mobile',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -79,7 +79,7 @@ FROM (
          SELECT a.mobile_token,
                 CAST(a.app_code AS UNSIGNED),
                 a.id_number_token,
-                'mobile',
+                'id_number',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -89,7 +89,7 @@ FROM (
          SELECT a.id_number_token,
                 CAST(a.app_code AS UNSIGNED),
                 a.mobile_token,
-                'id_number',
+                'mobile',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -101,7 +101,7 @@ FROM (
          SELECT a.mobile_token,
                 CAST(a.app_code AS UNSIGNED),
                 TRIM(a.device_uuid),
-                'mobile',
+                'device_uuid',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -111,7 +111,7 @@ FROM (
          SELECT TRIM(a.device_uuid),
                 CAST(a.app_code AS UNSIGNED),
                 a.mobile_token,
-                'device_uuid',
+                'mobile',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.mobile_token IS NOT NULL AND TRIM(a.mobile_token) <> ''
@@ -123,7 +123,7 @@ FROM (
          SELECT TRIM(a.device_uuid),
                 CAST(a.app_code AS UNSIGNED),
                 a.gaid_idfa_token,
-                'device_uuid',
+                'gaid_idfa',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.device_uuid IS NOT NULL AND TRIM(a.device_uuid) <> ''
@@ -133,7 +133,7 @@ FROM (
          SELECT a.gaid_idfa_token,
                 CAST(a.app_code AS UNSIGNED),
                 TRIM(a.device_uuid),
-                'gaid_idfa',
+                'device_uuid',
                 UNIX_TIMESTAMP(a.order_time) * 1000
          FROM application_sync_staging a
          WHERE a.device_uuid IS NOT NULL AND TRIM(a.device_uuid) <> ''
@@ -145,7 +145,7 @@ FROM (
          SELECT u.mobile_token,
                 CAST(u.app_code AS UNSIGNED),
                 TRIM(u.device_id),
-                'mobile',
+                'device_uuid',
                 u.reg_time
          FROM user_sync_staging u
          WHERE u.mobile_token IS NOT NULL AND TRIM(u.mobile_token) <> ''
@@ -155,7 +155,7 @@ FROM (
          SELECT TRIM(u.device_id),
                 CAST(u.app_code AS UNSIGNED),
                 u.mobile_token,
-                'device_uuid',
+                'mobile',
                 u.reg_time
          FROM user_sync_staging u
          WHERE u.mobile_token IS NOT NULL AND TRIM(u.mobile_token) <> ''
@@ -167,7 +167,7 @@ FROM (
          SELECT u.mobile_token,
                 CAST(u.app_code AS UNSIGNED),
                 ui.id_number_token,
-                'mobile',
+                'id_number',
                 u.reg_time
          FROM user_sync_staging u
                   INNER JOIN user_info_sync_staging ui ON ui.user_id = u.id
@@ -179,7 +179,7 @@ FROM (
          SELECT ui.id_number_token,
                 CAST(u.app_code AS UNSIGNED),
                 u.mobile_token,
-                'id_number',
+                'mobile',
                 u.reg_time
          FROM user_sync_staging u
                   INNER JOIN user_info_sync_staging ui ON ui.user_id = u.id
@@ -192,7 +192,7 @@ FROM (
          SELECT u.mobile_token,
                 CAST(u.app_code AS UNSIGNED),
                 b.bank_account_token,
-                'mobile',
+                'bank_account',
                 UNIX_TIMESTAMP(u.update_time) * 1000
          FROM user_sync_staging u
                   INNER JOIN user_bankcard_sync_staging b ON b.user_id = u.id
@@ -203,7 +203,7 @@ FROM (
          SELECT b.bank_account_token,
                 CAST(u.app_code AS UNSIGNED),
                 u.mobile_token,
-                'bank_account',
+                'mobile',
                 UNIX_TIMESTAMP(u.update_time) * 1000
          FROM user_sync_staging u
                   INNER JOIN user_bankcard_sync_staging b ON b.user_id = u.id
@@ -216,7 +216,7 @@ FROM (
          SELECT TRIM(d.device_uuid),
                 CAST(u.app_code AS UNSIGNED),
                 vt_g.token,
-                'device_uuid',
+                'gaid_idfa',
                 UNIX_TIMESTAMP(COALESCE(d.update_time, d.create_time)) * 1000
          FROM device_ids d
                   INNER JOIN `user` u ON u.device_id = d.device_uuid
@@ -234,7 +234,7 @@ FROM (
          SELECT vt_g.token,
                 CAST(u.app_code AS UNSIGNED),
                 TRIM(d.device_uuid),
-                'gaid_idfa',
+                'device_uuid',
                 UNIX_TIMESTAMP(COALESCE(d.update_time, d.create_time)) * 1000
          FROM device_ids d
                   INNER JOIN `user` u ON u.device_id = d.device_uuid

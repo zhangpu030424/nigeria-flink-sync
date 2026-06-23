@@ -53,7 +53,7 @@ create table id_mapping
     id         varchar(36)                                                                     not null,
     app_id     int unsigned                                                                    not null,
     mapping_id varchar(36)                                                                     not null,
-    type       enum ('mobile', 'gaid_idfa', 'device_uuid', 'bank_account', 'id_number', 'id2') not null,
+    type       enum ('mobile', 'gaid_idfa', 'device_uuid', 'bank_account', 'id_number', 'id2') not null comment 'mapping_id 的类型',
     event_time bigint unsigned                                                                 not null,
     primary key (id, app_id, mapping_id)
 )

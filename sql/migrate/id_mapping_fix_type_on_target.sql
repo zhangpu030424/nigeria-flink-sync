@@ -1,0 +1,31 @@
+-- id_mapping type 语义修正：type 从「id 的类型」改为「mapping_id 的类型」
+--
+-- 前置（源库）：
+--   mysql ... nigeria_backend < sql/ddl/id_mapping_sync_staging.sql
+--   （须用已改 type 规则的新版 SQL 重建宽表）
+--
+-- 方案 A（推荐）：不重写本文件，直接重跑 Flink 全量
+--   ./scripts/sync-job-auto.sh id_mapping --bulk-only
+--   主键相同会 UPSERT，仅更新 type / event_time，不必 truncate 目标表
+--
+-- 方案 B：源库与目标库同一 MySQL 实例（或可用 federated / dblink）时，执行下方 UPDATE
+--   将 ${SOURCE_DB} / ${TARGET_DB} 换成实际库名后执行
+
+-- UPDATE `${TARGET_DB}`.id_mapping AS t
+-- INNER JOIN `${SOURCE_DB}`.id_mapping_sync_staging AS s
+--         ON t.id = s.id AND t.app_id = s.app_id AND t.mapping_id = s.mapping_id
+-- SET t.type = s.type;
+
+-- 方案 C：两库分离、不想跑 Flink 时，在源库导出再导入目标（示例）
+-- SELECT id, app_id, mapping_id, type, event_time
+-- FROM id_mapping_sync_staging
+-- INTO OUTFILE '/tmp/id_mapping_type_fix.csv'
+-- FIELDS TERMINATED BY ',' ENCLOSED BY '"' LINES TERMINATED BY '\n';
+-- 目标库 LOAD DATA + 临时表 + JOIN UPDATE（按主键更新 type）
+
+-- 校验：目标 type 应与源宽表一致
+-- SELECT COUNT(*) AS mismatch
+-- FROM target.id_mapping t
+-- LEFT JOIN source.id_mapping_sync_staging s
+--   ON t.id = s.id AND t.app_id = s.app_id AND t.mapping_id = s.mapping_id
+-- WHERE s.row_id IS NULL OR t.type <> s.type;
