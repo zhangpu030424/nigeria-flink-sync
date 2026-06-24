@@ -1,7 +1,8 @@
 -- 增量 user_bankcard：多源 CDC 触发 + Lookup 组装
 -- CDC: user_bank_info, vt_token_cache(bank_account)
--- id：增量 UPSERT 不覆盖已有雪花 id（占位 0，JDBC 按主键更新时通常不写 id 列）
+-- id：已有行保留目标 id；新行或 id=0 时用 snowflake_id()（JDBC UPSERT 会写 id 列，勿再 CAST(0)）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
+CREATE TEMPORARY FUNCTION snowflake_id AS 'com.nigeria.flink.udf.SnowflakeIdFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -101,6 +102,21 @@ WHERE vt.vt_type = 3
   AND vt.raw_value IS NOT NULL AND TRIM(vt.raw_value) <> ''
   AND ba.bank_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS dim_target_bankcard_id (
+    group_user_id BIGINT,
+    bank_account_number STRING,
+    id BIGINT,
+    PRIMARY KEY (group_user_id, bank_account_number) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'user_bankcard',
+    'username' = '${TARGET_MYSQL_USER}',
+    'password' = '${TARGET_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '30m'
+);
+
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
     id BIGINT,
     group_user_id BIGINT,
@@ -121,22 +137,28 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
-    e.id,
+    CASE
+        WHEN tgt.id IS NOT NULL AND tgt.id <> 0 THEN tgt.id
+        ELSE snowflake_id()
+    END,
     e.group_user_id,
     e.bank_code,
     e.bank_account_number,
     e.is_default
 FROM (
     SELECT
-        CAST(0 AS BIGINT) AS id,
         b.user_id + 100000000 AS group_user_id,
         COALESCE(b.bank_code, '') AS bank_code,
         vt_tokenize(TRIM(b.bank_account)) AS bank_account_number,
-        CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default
+        CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default,
+        t.proc_time
     FROM v_bankcard_triggers AS t
     INNER JOIN dim_user_bankcard FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.id = t.bank_id
     WHERE b.deleted = 0
       AND b.bank_account IS NOT NULL
       AND TRIM(b.bank_account) <> ''
 ) AS e
+LEFT JOIN dim_target_bankcard_id FOR SYSTEM_TIME AS OF e.proc_time AS tgt
+    ON tgt.group_user_id = e.group_user_id
+   AND tgt.bank_account_number = e.bank_account_number
 WHERE e.bank_account_number IS NOT NULL AND TRIM(e.bank_account_number) <> '';
