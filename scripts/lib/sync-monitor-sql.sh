@@ -16,6 +16,7 @@ monitor_tgt_uses_absolute() {
   [[ "$sql" == *"group_user_id > "* ]] && return 0
   [[ "$sql" == *"id > "* ]] && return 0
   [[ "$sql" == *"LIKE 'ng0%"* ]] && return 0
+  [[ "$sql" == *"application_no REGEXP"* ]] && return 0
   return 1
 }
 

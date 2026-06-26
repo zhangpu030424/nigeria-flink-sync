@@ -104,7 +104,7 @@ VT 表全量两阶段：先有 token → 无 token 运行时 `/v2t` → 增量 L
 | user_info | 宽表行数 | `user_id > offset` | absolute |
 | user_bankcard | `DISTINCT(user_id,bank_account_token)` | `group_user_id > offset` | absolute |
 | user_product / application | 宽表行数 | `group_user_id > offset` | absolute |
-| loan | 宽表行数 | `application_no LIKE 'ng0%'` | absolute |
+| loan | 宽表行数（app 567/568/569/571/572/573） | `application_no REGEXP '^ng0(567|568|569|571|572|573)-'` | absolute |
 | id_mapping | 宽表行数 | 全表 | **baseline_delta**（基线+宽表≈总数） |
 
 **为何不用「全表总数 = 基线 + 宽表」：** 目标库常有存量，且 UPSERT 主键重叠时只 UPDATE 不增行（如 `user` 的 `(mobile,app_id,closed_time)`）。迁移表改为只数本迁移写入的行，直接与宽表对比。
