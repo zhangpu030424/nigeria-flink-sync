@@ -48,15 +48,17 @@ lookup_job_monitor_sql() {
   local table="${1:-}"
   local conf="${2:-config/sync-jobs.conf}"
   [[ -n "$table" && -f "$conf" ]] || return 1
-  local row src tgt
+  local row
+  # shellcheck source=scripts/lib/sync-jobs.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/sync-jobs.sh"
   while IFS= read -r row || [[ -n "$row" ]]; do
     row="${row%%#*}"
     row="$(echo "$row" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     [[ -z "$row" ]] && continue
-    IFS='|' read -r _key _desc _full _incr _runner src tgt monitor enabled <<< "$row"
-    [[ "$monitor" == "$table" && "$enabled" == "1" ]] || continue
-    expand_monitor_sql "$src"
-    expand_monitor_sql "$tgt"
+    sync_job_parse_line "$row"
+    [[ "$SYNC_JOB_MONITOR_TABLE" == "$table" && "$SYNC_JOB_ENABLED" == "1" ]] || continue
+    expand_monitor_sql "$SYNC_JOB_SRC_CNT_SQL"
+    expand_monitor_sql "$SYNC_JOB_TGT_CNT_SQL"
     return 0
   done < "$conf"
   return 1

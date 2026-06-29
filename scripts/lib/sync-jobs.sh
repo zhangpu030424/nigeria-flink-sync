@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 # 从 config/sync-jobs.conf 解析 ENABLED=1 的 Job 列表
 # 用法: source scripts/lib/sync-jobs.sh && sync_jobs_load "user,user_info"
+#
+# 行格式（| 分隔，固定 9 列；计数 SQL 可含 |，如 REGEXP '567|568'，须从右向左解析）:
+#   KEY|DESC|FULL_SQL|INCR_SQL|FULL_RUNNER|SRC_CNT_SQL|TGT_CNT_SQL|MONITOR_TABLE|ENABLED
+
+# 解析单行 → SYNC_JOB_*（前 5 列固定无 |；计数 SQL 列勿含 |；末列 ENABLED）
+sync_job_parse_line() {
+  local line="$1"
+  SYNC_JOB_ENABLED="${line##*|}"
+  line="${line%|*}"
+  SYNC_JOB_MONITOR_TABLE="${line##*|}"
+  line="${line%|*}"
+  SYNC_JOB_KEY="${line%%|*}"
+  line="${line#*|}"
+  SYNC_JOB_DESC="${line%%|*}"
+  line="${line#*|}"
+  SYNC_JOB_FULL_SQL="${line%%|*}"
+  line="${line#*|}"
+  SYNC_JOB_INCR_SQL="${line%%|*}"
+  line="${line#*|}"
+  SYNC_JOB_FULL_RUNNER="${line%%|*}"
+  line="${line#*|}"
+  # 剩余 line = SRC_CNT_SQL|TGT_CNT_SQL；TGT 恒以 SELECT COUNT 开头
+  if [[ "$line" == *"|SELECT COUNT"* ]]; then
+    SYNC_JOB_SRC_CNT_SQL="${line%%|SELECT COUNT*}"
+    SYNC_JOB_TGT_CNT_SQL="SELECT COUNT${line#*|SELECT COUNT}"
+  else
+    SYNC_JOB_SRC_CNT_SQL="${line%%|*}"
+    SYNC_JOB_TGT_CNT_SQL="${line#*|}"
+  fi
+}
 
 sync_jobs_load() {
   local filter="${1:-}"

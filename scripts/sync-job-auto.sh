@@ -56,10 +56,19 @@ done < "$CONF"
 
 [[ -n "$line" ]] || { echo "未知 Job: $JOB_KEY（见 $CONF）"; exit 1; }
 
-IFS='|' read -r _key _desc FULL_SQL INCR_SQL FULL_RUNNER SRC_CNT_SQL TGT_CNT_SQL MONITOR_TABLE ENABLED <<< "$line"
+# shellcheck source=scripts/lib/sync-jobs.sh
+source "$(dirname "$0")/lib/sync-jobs.sh"
+sync_job_parse_line "$line"
+FULL_SQL="$SYNC_JOB_FULL_SQL"
+INCR_SQL="$SYNC_JOB_INCR_SQL"
+FULL_RUNNER="$SYNC_JOB_FULL_RUNNER"
+SRC_CNT_SQL="$SYNC_JOB_SRC_CNT_SQL"
+TGT_CNT_SQL="$SYNC_JOB_TGT_CNT_SQL"
+MONITOR_TABLE="$SYNC_JOB_MONITOR_TABLE"
+ENABLED="$SYNC_JOB_ENABLED"
 
 if [[ "$ENABLED" != "1" ]]; then
-  echo "Job [$JOB_KEY] ENABLED=0，跳过。SQL 就绪后在 $CONF 改为 1"
+  echo "Job [$JOB_KEY] ENABLED=${ENABLED}（需为 1），跳过。见 $CONF 末列"
   exit 0
 fi
 
@@ -572,9 +581,6 @@ if [[ "$INCR_ONLY" -eq 1 && "$BULK_ONLY" -eq 1 ]]; then
   echo "ERR: --incr-only 与 --bulk-only 不能同时使用"
   exit 1
 fi
-
-# shellcheck source=scripts/lib/sync-jobs.sh
-source "$(dirname "$0")/lib/sync-jobs.sh"
 
 if [[ "$INCR_ONLY" -eq 1 ]]; then
   resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
