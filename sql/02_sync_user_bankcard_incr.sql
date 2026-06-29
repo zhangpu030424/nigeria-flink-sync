@@ -1,7 +1,7 @@
 -- 增量 user_bankcard：多源 CDC 触发 + Lookup 组装
 -- CDC: user_bank_info, vt_token_cache(bank_account)
--- id：已有行保留目标 id；新行或 id=0 时用 snowflake_id()（JDBC UPSERT 会写 id 列，勿再 CAST(0)）
--- 目标 Lookup 直连 user_bankcard：group_user_id 为 UNSIGNED，JDBC 返回 BigInteger，dim 用 STRING 再 CAST
+-- id：已有行保留目标 id；新行或 id=0 时用 snowflake_id()
+-- 目标 Lookup 要求 user_bankcard.group_user_id 为 signed BIGINT（见 sql/migrate/user_bankcard_group_user_id_signed.sql）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 CREATE TEMPORARY FUNCTION snowflake_id AS 'com.nigeria.flink.udf.SnowflakeIdFunction';
 
@@ -104,9 +104,9 @@ WHERE vt.vt_type = 3
   AND ba.bank_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS dim_target_bankcard_id (
-    group_user_id STRING,
+    group_user_id BIGINT,
     bank_account_number STRING,
-    id STRING,
+    id BIGINT,
     PRIMARY KEY (group_user_id, bank_account_number) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -139,8 +139,7 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 INSERT INTO sink_user_bankcard
 SELECT
     CASE
-        WHEN tgt.id IS NOT NULL AND TRIM(tgt.id) <> '' AND CAST(tgt.id AS BIGINT) <> 0
-            THEN CAST(tgt.id AS BIGINT)
+        WHEN tgt.id IS NOT NULL AND tgt.id <> 0 THEN tgt.id
         ELSE snowflake_id()
     END,
     e.group_user_id,
@@ -161,6 +160,6 @@ FROM (
       AND TRIM(b.bank_account) <> ''
 ) AS e
 LEFT JOIN dim_target_bankcard_id FOR SYSTEM_TIME AS OF e.proc_time AS tgt
-    ON tgt.group_user_id = CAST(e.group_user_id AS STRING)
+    ON tgt.group_user_id = e.group_user_id
    AND tgt.bank_account_number = e.bank_account_number
 WHERE e.bank_account_number IS NOT NULL AND TRIM(e.bank_account_number) <> '';
