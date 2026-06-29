@@ -30,14 +30,23 @@ public class SnowflakeIdFunction extends ScalarFunction {
         int workerIdBits = (int) parseLongEnv("SNOWFLAKE_WORKER_ID_BITS", 5L);
         int datacenterIdBits = (int) parseLongEnv("SNOWFLAKE_DATACENTER_ID_BITS", 5L);
         int sequenceBits = (int) parseLongEnv("SNOWFLAKE_SEQUENCE_BITS", 12L);
-
         int workerId = resolveWorkerId(context, workerIdBits);
-
         generator = new SnowflakeIdGenerator(
                 epoch, datacenterId, workerId, workerIdBits, datacenterIdBits, sequenceBits);
-
         LOG.info(
                 "SnowflakeIdFunction ready epoch={} datacenterId={} workerId={} bits=w{}d{}s{}",
+                epoch, datacenterId, workerId, workerIdBits, datacenterIdBits, sequenceBits);
+    }
+
+    /** 供 UserBankcardIdResolveFunction 等复用同一套 SNOWFLAKE_* 配置。 */
+    static SnowflakeIdGenerator newGenerator(FunctionContext context) {
+        long epoch = parseLongEnv("SNOWFLAKE_EPOCH_MS", DEFAULT_EPOCH_MS);
+        int datacenterId = (int) parseLongEnv("SNOWFLAKE_DATACENTER_ID", 0L);
+        int workerIdBits = (int) parseLongEnv("SNOWFLAKE_WORKER_ID_BITS", 5L);
+        int datacenterIdBits = (int) parseLongEnv("SNOWFLAKE_DATACENTER_ID_BITS", 5L);
+        int sequenceBits = (int) parseLongEnv("SNOWFLAKE_SEQUENCE_BITS", 12L);
+        int workerId = resolveWorkerId(context, workerIdBits);
+        return new SnowflakeIdGenerator(
                 epoch, datacenterId, workerId, workerIdBits, datacenterIdBits, sequenceBits);
     }
 

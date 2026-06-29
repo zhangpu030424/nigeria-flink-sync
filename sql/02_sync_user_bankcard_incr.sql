@@ -1,9 +1,8 @@
 -- 增量 user_bankcard：多源 CDC 触发 + Lookup 组装
 -- CDC: user_bank_info, vt_token_cache(bank_account)
--- id：已有行保留目标 id；新行或 id=0 时用 snowflake_id()
--- 目标 Lookup 要求 user_bankcard.group_user_id 为 signed BIGINT（见 sql/migrate/user_bankcard_group_user_id_signed.sql）
+-- id：UDF 查目标库保留已有 id（兼容 UNSIGNED BigInteger），无则 snowflake_id；勿用 JDBC Lookup 直连目标表
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
-CREATE TEMPORARY FUNCTION snowflake_id AS 'com.nigeria.flink.udf.SnowflakeIdFunction';
+CREATE TEMPORARY FUNCTION bankcard_id_resolve AS 'com.nigeria.flink.udf.UserBankcardIdResolveFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
@@ -103,21 +102,6 @@ WHERE vt.vt_type = 3
   AND vt.raw_value IS NOT NULL AND TRIM(vt.raw_value) <> ''
   AND ba.bank_id IS NOT NULL;
 
-CREATE TABLE IF NOT EXISTS dim_target_bankcard_id (
-    group_user_id BIGINT,
-    bank_account_number STRING,
-    id BIGINT,
-    PRIMARY KEY (group_user_id, bank_account_number) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_bankcard',
-    'username' = '${TARGET_MYSQL_USER}',
-    'password' = '${TARGET_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
-);
-
 CREATE TABLE IF NOT EXISTS sink_user_bankcard (
     id BIGINT,
     group_user_id BIGINT,
@@ -138,10 +122,7 @@ CREATE TABLE IF NOT EXISTS sink_user_bankcard (
 
 INSERT INTO sink_user_bankcard
 SELECT
-    CASE
-        WHEN tgt.id IS NOT NULL AND tgt.id <> 0 THEN tgt.id
-        ELSE snowflake_id()
-    END,
+    bankcard_id_resolve(e.group_user_id, e.bank_account_number),
     e.group_user_id,
     e.bank_code,
     e.bank_account_number,
@@ -151,15 +132,11 @@ FROM (
         b.user_id + 100000000 AS group_user_id,
         COALESCE(b.bank_code, '') AS bank_code,
         vt_tokenize(TRIM(b.bank_account)) AS bank_account_number,
-        CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default,
-        t.proc_time
+        CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default
     FROM v_bankcard_triggers AS t
     INNER JOIN dim_user_bankcard FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.id = t.bank_id
     WHERE b.deleted = 0
       AND b.bank_account IS NOT NULL
       AND TRIM(b.bank_account) <> ''
 ) AS e
-LEFT JOIN dim_target_bankcard_id FOR SYSTEM_TIME AS OF e.proc_time AS tgt
-    ON tgt.group_user_id = e.group_user_id
-   AND tgt.bank_account_number = e.bank_account_number
 WHERE e.bank_account_number IS NOT NULL AND TRIM(e.bank_account_number) <> '';

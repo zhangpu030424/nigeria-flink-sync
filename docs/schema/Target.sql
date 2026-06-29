@@ -119,7 +119,7 @@ create table user
 create table user_bankcard
 (
     id                  bigint                                     not null,
-    group_user_id       bigint                                     not null comment 'App Group User ID',
+    group_user_id       bigint unsigned                            not null comment 'App Group User ID',
     bank_code           varchar(64)                                not null comment '银行代码',
     bank_account_number varchar(64)                                not null comment '银行卡号',
     is_default          tinyint unsigned default '0'               not null comment '是否默认卡',
