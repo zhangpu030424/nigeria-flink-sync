@@ -1,15 +1,8 @@
--- 源库（贷超 application）：DK / LD 已放款 → loan 宽表
--- 宽表列与目标库 ng.loan 一致，可直接 INSERT INTO target.loan SELECT * FROM loan_dk_ld_sync_staging
+-- 源库（贷超 application）：已放款 → loan 宽表
+-- 宽表列与目标库 ng.loan 一致
 --
--- productId 用常量 IN 列表（81 个），勿子查询 product
--- 源字段：applicationNo（非 sn）；时间戳为 Unix 秒
-
--- DK/LD productId:
--- 502,503,604,609,620,622,623,626,627,628,629,630,631,632,633,634,635,638,639,
--- 655,656,657,658,659,701,702,710,711,712,713,714,715,716,718,725,726,727,729,
--- 730,731,732,733,734,735,736,738,739,740,741,742,743,744,745,746,747,748,749,
--- 750,752,753,765,766,767,1012,1013,1014,1015,1016,1017,1021,1022,1023,1024,
--- 1025,1026,1027,1028,1029,1030,1031,1032
+-- 源字段：applicationNo（非 sn）；application_no = ng + LPAD(appId,4,'0') + '-' + applicationNo
+-- 筛选：disburseTime <> 0 且 applicationNo 非空（不按 productId 过滤）
 
 -- 映射：
 --   paid_amount: status IN (17,18,19) → paidAmount，否则 0
@@ -19,7 +12,7 @@
 
 -- ========== 0. 预览 10 条（列名与目标 loan 一致）==========
 SELECT CONCAT('ng-', a.applicationNo, '-01000')                                   AS loan_no,
-       CONCAT('ng0', a.appId, '-', a.applicationNo)                               AS application_no,
+       CONCAT('ng', LPAD(a.appId, 4, '0'), '-', a.applicationNo)                  AS application_no,
        CAST(1 AS UNSIGNED)                                                        AS period,
        CAST(0 AS UNSIGNED)                                                        AS roll_sequence,
        DATE(FROM_UNIXTIME(a.disburseTime))                                        AS start_date,
@@ -55,13 +48,6 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000')                                 
 FROM application a
 WHERE a.disburseTime <> 0
   AND a.applicationNo <> ''
-  AND a.productId IN (
-      502,503,604,609,620,622,623,626,627,628,629,630,631,632,633,634,635,638,639,
-      655,656,657,658,659,701,702,710,711,712,713,714,715,716,718,725,726,727,729,
-      730,731,732,733,734,735,736,738,739,740,741,742,743,744,745,746,747,748,749,
-      750,752,753,765,766,767,1012,1013,1014,1015,1016,1017,1021,1022,1023,1024,
-      1025,1026,1027,1028,1029,1030,1031,1032
-  )
 ORDER BY a.id DESC
 LIMIT 10;
 
@@ -97,7 +83,7 @@ CREATE TABLE loan_dk_ld_sync_staging (
     PRIMARY KEY (application_no, period, roll_sequence),
     KEY idx_loan_no (loan_no),
     KEY idx_status (status)
-) COMMENT 'DK/LD 已放款 loan 宽表（列同目标 ng.loan）';
+) COMMENT '贷超已放款 loan 宽表（列同目标 ng.loan）';
 
 INSERT INTO loan_dk_ld_sync_staging (
     loan_no, application_no, period, roll_sequence,
@@ -108,7 +94,7 @@ INSERT INTO loan_dk_ld_sync_staging (
     created_time, status
 )
 SELECT CONCAT('ng-', a.applicationNo, '-01000'),
-       CONCAT('ng0', a.appId, '-', a.applicationNo),
+       CONCAT('ng', LPAD(a.appId, 4, '0'), '-', a.applicationNo),
        1,
        0,
        DATE(FROM_UNIXTIME(a.disburseTime)),
@@ -143,14 +129,7 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000'),
            END AS UNSIGNED)
 FROM application a
 WHERE a.disburseTime <> 0
-  AND a.applicationNo <> ''
-  AND a.productId IN (
-      502,503,604,609,620,622,623,626,627,628,629,630,631,632,633,634,635,638,639,
-      655,656,657,658,659,701,702,710,711,712,713,714,715,716,718,725,726,727,729,
-      730,731,732,733,734,735,736,738,739,740,741,742,743,744,745,746,747,748,749,
-      750,752,753,765,766,767,1012,1013,1014,1015,1016,1017,1021,1022,1023,1024,
-      1025,1026,1027,1028,1029,1030,1031,1032
-  );
+  AND a.applicationNo <> '';
 
 SET SESSION unique_checks = 1;
 
