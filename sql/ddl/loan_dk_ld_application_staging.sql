@@ -25,15 +25,15 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000')                                 
        DATE(FROM_UNIXTIME(a.disburseTime))                                        AS start_date,
        DATE(FROM_UNIXTIME(a.dueDate))                                             AS due_date,
        DATE(FROM_UNIXTIME(a.dueDate))                                             AS due_date_final,
-       CAST(COALESCE(a.disburseAmount, 0) AS UNSIGNED)                            AS principal,
+       CAST(GREATEST(COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED)                            AS principal,
        CAST(0 AS UNSIGNED)                                                        AS interest,
-       CAST(ROUND(COALESCE(a.amount, 0) * 0.35) AS UNSIGNED)                    AS admin_fee,
+       CAST(GREATEST(ROUND(COALESCE(a.amount, 0) * 0.35), 0) AS UNSIGNED)                    AS admin_fee,
        CAST(0 AS SIGNED)                                                          AS roll_fee,
        CAST(0 AS UNSIGNED)                                                        AS penalty_amount,
        CAST(0 AS UNSIGNED)                                                        AS reduction_amount,
-       CAST(COALESCE(a.repayment, 0) AS UNSIGNED)                                 AS total_amount,
+       CAST(GREATEST(COALESCE(a.repayment, 0), 0) AS UNSIGNED)                                 AS total_amount,
        CAST(CASE
-                WHEN a.status IN (17, 18, 19) THEN COALESCE(a.paidAmount, 0)
+                WHEN a.status IN (17, 18, 19) THEN GREATEST(COALESCE(a.paidAmount, 0), 0)
                 ELSE 0
            END AS UNSIGNED)                                                        AS paid_amount,
        CAST(0 AS SIGNED)                                                          AS roll_paid_amount,
@@ -114,15 +114,15 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000'),
        DATE(FROM_UNIXTIME(a.disburseTime)),
        DATE(FROM_UNIXTIME(a.dueDate)),
        DATE(FROM_UNIXTIME(a.dueDate)),
-       CAST(COALESCE(a.disburseAmount, 0) AS UNSIGNED),
+       CAST(GREATEST(COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED),
        0,
-       CAST(ROUND(COALESCE(a.amount, 0) * 0.35) AS UNSIGNED),
+       CAST(GREATEST(ROUND(COALESCE(a.amount, 0) * 0.35), 0) AS UNSIGNED),
        0,
        0,
        0,
-       CAST(COALESCE(a.repayment, 0) AS UNSIGNED),
+       CAST(GREATEST(COALESCE(a.repayment, 0), 0) AS UNSIGNED),
        CAST(CASE
-                WHEN a.status IN (17, 18, 19) THEN COALESCE(a.paidAmount, 0)
+                WHEN a.status IN (17, 18, 19) THEN GREATEST(COALESCE(a.paidAmount, 0), 0)
                 ELSE 0
            END AS UNSIGNED),
        0,

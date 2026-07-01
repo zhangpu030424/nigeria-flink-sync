@@ -1,10 +1,14 @@
 -- 贷超 DK/LD 宽表 → 目标 ng.loan（独立 Job，不走 sync-migrate-auto）
 -- 源: LM_MYSQL_* / loan_dk_ld_sync_staging（须先有 sync_shard 列，见 scripts/run-lm-loan-dk-ld-sync.sh）
+--
+-- 注意:
+--   1. 宽表 UNSIGNED 金额列 JDBC 读 DECIMAL；SIGNED 不读 roll_fee/roll_paid_amount（目标无此列）
+--   2. 负 repayment 等若 CAST UNSIGNED 会变成超大数，写入前非法值一律置 0
+--   3. sink 列与 02_sync_loan_fast.sql 一致
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
--- UNSIGNED 列 → DECIMAL(20,0)（JDBC 否则读成 BigInteger）；SIGNED BIGINT → BIGINT（JDBC 读 Long）
 CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     loan_no STRING,
     application_no STRING,
@@ -16,17 +20,15 @@ CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     principal DECIMAL(20, 0),
     interest DECIMAL(20, 0),
     admin_fee DECIMAL(20, 0),
-    roll_fee BIGINT,
     penalty_amount DECIMAL(20, 0),
     reduction_amount DECIMAL(20, 0),
     total_amount DECIMAL(20, 0),
     paid_amount DECIMAL(20, 0),
-    roll_paid_amount BIGINT,
     paid_time DECIMAL(20, 0),
     paid_off_date DATE,
     created_time DECIMAL(20, 0),
     status INT,
-    sync_shard INT,
+    sync_shard BIGINT,
     PRIMARY KEY (application_no, `period`, roll_sequence) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -41,7 +43,6 @@ CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
--- sink 列与 02_sync_loan_fast.sql 一致（目标库 loan 无 roll_fee / roll_paid_amount）
 CREATE TABLE IF NOT EXISTS sink_lm_loan_dk_ld (
     loan_no STRING,
     application_no STRING,
@@ -82,15 +83,61 @@ SELECT
     start_date,
     due_date,
     due_date_final,
-    CAST(principal AS BIGINT),
-    CAST(interest AS BIGINT),
-    CAST(admin_fee AS BIGINT),
-    CAST(penalty_amount AS BIGINT),
-    CAST(reduction_amount AS BIGINT),
-    CAST(total_amount AS BIGINT),
-    CAST(paid_amount AS BIGINT),
-    CAST(paid_time AS BIGINT),
+    CAST(
+        CASE
+            WHEN principal IS NULL OR principal < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN principal > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE principal
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN interest IS NULL OR interest < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN interest > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE interest
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN admin_fee IS NULL OR admin_fee < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN admin_fee > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE admin_fee
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN penalty_amount IS NULL OR penalty_amount < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN penalty_amount > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE penalty_amount
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN reduction_amount IS NULL OR reduction_amount < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN reduction_amount > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE reduction_amount
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN total_amount IS NULL OR total_amount < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN total_amount > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE total_amount
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN paid_amount IS NULL OR paid_amount < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN paid_amount > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE paid_amount
+        END AS BIGINT),
+    CAST(
+        CASE
+            WHEN paid_time IS NULL OR paid_time <= CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN paid_time > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE paid_time
+        END AS BIGINT),
     paid_off_date,
-    CAST(created_time AS BIGINT),
+    CAST(
+        CASE
+            WHEN created_time IS NULL OR created_time < CAST(0 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            WHEN created_time > CAST(9223372036854775807 AS DECIMAL(20, 0)) THEN CAST(0 AS DECIMAL(20, 0))
+            ELSE created_time
+        END AS BIGINT),
     CAST(status AS TINYINT)
-FROM src_lm_loan_dk_ld_staging;
+FROM src_lm_loan_dk_ld_staging
+WHERE application_no IS NOT NULL AND TRIM(application_no) <> '';

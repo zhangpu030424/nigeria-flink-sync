@@ -74,4 +74,37 @@ if [[ "${LM_LOAN_SKIP_SHARD_PREP:-0}" != "1" ]]; then
   fi
 fi
 
+# 负金额 / UNSIGNED 绕回超大数 → 写入目标 BIGINT UNSIGNED 会报 Out of range
+if [[ "${LM_LOAN_SKIP_AMOUNT_FIX:-0}" != "1" ]]; then
+  bad_amt=$(mysql_lm_query \
+    "SELECT COUNT(*) FROM \`${STAGING_TABLE}\` WHERE total_amount < 0 OR total_amount > 9223372036854775807 OR principal < 0 OR paid_amount < 0;" \
+    2>/dev/null || echo "0")
+  echo ">> 异常金额行数: ${bad_amt}"
+  if [[ "${bad_amt:-0}" -gt 0 ]]; then
+    echo ">> 修正宽表异常金额（负值/超大值置 0）..."
+    t0=$SECONDS
+    mysql_lm_cmd -e "
+UPDATE \`${STAGING_TABLE}\` SET
+  principal = CASE WHEN principal < 0 OR principal > 9223372036854775807 THEN 0 ELSE principal END,
+  interest = CASE WHEN interest < 0 OR interest > 9223372036854775807 THEN 0 ELSE interest END,
+  admin_fee = CASE WHEN admin_fee < 0 OR admin_fee > 9223372036854775807 THEN 0 ELSE admin_fee END,
+  penalty_amount = CASE WHEN penalty_amount < 0 OR penalty_amount > 9223372036854775807 THEN 0 ELSE penalty_amount END,
+  reduction_amount = CASE WHEN reduction_amount < 0 OR reduction_amount > 9223372036854775807 THEN 0 ELSE reduction_amount END,
+  total_amount = CASE WHEN total_amount < 0 OR total_amount > 9223372036854775807 THEN 0 ELSE total_amount END,
+  paid_amount = CASE WHEN paid_amount < 0 OR paid_amount > 9223372036854775807 THEN 0 ELSE paid_amount END
+WHERE total_amount < 0 OR total_amount > 9223372036854775807
+   OR principal < 0 OR principal > 9223372036854775807
+   OR interest < 0 OR interest > 9223372036854775807
+   OR admin_fee < 0 OR admin_fee > 9223372036854775807
+   OR penalty_amount < 0 OR penalty_amount > 9223372036854775807
+   OR reduction_amount < 0 OR reduction_amount > 9223372036854775807
+   OR paid_amount < 0 OR paid_amount > 9223372036854775807;"
+    echo ">> 金额修正完成（$((SECONDS - t0))s）"
+  fi
+fi
+
+distinct_shard=$(mysql_lm_query \
+  "SELECT COUNT(DISTINCT sync_shard) FROM \`${STAGING_TABLE}\`;" 2>/dev/null || echo "0")
+echo ">> sync_shard distinct=${distinct_shard}（期望≈${FLINK_PARALLELISM}）"
+
 exec ./scripts/run-sql.sh sql/lm/02_sync_loan_dk_ld_lm_bulk.sql
