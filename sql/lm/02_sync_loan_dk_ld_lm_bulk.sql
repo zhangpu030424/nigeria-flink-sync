@@ -4,7 +4,7 @@ SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'execution.runtime-mode' = 'batch';
 SET 'table.exec.mini-batch.enabled' = 'false';
 
--- 源表 BIGINT UNSIGNED 须声明 DECIMAL，否则 JDBC 读成 BigInteger → ClassCastException
+-- UNSIGNED 列 → DECIMAL(20,0)（JDBC 否则读成 BigInteger）；SIGNED BIGINT → BIGINT（JDBC 读 Long）
 CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     loan_no STRING,
     application_no STRING,
@@ -16,12 +16,12 @@ CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     principal DECIMAL(20, 0),
     interest DECIMAL(20, 0),
     admin_fee DECIMAL(20, 0),
-    roll_fee DECIMAL(20, 0),
+    roll_fee BIGINT,
     penalty_amount DECIMAL(20, 0),
     reduction_amount DECIMAL(20, 0),
     total_amount DECIMAL(20, 0),
     paid_amount DECIMAL(20, 0),
-    roll_paid_amount DECIMAL(20, 0),
+    roll_paid_amount BIGINT,
     paid_time DECIMAL(20, 0),
     paid_off_date DATE,
     created_time DECIMAL(20, 0),
@@ -86,12 +86,12 @@ SELECT
     CAST(principal AS BIGINT),
     CAST(interest AS BIGINT),
     CAST(admin_fee AS BIGINT),
-    CAST(roll_fee AS BIGINT),
+    roll_fee,
     CAST(penalty_amount AS BIGINT),
     CAST(reduction_amount AS BIGINT),
     CAST(total_amount AS BIGINT),
     CAST(paid_amount AS BIGINT),
-    CAST(roll_paid_amount AS BIGINT),
+    roll_paid_amount,
     CAST(paid_time AS BIGINT),
     paid_off_date,
     CAST(created_time AS BIGINT),
