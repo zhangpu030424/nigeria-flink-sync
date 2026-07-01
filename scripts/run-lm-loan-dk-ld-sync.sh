@@ -68,7 +68,7 @@ if [[ "${LM_LOAN_SKIP_SHARD_PREP:-0}" != "1" ]]; then
     t0=$SECONDS
     mysql_lm_cmd -e \
       "UPDATE \`${STAGING_TABLE}\` SET sync_shard = CRC32(application_no) % ${FLINK_PARALLELISM};"
-    echo ">> sync_shard 回填完成（${SECONDS - t0}s）"
+    echo ">> sync_shard 回填完成（$((SECONDS - t0))s）"
   else
     echo ">> sync_shard 已分布（distinct=${distinct_shard}），跳过回填"
   fi
