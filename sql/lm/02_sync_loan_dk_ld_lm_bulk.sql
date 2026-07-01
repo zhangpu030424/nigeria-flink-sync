@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS src_lm_loan_dk_ld_staging (
     'scan.fetch-size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
+-- sink 列与 02_sync_loan_fast.sql 一致（目标库 loan 无 roll_fee / roll_paid_amount）
 CREATE TABLE IF NOT EXISTS sink_lm_loan_dk_ld (
     loan_no STRING,
     application_no STRING,
@@ -52,12 +53,10 @@ CREATE TABLE IF NOT EXISTS sink_lm_loan_dk_ld (
     principal BIGINT,
     interest BIGINT,
     admin_fee BIGINT,
-    roll_fee BIGINT,
     penalty_amount BIGINT,
     reduction_amount BIGINT,
     total_amount BIGINT,
     paid_amount BIGINT,
-    roll_paid_amount BIGINT,
     paid_time BIGINT,
     paid_off_date DATE,
     created_time BIGINT,
@@ -86,12 +85,10 @@ SELECT
     CAST(principal AS BIGINT),
     CAST(interest AS BIGINT),
     CAST(admin_fee AS BIGINT),
-    roll_fee,
     CAST(penalty_amount AS BIGINT),
     CAST(reduction_amount AS BIGINT),
     CAST(total_amount AS BIGINT),
     CAST(paid_amount AS BIGINT),
-    roll_paid_amount,
     CAST(paid_time AS BIGINT),
     paid_off_date,
     CAST(created_time AS BIGINT),
