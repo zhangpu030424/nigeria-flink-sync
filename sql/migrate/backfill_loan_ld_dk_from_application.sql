@@ -1,0 +1,7 @@
+-- 已迁移至源库宽表 DDL：sql/ddl/loan_dk_ld_application_staging.sql
+-- 在贷超老库 ng_loan_market（LM_MYSQL_*）执行，生成 loan_dk_ld_sync_staging（DK+LD 已放款）
+--
+--   mysql -h $LM_MYSQL_HOST ... ng_loan_market < sql/ddl/loan_dk_ld_application_staging.sql
+--
+-- 写入目标库 loan（独立 Flink Job，不走 sync-migrate-auto）:
+--   bash scripts/run-lm-loan-dk-ld-sync.sh
