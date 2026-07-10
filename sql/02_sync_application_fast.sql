@@ -92,7 +92,7 @@ SELECT
     COALESCE(device_uuid, ''), session_id,
     COALESCE(bank_code, ''), COALESCE(bank_account_name, ''), bank_account_token,
     product_id, 'PROD-002-D7', '1.0',
-    '{"penalty_rate":0.05,"upfront_rate":0.35,"interest_rate":0,"post_paid_rate":0.05}',
+    '{}',
     COALESCE(period_days, 7), COALESCE(period_count, 1), CAST(1 AS TINYINT),
     repayment_plan_json,
     credit_limit_minor, loan_amount_minor, principal_minor, total_amount_minor, disbursed_amount_minor,

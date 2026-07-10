@@ -416,7 +416,7 @@ SELECT
     e.product_id,
     'PROD-002-D7',
     '1.0',
-    '{"penalty_rate":0.05,"upfront_rate":0.35,"interest_rate":0,"post_paid_rate":0.05}',
+    '{}',
     e.period_days,
     e.period_count,
     CAST(1 AS TINYINT),
