@@ -533,6 +533,7 @@ CREATE TABLE loan_sync_staging (
     roll_paid_amount_minor BIGINT     NOT NULL DEFAULT 0,
     paid_time_ms         BIGINT       NULL,
     paid_off_date        DATE         NULL,
+    created_time_ms      BIGINT       NOT NULL DEFAULT 0 COMMENT '放款时间毫秒，优先 disburse_time 完整时刻',
     risk_status          INT          NOT NULL,
     PRIMARY KEY (id)
 );
@@ -569,6 +570,10 @@ SELECT CAST(i.id AS SIGNED),
                END AS SIGNED
        ) AS paid_time_ms,
        DATE(o.settled_time) AS paid_off_date,
+       CAST(GREATEST(
+           COALESCE(UNIX_TIMESTAMP(o.disburse_time), UNIX_TIMESTAMP(o.order_time), UNIX_TIMESTAMP(i.create_time), 0) * 1000,
+           0
+       ) AS SIGNED) AS created_time_ms,
        CAST(CASE
            WHEN o.risk_order_status = 10
                AND COALESCE(i.is_overdue, 0) = 1 THEN 23

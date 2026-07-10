@@ -202,7 +202,12 @@ SELECT
     END,
     CASE WHEN o.settled_time IS NULL THEN CAST(NULL AS DATE) ELSE CAST(o.settled_time AS DATE) END,
     GREATEST(
-        CAST(COALESCE(UNIX_TIMESTAMP(CAST(COALESCE(CAST(o.disburse_time AS DATE), CAST(o.order_time AS DATE), CAST(i.create_time AS DATE)) AS STRING)), 0) * 1000 AS BIGINT),
+        CAST(COALESCE(
+            UNIX_TIMESTAMP(CAST(o.disburse_time AS STRING)),
+            UNIX_TIMESTAMP(CAST(o.order_time AS STRING)),
+            UNIX_TIMESTAMP(CAST(i.create_time AS STRING)),
+            0
+        ) * 1000 AS BIGINT),
         CAST(0 AS BIGINT)
     ),
     CAST(
