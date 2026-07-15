@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS cdc_user_order (
     id BIGINT,
     user_id BIGINT,
     order_no STRING,
-    risk_order_status BIGINT,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -226,8 +225,9 @@ CREATE TABLE IF NOT EXISTS dim_application_order (
     'table-name' = 'application_order_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    -- 订单状态/放款时间必须每次回源；有缓存时 10→6→10 会写出旧 status
-    'lookup.cache' = 'NONE'
+    -- 短缓存：减轻源库压力；状态以 CDC 带出的 cdc_risk_status 为准
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user (
@@ -259,8 +259,8 @@ CREATE TABLE IF NOT EXISTS dim_user_bank_default (
     'table-name' = 'user_bank_default_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    -- 银行卡查不到会直接被 WHERE 丢弃，状态再也写不进去
-    'lookup.cache' = 'NONE'
+    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bvn (
@@ -331,44 +331,42 @@ CREATE TABLE IF NOT EXISTS dim_installment_overdue (
     'table-name' = 'user_order_installment_overdue',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    -- is_overdue 影响 risk=10 → 20/23，每次回源
-    'lookup.cache' = 'NONE'
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '5s'
 );
 
--- cdc_risk_status：来自 user_order binlog 的最新状态（避免 Lookup 缓存/旧 Job 写出旧 status）
 CREATE TEMPORARY VIEW v_application_triggers AS
-SELECT id AS order_id, CAST(risk_order_status AS BIGINT) AS cdc_risk_status, proc_time
-FROM cdc_user_order WHERE id IS NOT NULL
+SELECT id AS order_id, proc_time FROM cdc_user_order WHERE id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, u.proc_time
+SELECT o.id AS order_id, u.proc_time
 FROM cdc_user AS u
 INNER JOIN cdc_user_order AS o ON o.user_id = u.id
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, b.proc_time
+SELECT o.id AS order_id, b.proc_time
 FROM cdc_user_bank_info AS b
 INNER JOIN cdc_user_order AS o ON o.user_id = b.user_id
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, p.proc_time
+SELECT o.id AS order_id, p.proc_time
 FROM cdc_user_personal_info AS p
 INNER JOIN cdc_user_order AS o ON o.user_id = p.user_id
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, di.proc_time
+SELECT o.id AS order_id, di.proc_time
 FROM cdc_device_ids AS di
 INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
 INNER JOIN cdc_user_order AS o ON o.user_id = u.id
 WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> ''
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, ur.proc_time
+SELECT o.id AS order_id, ur.proc_time
 FROM cdc_user_repay AS ur
 INNER JOIN cdc_user_order AS o ON o.order_no = ur.order_no
 WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> ''
 UNION ALL
-SELECT o.id AS order_id, CAST(o.risk_order_status AS BIGINT) AS cdc_risk_status, ra.proc_time
+SELECT o.id AS order_id, ra.proc_time
 FROM cdc_risk_user_approval AS ra
 INNER JOIN cdc_user_order AS o ON o.order_no = ra.order_no
 WHERE ra.order_no IS NOT NULL AND TRIM(ra.order_no) <> ''
 UNION ALL
-SELECT i.user_order_id AS order_id, CAST(NULL AS BIGINT) AS cdc_risk_status, i.proc_time
+SELECT i.user_order_id AS order_id, i.proc_time
 FROM cdc_user_order_installment AS i
 WHERE i.user_order_id IS NOT NULL;
 
@@ -489,7 +487,7 @@ FROM (
         CASE WHEN o.settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(o.settled_time AS STRING)) * 1000 END AS paid_off_time_ms,
         (UNIX_TIMESTAMP(CAST(o.order_time AS STRING)) + 7 * 86400) * 1000 AS lock_expire_ms,
         CAST(
-            CASE CAST(COALESCE(t.cdc_risk_status, o.risk_order_status) AS INT)
+            CASE CAST(o.risk_order_status AS INT)
                 WHEN 2 THEN 3
                 WHEN 4 THEN 5
                 WHEN 6 THEN 13
