@@ -122,8 +122,8 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
     'table-name' = 'user_order_loan_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    -- 订单状态必须每次回源，避免 10→6→10 卡旧值
+    'lookup.cache' = 'NONE'
 );
 
 CREATE TABLE IF NOT EXISTS dim_repay_period (

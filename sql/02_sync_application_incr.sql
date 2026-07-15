@@ -225,8 +225,8 @@ CREATE TABLE IF NOT EXISTS dim_application_order (
     'table-name' = 'application_order_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    -- 订单状态/放款时间必须每次回源；有缓存时 10→6→10 会写出旧 status
+    'lookup.cache' = 'NONE'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user (
@@ -330,8 +330,8 @@ CREATE TABLE IF NOT EXISTS dim_installment_overdue (
     'table-name' = 'user_order_installment_overdue',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    -- is_overdue 影响 risk=10 → 20/23，每次回源
+    'lookup.cache' = 'NONE'
 );
 
 CREATE TEMPORARY VIEW v_application_triggers AS
