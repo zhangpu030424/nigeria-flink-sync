@@ -10,9 +10,12 @@ SELECT CAST(user_id AS SIGNED) AS user_id,
        CAST(bank_account AS CHAR) AS bank_account
 FROM (
          SELECT user_id, bank_code, bank_holder, bank_account,
-                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+                ROW_NUMBER() OVER (
+                    PARTITION BY user_id
+                    ORDER BY is_default DESC, id DESC
+                ) AS rn
          FROM user_bank_info
-         WHERE deleted = 0 AND is_default = 1
+         WHERE deleted = 0
            AND bank_account IS NOT NULL AND TRIM(bank_account) <> ''
      ) t
 WHERE rn = 1;

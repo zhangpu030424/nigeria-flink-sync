@@ -259,8 +259,8 @@ CREATE TABLE IF NOT EXISTS dim_user_bank_default (
     'table-name' = 'user_bank_default_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '30m'
+    -- 银行卡查不到会直接被 WHERE 丢弃，状态再也写不进去
+    'lookup.cache' = 'NONE'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bvn (
