@@ -21,6 +21,8 @@ create table application
     product_id                 varchar(64)                  not null comment '产品ID',
     product_scheme_id          varchar(64)                  not null comment '产品方案ID',
     product_calculator_version varchar(32)                  not null comment '产品计算ID',
+    repay_calculator_version   varchar(32)                  not null comment '还款计算版本',
+    rollover_calculator_version varchar(32)                 not null comment '展期计算版本',
     product_scheme_param       json                         null comment '参数',
     term                       int unsigned                 not null comment '期限（天）',
     periods                    int unsigned     default '1' not null comment '期数',
