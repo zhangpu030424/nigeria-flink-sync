@@ -73,7 +73,28 @@ CREATE TABLE IF NOT EXISTS sink_user_product (
 INSERT INTO sink_user_product
 SELECT
     t.user_id + 100000000,
-    t.product_id,
+    CASE TRIM(t.product_id)
+        WHEN 'P1' THEN '648'
+        WHEN 'P2' THEN '6481'
+        WHEN 'P3' THEN '6482'
+        WHEN 'L1' THEN '649'
+        WHEN 'L2' THEN '650'
+        WHEN 'L3' THEN '651'
+        WHEN 'L4' THEN '652'
+        WHEN 'L5' THEN '653'
+        WHEN 'L6' THEN '654'
+        WHEN 'L7' THEN '6551'
+        WHEN 'L8' THEN '6561'
+        WHEN 'L9' THEN '6571'
+        WHEN 'L10' THEN '6581'
+        WHEN 'L11' THEN '6591'
+        WHEN 'L12' THEN '6601'
+        WHEN 'L13' THEN '6611'
+        WHEN 'L14' THEN '6621'
+        WHEN 'L15' THEN '6631'
+        WHEN 'L16' THEN '6641'
+        ELSE TRIM(t.product_id)
+    END,
     CONCAT(
         '[{"schemeId":"PROD-001-D7","amountRange":[',
         CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(p.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS STRING),

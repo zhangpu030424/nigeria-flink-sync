@@ -75,7 +75,9 @@ else
 fi
 
 echo ""
-echo ">> [5/5] 重建宽表 1-6: sql/ddl/source_all_sync_staging.sql"
+echo ">> [5/5] 产品ID映射表 + 重建宽表 1-6"
+run_sql_file sql/ddl/product_id_map.sql
+echo ">> 重建宽表: sql/ddl/source_all_sync_staging.sql"
 if [[ "$KEEP_DIRTY" -eq 0 ]]; then
   echo ">> 建宽表前清空 user_info_dirty（vt-preload TRIGGER 可能已写入，全量将覆盖）"
   # shellcheck source=scripts/lib/mysql-source.sh

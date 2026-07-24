@@ -4,6 +4,7 @@
 -- id_mapping 见 sql/ddl/id_mapping_sync_staging.sql（单独执行，避免长事务断连）
 --
 -- 前置（若未做过）:
+--   sql/ddl/product_id_map.sql
 --   sql/ddl/source_views_adjust.sql
 --   sql/ddl/source_materialize_user_adjust.sql
 -- =============================================================================
@@ -277,20 +278,22 @@ FROM `user` u
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 
 -- ---------- 4. user_product_sync_staging（按映射 v3：user_order 取最新 product）----------
+-- product_id：P1~P3→648/6481/6482；L1~L6→649..654；L7~L16→6551..6641（见 product_id_map）
 DROP TABLE IF EXISTS user_product_sync_staging;
 
 CREATE TABLE user_product_sync_staging AS
 SELECT t.user_id,
-       t.product_id,
+       COALESCE(m.dst, t.product_id) AS product_id,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_amount_minor,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS unpaid_amount_minor
 FROM (
          SELECT o.user_id,
-                o.product_id,
+                TRIM(o.product_id) AS product_id,
                 o.amount_max,
-                ROW_NUMBER() OVER (PARTITION BY o.user_id, o.product_id ORDER BY o.order_time DESC) AS rn
+                ROW_NUMBER() OVER (PARTITION BY o.user_id, TRIM(o.product_id) ORDER BY o.order_time DESC) AS rn
          FROM user_order o
      ) t
+         LEFT JOIN product_id_map m ON m.src = t.product_id
 WHERE t.rn = 1;
 
 ALTER TABLE user_product_sync_staging ADD PRIMARY KEY (user_id, product_id);
@@ -384,7 +387,7 @@ FROM (
                 ub.bank_code,
                 ub.bank_holder AS bank_account_name,
                 vt_ba.token AS bank_account_token,
-                o.product_id,
+                COALESCE(pm.dst, TRIM(o.product_id)) AS product_id,
                 o.period_days,
                 o.period_count,
                 o.re_loan,
@@ -426,6 +429,7 @@ FROM (
        ) AS repayment_plan_json
          FROM user_order o
          INNER JOIN `user` u ON u.id = o.user_id
+         LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id)
          LEFT JOIN app_config ac ON ac.app_code = o.app_code
          LEFT JOIN (
     SELECT user_id, bvn

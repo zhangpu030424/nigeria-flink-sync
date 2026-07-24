@@ -90,24 +90,25 @@ SELECT CAST(id AS SIGNED) AS id,
 FROM user_order;
 
 CREATE OR REPLACE VIEW application_order_lookup AS
-SELECT CAST(id AS SIGNED) AS id,
-       CAST(order_no AS CHAR) AS order_no,
-       CAST(user_id AS SIGNED) AS user_id,
-       CAST(app_code AS SIGNED) AS app_code,
-       CAST(product_id AS CHAR) AS product_id,
-       CAST(period_days AS SIGNED) AS period_days,
-       CAST(period_count AS SIGNED) AS period_count,
-       CAST(re_loan AS SIGNED) AS re_loan,
-       CAST(amount_max AS CHAR) AS amount_max,
-       CAST(received AS CHAR) AS received,
-       CAST(repayment AS CHAR) AS repayment,
-       CAST(poundage AS CHAR) AS poundage,
-       CAST(order_time AS DATETIME(3)) AS order_time,
-       CAST(disburse_time AS DATETIME(3)) AS disburse_time,
-       CAST(settled_time AS DATETIME(3)) AS settled_time,
-       CAST(last_repayment_time AS DATETIME(3)) AS last_repayment_time,
-       CAST(risk_order_status AS SIGNED) AS risk_order_status
-FROM user_order;
+SELECT CAST(o.id AS SIGNED) AS id,
+       CAST(o.order_no AS CHAR) AS order_no,
+       CAST(o.user_id AS SIGNED) AS user_id,
+       CAST(o.app_code AS SIGNED) AS app_code,
+       CAST(COALESCE(pm.dst, TRIM(o.product_id)) AS CHAR) AS product_id,
+       CAST(o.period_days AS SIGNED) AS period_days,
+       CAST(o.period_count AS SIGNED) AS period_count,
+       CAST(o.re_loan AS SIGNED) AS re_loan,
+       CAST(o.amount_max AS CHAR) AS amount_max,
+       CAST(o.received AS CHAR) AS received,
+       CAST(o.repayment AS CHAR) AS repayment,
+       CAST(o.poundage AS CHAR) AS poundage,
+       CAST(o.order_time AS DATETIME(3)) AS order_time,
+       CAST(o.disburse_time AS DATETIME(3)) AS disburse_time,
+       CAST(o.settled_time AS DATETIME(3)) AS settled_time,
+       CAST(o.last_repayment_time AS DATETIME(3)) AS last_repayment_time,
+       CAST(o.risk_order_status AS SIGNED) AS risk_order_status
+FROM user_order o
+         LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id);
 
 CREATE OR REPLACE VIEW user_order_installment_loan_lookup AS
 SELECT CAST(id AS SIGNED) AS id,

@@ -100,6 +100,7 @@ if [[ "$SKIP_VIEW_DDL" -eq 0 ]]; then
   fi
 
   VIEW_DDL_FILES=(
+    sql/ddl/product_id_map.sql
     sql/ddl/source_views_adjust.sql
     sql/ddl/source_lookup_views.sql
   )
