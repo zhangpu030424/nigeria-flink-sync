@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '120s'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_info (

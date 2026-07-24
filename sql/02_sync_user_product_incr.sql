@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS dim_user_product_latest (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TEMPORARY VIEW v_user_product_triggers AS

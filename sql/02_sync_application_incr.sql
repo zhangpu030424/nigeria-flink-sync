@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS dim_user (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bank_default (
@@ -274,7 +274,7 @@ CREATE TABLE IF NOT EXISTS dim_user_bvn (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_device_ids (
@@ -290,7 +290,7 @@ CREATE TABLE IF NOT EXISTS dim_device_ids (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_risk_approval (
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS dim_risk_approval (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '30m'
+    'lookup.cache.ttl' = '5s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment_overdue (
