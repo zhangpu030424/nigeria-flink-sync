@@ -95,7 +95,7 @@ SYNC_THRESHOLD_PCT="${SYNC_THRESHOLD_PCT:-100}"
 SYNC_REQUIRE_EXACT_COUNT="${SYNC_REQUIRE_EXACT_COUNT:-1}"
 SYNC_TARGET_BASELINE_AUTO="${SYNC_TARGET_BASELINE_AUTO:-1}"
 POLL_SEC="${SYNC_POLL_SEC:-3}"
-CANCEL_DELAY_SEC="${SYNC_CANCEL_DELAY_SEC:-10}"
+CANCEL_DELAY_SEC="${SYNC_CANCEL_DELAY_SEC:-0}"
 BULK_GRACE_ROUNDS="${BULK_GRACE_ROUNDS:-10}"
 BULK_SHORT_RETRY_MAX="${BULK_SHORT_RETRY_MAX:-2}"
 TARGET_MYSQL_PORT="${TARGET_MYSQL_PORT:-3306}"
@@ -328,14 +328,13 @@ submit_bulk() {
   fi
 }
 
-# 全量：宽表与目标计数达标后，等待 CANCEL_DELAY_SEC 秒 → cancel Job → 切增量
+# 全量：宽表与目标计数达标后立即 cancel Job → 切增量（SYNC_CANCEL_DELAY_SEC 默认 0）
 # batch Job 提前 FINISHED 且未达标：再等 BULK_GRACE_ROUNDS 轮刷盘，仍不足则失败
 monitor_bulk_until_stable() {
   local phase_label="$1"
   local src_sql="$2"
   local job_id="${3:-}"
   local prev_target=""
-  local reached_since=""
   local round=0
   local grace=0
 
@@ -391,27 +390,13 @@ monitor_bulk_until_stable() {
       log "[${phase_label}] #${round} 宽表=${src_cnt} 目标=${tgt_cnt} 进度=${progress}% 速率≈${rate}/min ${match_hint} job=${job_state}"
     fi
 
-    switch=0
     if [[ "$reached" == "1" ]]; then
-      if [[ -z "$reached_since" ]]; then
-        reached_since=$(date +%s)
-        log "[${phase_label}] 宽表与目标数量达标，${CANCEL_DELAY_SEC}s 后 cancel Job"
+      if [[ "$CANCEL_DELAY_SEC" -gt 0 ]]; then
+        log "[${phase_label}] 宽表与目标数量达标，等待 ${CANCEL_DELAY_SEC}s 后 cancel"
+        sleep "$CANCEL_DELAY_SEC"
       fi
-      local now elapsed
-      now=$(date +%s)
-      elapsed=$((now - reached_since))
-      if [[ "$elapsed" -ge "$CANCEL_DELAY_SEC" ]]; then
-        switch=1
-      else
-        log "[${phase_label}] 达标等待 cancel ${elapsed}/${CANCEL_DELAY_SEC}s"
-      fi
-    else
-      reached_since=""
-    fi
-
-    if [[ "$switch" -eq 1 ]]; then
       if [[ "$job_running" -eq 1 ]]; then
-        log "[${phase_label}] 达标且已等待 ${CANCEL_DELAY_SEC}s，cancel 全量 Job ${job_id}"
+        log "[${phase_label}] 达标，cancel 全量 Job ${job_id}"
         cancel_job_id "$job_id" ""
       fi
       log "[${phase_label}] ✓ 全量完成（宽表=${src_cnt} 目标=${tgt_cnt}）"
@@ -422,7 +407,6 @@ monitor_bulk_until_stable() {
       grace=$((grace + 1))
       if [[ "$grace" -le "$BULK_GRACE_ROUNDS" ]]; then
         log "[${phase_label}] Job 已结束，宽表=${src_cnt} 目标=${tgt_cnt} 未一致，等待刷盘 ${grace}/${BULK_GRACE_ROUNDS}"
-        reached_since=""
         prev_target="$tgt_cnt"
         sleep "$POLL_SEC"
         continue
@@ -594,7 +578,7 @@ fi
 resolve_bulk_start_ms "${BULK_START_MS_ARG:-}"
 BULK_START_MS_ARG="$BULK_START_MS"
 log "========== 全量 ${FULL_SQL} =========="
-log "全量监控: ${SYNC_SCRIPT_VERSION} 口径=${MONITOR_COUNT_MODE} 达标后等待=${CANCEL_DELAY_SEC}s 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100} offset=${USER_ID_OFFSET}"
+log "全量监控: ${SYNC_SCRIPT_VERSION} 口径=${MONITOR_COUNT_MODE} cancel_delay=${CANCEL_DELAY_SEC}s 一致=${SYNC_REQUIRE_EXACT_COUNT} 允差±${SYNC_COUNT_MAX_DEFICIT:-10}/+${SYNC_COUNT_MAX_SURPLUS:-100} offset=${USER_ID_OFFSET}"
 log "增量 binlog 起点 bulk-start-ms: ${BULK_START_MS}"
 capture_target_baseline
 

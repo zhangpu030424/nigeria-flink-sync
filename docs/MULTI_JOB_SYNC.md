@@ -237,6 +237,32 @@ DDL：`sql/ddl/user_info_dirty.sql`（`deploy-source-ddl.sh` 自动执行；**TR
 
 ## 增量故障排查
 
+### binlog 位点丢失（反复出现）
+
+日志特征：`The connector is trying to read binlog starting at ... mysql-bin.XXXXXX ... but this is no longer available`。
+
+**不要用 `restart-strategy: none` / Job 直接 FAILED 当「根治」。**  
+若 `binlog_expire_logs_seconds=2592000`（30 天）、Job 也是刚清 CKPT 新提的，仍报文件不存在，说明 **CDC 要读的本地文件已经被清掉**——常见不是「过期参数太短」，而是：
+
+| 真因 | 说明 | 怎么处理 |
+|------|------|----------|
+| **本地 Binlog ≠ 备份 30 天** | 控制台「日志备份 30 天」在 OSS；Flink **只能读本地** `SHOW BINARY LOGS`。RDS 本地常按 **时长（可短至十来小时）或磁盘占比** 先清 | 控制台 → 备份恢复 → **本地日志保留**调到 ≥3～7 天；磁盘勿长期打满 |
+| **连了只读** | 只读本地 binlog 极短 | `.env` 的 `SOURCE_MYSQL_HOST` 必须是**主库**（`rm-`，不要 `rr-`） |
+| **消费慢 / 反压** | 位点还在追，本地文件已被策略清掉 | UI 看 Busy/Backpressure；application 多路 CDC 尤其容易 |
+| **主库切换 / 内部迁移** | 旧 file 序号在新节点不存在 | 清 CKPT 后按新起点重提 |
+
+在 **与 Flink 相同的连接** 上查：
+
+```sql
+SHOW VARIABLES LIKE 'binlog_expire_logs_seconds';
+SHOW BINARY LOGS;   -- 只有这里列出的文件 CDC 才能读
+SELECT @@hostname, @@server_id;
+```
+
+对比报错里的 `mysql-bin.006795` 是否还在 `SHOW BINARY LOGS` 结果中。不在 = 本地已删，加长 `expire` 也救不回该文件。
+
+辅助：`cancel-flink-jobs.sh --yes` 仍会清本地 CKPT，避免叠坏状态；根治看 **本地 Binlog 保留 + 主库地址 + 消费速度**。
+
 ### user_info 增量无数据
 
 1. `deploy-source-ddl.sh` 校验 `user_info_dirty` 表 + TRIGGER≥14。

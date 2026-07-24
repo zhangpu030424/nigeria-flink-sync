@@ -32,6 +32,7 @@ services:
         execution.checkpointing.tolerable-failed-checkpoints: 10
         execution.checkpointing.unaligned: true
         execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.externalized-checkpoint-retention: DELETE_ON_CANCELLATION
         table.local-time-zone: Africa/Lagos
     volumes:
       - ./data/flink-checkpoints:/tmp/flink-checkpoints
