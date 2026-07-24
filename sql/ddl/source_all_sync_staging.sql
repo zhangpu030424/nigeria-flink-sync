@@ -278,7 +278,7 @@ FROM `user` u
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 
 -- ---------- 4. user_product_sync_staging（按映射 v3：user_order 取最新 product）----------
--- product_id：P1~P3→648/6481/6482；L1~L6→649..654；L7~L16→6551..6641（见 product_id_map）
+-- product_id：P1→648，P2~P6→6481..6485；L1~L6→649..654；L7~L18→6551..6661（见 product_id_map）
 DROP TABLE IF EXISTS user_product_sync_staging;
 
 CREATE TABLE user_product_sync_staging AS

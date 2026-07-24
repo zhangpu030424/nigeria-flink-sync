@@ -77,6 +77,9 @@ SELECT
         WHEN 'P1' THEN '648'
         WHEN 'P2' THEN '6481'
         WHEN 'P3' THEN '6482'
+        WHEN 'P4' THEN '6483'
+        WHEN 'P5' THEN '6484'
+        WHEN 'P6' THEN '6485'
         WHEN 'L1' THEN '649'
         WHEN 'L2' THEN '650'
         WHEN 'L3' THEN '651'
@@ -93,6 +96,8 @@ SELECT
         WHEN 'L14' THEN '6621'
         WHEN 'L15' THEN '6631'
         WHEN 'L16' THEN '6641'
+        WHEN 'L17' THEN '6651'
+        WHEN 'L18' THEN '6661'
         ELSE TRIM(t.product_id)
     END,
     CONCAT(
