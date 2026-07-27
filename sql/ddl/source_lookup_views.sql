@@ -380,8 +380,8 @@ SELECT u.id AS user_id,
        ) AS CHAR) AS info_json
 FROM `user` u
          LEFT JOIN user_personal_latest_lookup p ON p.user_id = u.id
-         LEFT JOIN vt_token_cache_lookup vt
-                   ON vt.vt_type = 'id_number'
+         LEFT JOIN vt_token_cache vt
+                   ON vt.vt_type = 4 AND vt.status = 1
                        AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
          LEFT JOIN user_work_latest_lookup wr ON wr.user_id = u.id
