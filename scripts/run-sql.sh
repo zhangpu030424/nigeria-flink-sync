@@ -64,15 +64,15 @@ _sid="${CDC_SERVER_ID_SPAN:-$_par}"
 if [[ "$_sid" -lt "$_par" ]]; then
   _sid="$_par"
 fi
-# user_info 多源 CDC（5400+，段间隔 20）
+# user_info 多源 CDC（5400+；VT/adjust 用 5900+，避开 user 主 Job 的 5501/5521）
 _ui_base="${CDC_SERVER_ID_UI_BASE:-5400}"
 export CDC_SERVER_ID_UI_USER="${CDC_SERVER_ID_UI_USER:-$((_ui_base + 1))-$((_ui_base + _sid))}"
 export CDC_SERVER_ID_UI_PERSONAL="${CDC_SERVER_ID_UI_PERSONAL:-$((_ui_base + 21))-$((_ui_base + 20 + _sid))}"
 export CDC_SERVER_ID_UI_WORK="${CDC_SERVER_ID_UI_WORK:-$((_ui_base + 41))-$((_ui_base + 40 + _sid))}"
 export CDC_SERVER_ID_UI_EMERGENCY="${CDC_SERVER_ID_UI_EMERGENCY:-$((_ui_base + 61))-$((_ui_base + 60 + _sid))}"
 export CDC_SERVER_ID_UI_CREDIT="${CDC_SERVER_ID_UI_CREDIT:-$((_ui_base + 81))-$((_ui_base + 80 + _sid))}"
-export CDC_SERVER_ID_UI_VT="${CDC_SERVER_ID_UI_VT:-$((_ui_base + 101))-$((_ui_base + 100 + _sid))}"
-export CDC_SERVER_ID_UI_ADJUST="${CDC_SERVER_ID_UI_ADJUST:-$((_ui_base + 121))-$((_ui_base + 120 + _sid))}"
+export CDC_SERVER_ID_UI_VT="${CDC_SERVER_ID_UI_VT:-5901-$((5900 + _sid))}"
+export CDC_SERVER_ID_UI_ADJUST="${CDC_SERVER_ID_UI_ADJUST:-5921-$((5920 + _sid))}"
 # 兼容旧 dirty 单路（已不再使用，保留变量避免旧脚本报错）
 export CDC_SERVER_ID_UI_DIRTY="${CDC_SERVER_ID_UI_DIRTY:-$((_ui_base + 1))}"
 if [[ "$CDC_SERVER_ID_UI_DIRTY" == *-* ]]; then
