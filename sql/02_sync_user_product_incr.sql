@@ -1,7 +1,7 @@
 -- 增量 user_product：CDC user_order 触发 + Lookup 取 user+product 最新一单
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '3s';
+SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS dim_user_product_latest (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TEMPORARY VIEW v_user_product_triggers AS
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS sink_user_product (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
-    'sink.buffer-flush.interval' = '1s',
+    'sink.buffer-flush.interval' = '200ms',
     'sink.max-retries' = '3'
 );
 

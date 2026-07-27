@@ -9,7 +9,7 @@ CREATE TEMPORARY FUNCTION vt_tokenize_emergency_contacts AS 'com.nigeria.flink.u
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '${USER_INFO_DIRTY_COALESCE_SEC}s';
+SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '5000';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS dim_user_info_bundle (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS sink_user_info (
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS sink_user_info (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
-    'sink.buffer-flush.interval' = '500ms',
+    'sink.buffer-flush.interval' = '200ms',
     'sink.max-retries' = '3'
 );
 

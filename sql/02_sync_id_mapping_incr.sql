@@ -2,7 +2,7 @@
 -- 新关系需先刷新宽表（重跑 sql/ddl/id_mapping_sync_staging.sql 或 rebuild-all-staging.sh）再追 binlog
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '2s';
+SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS sink_id_mapping (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
-    'sink.buffer-flush.interval' = '500ms',
+    'sink.buffer-flush.interval' = '200ms',
     'sink.max-retries' = '3'
 );
 

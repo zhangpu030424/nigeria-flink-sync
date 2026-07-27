@@ -6,7 +6,7 @@ CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFuncti
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '2s';
+SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS dim_application_order (
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     -- 短缓存：减轻源库压力；状态以 CDC 带出的 cdc_risk_status 为准
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user (
@@ -244,7 +244,7 @@ CREATE TABLE IF NOT EXISTS dim_user (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bank_default (
@@ -260,7 +260,7 @@ CREATE TABLE IF NOT EXISTS dim_user_bank_default (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bvn (
@@ -274,7 +274,7 @@ CREATE TABLE IF NOT EXISTS dim_user_bvn (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_device_ids (
@@ -290,7 +290,7 @@ CREATE TABLE IF NOT EXISTS dim_device_ids (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_risk_approval (
@@ -304,7 +304,7 @@ CREATE TABLE IF NOT EXISTS dim_risk_approval (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment_overdue (
@@ -332,7 +332,7 @@ CREATE TABLE IF NOT EXISTS dim_installment_overdue (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TEMPORARY VIEW v_application_triggers AS
@@ -392,7 +392,7 @@ CREATE TABLE IF NOT EXISTS sink_application (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
-    'sink.buffer-flush.interval' = '1s',
+    'sink.buffer-flush.interval' = '200ms',
     'sink.max-retries' = '3'
 );
 

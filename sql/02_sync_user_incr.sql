@@ -4,7 +4,7 @@ CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFuncti
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
-SET 'table.exec.mini-batch.allow-latency' = '1s';
+SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS dim_user_row (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_users_by_adid (
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS dim_users_by_adid (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_adjust (
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '5s'
+    'lookup.cache.ttl' = '1s'
 );
 
 CREATE TEMPORARY VIEW v_user_triggers AS
@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS sink_user (
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
-    'sink.buffer-flush.interval' = '1s',
+    'sink.buffer-flush.interval' = '200ms',
     'sink.max-retries' = '3'
 );
 
