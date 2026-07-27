@@ -25,6 +25,10 @@ GRANT SELECT ON nigeria_backend.user_order_installment_overdue TO 'flink_cdc'@'1
 GRANT SELECT ON nigeria_backend.user_repay_paid_by_order_period TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_order_loan_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_order_installment_loan_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.application_order_id_by_order_no_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.application_latest_order_by_user_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.application_latest_order_by_device_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.application_incr_bundle_lookup TO 'flink_cdc'@'101.47.31.184';
 
 FLUSH PRIVILEGES;
 

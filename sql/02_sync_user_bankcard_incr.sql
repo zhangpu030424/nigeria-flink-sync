@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS dim_bankcard_by_account (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_bankcard (
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS dim_user_bankcard (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TEMPORARY VIEW v_bankcard_triggers AS

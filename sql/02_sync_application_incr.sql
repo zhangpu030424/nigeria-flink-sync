@@ -1,7 +1,11 @@
--- 增量 application：多源 CDC 触发 + Lookup 组装
+-- 增量 application（目标：源变更 ≤30s 可见）
+-- 优化：
+--   1) 触发侧：CDC 只出 order_id，禁止 cdc_user ⋈ cdc_user_order 双流 Join
+--   2) 组装侧：单次 Lookup application_incr_bundle_lookup（源库内 JOIN+VT cache）
+--   3) VT miss 再调 vt_tokenize；lookup.cache.ttl=${LOOKUP_CACHE_TTL}（默认 30s）
 -- CDC: user_order, user, user_bank_info, user_personal_info, device_ids,
---       user_repay, risk_user_approval_callback, user_order_installment
--- 前置: ./scripts/deploy-source-ddl.sh
+--      user_repay, risk_user_approval_callback, user_order_installment
+-- 前置: ./scripts/deploy-source-ddl.sh（含 application_incr_bundle_lookup 等）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -10,14 +14,13 @@ SET 'table.exec.mini-batch.allow-latency' = '200ms';
 SET 'table.exec.mini-batch.size' = '${FLINK_MINI_BATCH_SIZE}';
 SET 'execution.checkpointing.interval' = '${FLINK_CHECKPOINT_INTERVAL}';
 SET 'execution.checkpointing.timeout' = '${FLINK_CHECKPOINT_TIMEOUT}';
-SET 'execution.checkpointing.min-pause' = '120s';
+SET 'execution.checkpointing.min-pause' = '60s';
 SET 'execution.checkpointing.tolerable-failed-checkpoints' = '10';
 SET 'execution.checkpointing.unaligned' = 'true';
+SET 'table.exec.state.ttl' = '2 h';
 
 CREATE TABLE IF NOT EXISTS cdc_user_order (
     id BIGINT,
-    user_id BIGINT,
-    order_no STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -40,7 +43,6 @@ CREATE TABLE IF NOT EXISTS cdc_user_order (
 
 CREATE TABLE IF NOT EXISTS cdc_user (
     id BIGINT,
-    device_id STRING,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -200,171 +202,133 @@ CREATE TABLE IF NOT EXISTS cdc_user_order_installment (
     'scan.snapshot.fetch.size' = '${FLINK_CDC_FETCH_SIZE}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_application_order (
-    id BIGINT,
+CREATE TABLE IF NOT EXISTS dim_order_id_by_order_no (
     order_no STRING,
-    user_id BIGINT,
-    app_code BIGINT,
-    product_id STRING,
-    period_days BIGINT,
-    period_count BIGINT,
-    re_loan BIGINT,
-    amount_max STRING,
-    received STRING,
-    repayment STRING,
-    poundage STRING,
-    order_time TIMESTAMP(3),
-    disburse_time TIMESTAMP(3),
-    settled_time TIMESTAMP(3),
-    last_repayment_time TIMESTAMP(3),
-    risk_order_status BIGINT,
-    PRIMARY KEY (id) NOT ENFORCED
+    order_id BIGINT,
+    PRIMARY KEY (order_no) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'application_order_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    -- 短缓存：减轻源库压力；状态以 CDC 带出的 cdc_risk_status 为准
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
-);
-
-CREATE TABLE IF NOT EXISTS dim_user (
-    id BIGINT,
-    mobile STRING,
-    device_id STRING,
-    gps_adid STRING,
-    idfa STRING,
-    PRIMARY KEY (id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'application_user_lookup',
+    'table-name' = 'application_order_id_by_order_no_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_user_bank_default (
+CREATE TABLE IF NOT EXISTS dim_latest_order_by_user (
     user_id BIGINT,
-    bank_code STRING,
-    bank_holder STRING,
-    bank_account STRING,
+    order_id BIGINT,
     PRIMARY KEY (user_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_bank_default_lookup',
+    'table-name' = 'application_latest_order_by_user_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_user_bvn (
-    user_id BIGINT,
-    bvn STRING,
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_bvn_lookup',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '1s'
-);
-
-CREATE TABLE IF NOT EXISTS dim_device_ids (
+CREATE TABLE IF NOT EXISTS dim_latest_order_by_device (
     device_uuid STRING,
-    session_uuid STRING,
-    aaid STRING,
-    idfa STRING,
+    order_id BIGINT,
     PRIMARY KEY (device_uuid) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'device_ids_latest_lookup',
+    'table-name' = 'application_latest_order_by_device_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_risk_approval (
-    order_no STRING,
-    callback_time TIMESTAMP(3),
-    PRIMARY KEY (order_no) NOT ENFORCED
+CREATE TABLE IF NOT EXISTS dim_application_bundle (
+    id BIGINT,
+    application_no STRING,
+    sn STRING,
+    user_id BIGINT,
+    app_code BIGINT,
+    device_uuid STRING,
+    session_id STRING,
+    mobile_norm STRING,
+    bvn_raw STRING,
+    bank_account_raw STRING,
+    gaid_idfa_raw STRING,
+    mobile_token STRING,
+    id_number_token STRING,
+    gaid_idfa_token STRING,
+    bank_code STRING,
+    bank_account_name STRING,
+    bank_account_token STRING,
+    product_id STRING,
+    period_days BIGINT,
+    period_count BIGINT,
+    re_loan BIGINT,
+    order_time TIMESTAMP(3),
+    reviewed_time TIMESTAMP(3),
+    disburse_time TIMESTAMP(3),
+    settled_time TIMESTAMP(3),
+    last_paid_time TIMESTAMP(3),
+    last_repayment_time TIMESTAMP(3),
+    credit_limit_minor BIGINT,
+    loan_amount_minor BIGINT,
+    principal_minor BIGINT,
+    total_amount_minor BIGINT,
+    disbursed_amount_minor BIGINT,
+    risk_status BIGINT,
+    repayment_plan_json STRING,
+    PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
     'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'risk_approval_latest_by_order',
+    'table-name' = 'application_incr_bundle_lookup',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.max-rows' = '200000',
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
-CREATE TABLE IF NOT EXISTS dim_user_repay_paid (
-    order_no STRING,
-    callback_time TIMESTAMP(3),
-    PRIMARY KEY (order_no) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_repay_paid_latest_by_order',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
-);
-
-CREATE TABLE IF NOT EXISTS dim_installment_overdue (
-    user_order_id BIGINT,
-    is_overdue BIGINT,
-    PRIMARY KEY (user_order_id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'user_order_installment_overdue',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
-);
-
+-- 全部触发收敛为 order_id，无 CDC 双流 Join
 CREATE TEMPORARY VIEW v_application_triggers AS
 SELECT id AS order_id, proc_time FROM cdc_user_order WHERE id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, u.proc_time
+SELECT lo.order_id, u.proc_time
 FROM cdc_user AS u
-INNER JOIN cdc_user_order AS o ON o.user_id = u.id
+INNER JOIN dim_latest_order_by_user FOR SYSTEM_TIME AS OF u.proc_time AS lo
+    ON CAST(lo.user_id AS BIGINT) = u.id
+WHERE lo.order_id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, b.proc_time
+SELECT lo.order_id, b.proc_time
 FROM cdc_user_bank_info AS b
-INNER JOIN cdc_user_order AS o ON o.user_id = b.user_id
+INNER JOIN dim_latest_order_by_user FOR SYSTEM_TIME AS OF b.proc_time AS lo
+    ON CAST(lo.user_id AS BIGINT) = b.user_id
+WHERE b.user_id IS NOT NULL AND lo.order_id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, p.proc_time
+SELECT lo.order_id, p.proc_time
 FROM cdc_user_personal_info AS p
-INNER JOIN cdc_user_order AS o ON o.user_id = p.user_id
+INNER JOIN dim_latest_order_by_user FOR SYSTEM_TIME AS OF p.proc_time AS lo
+    ON CAST(lo.user_id AS BIGINT) = p.user_id
+WHERE p.user_id IS NOT NULL AND lo.order_id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, di.proc_time
+SELECT ld.order_id, di.proc_time
 FROM cdc_device_ids AS di
-INNER JOIN cdc_user AS u ON u.device_id = di.device_uuid
-INNER JOIN cdc_user_order AS o ON o.user_id = u.id
-WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> ''
+INNER JOIN dim_latest_order_by_device FOR SYSTEM_TIME AS OF di.proc_time AS ld
+    ON ld.device_uuid = di.device_uuid
+WHERE di.device_uuid IS NOT NULL AND TRIM(di.device_uuid) <> '' AND ld.order_id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, ur.proc_time
+SELECT oid.order_id, ur.proc_time
 FROM cdc_user_repay AS ur
-INNER JOIN cdc_user_order AS o ON o.order_no = ur.order_no
-WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> ''
+INNER JOIN dim_order_id_by_order_no FOR SYSTEM_TIME AS OF ur.proc_time AS oid
+    ON oid.order_no = ur.order_no
+WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> '' AND oid.order_id IS NOT NULL
 UNION ALL
-SELECT o.id AS order_id, ra.proc_time
+SELECT oid.order_id, ra.proc_time
 FROM cdc_risk_user_approval AS ra
-INNER JOIN cdc_user_order AS o ON o.order_no = ra.order_no
-WHERE ra.order_no IS NOT NULL AND TRIM(ra.order_no) <> ''
+INNER JOIN dim_order_id_by_order_no FOR SYSTEM_TIME AS OF ra.proc_time AS oid
+    ON oid.order_no = ra.order_no
+WHERE ra.order_no IS NOT NULL AND TRIM(ra.order_no) <> '' AND oid.order_id IS NOT NULL
 UNION ALL
 SELECT i.user_order_id AS order_id, i.proc_time
 FROM cdc_user_order_installment AS i
@@ -443,93 +407,57 @@ SELECT
     e.risk_status
 FROM (
     SELECT
-        CONCAT('ng0', CAST(o.app_code AS STRING), '-', o.order_no) AS application_no,
-        o.order_no AS sn,
-        o.user_id + 100000000 AS user_id,
-        o.user_id + 100000000 AS group_user_id,
-        CAST(o.app_code AS INT) AS app_id,
-        vt_tokenize(
-            CASE
-                WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-                WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                ELSE CONCAT('+234', TRIM(u.mobile))
-            END
-        ) AS mobile_token,
+        b.application_no,
+        b.sn,
+        b.user_id + 100000000 AS user_id,
+        b.user_id + 100000000 AS group_user_id,
+        CAST(b.app_code AS INT) AS app_id,
         CASE
-            WHEN bvn.bvn IS NULL OR TRIM(bvn.bvn) = '' THEN CAST('' AS STRING)
-            ELSE vt_tokenize(TRIM(bvn.bvn))
+            WHEN b.mobile_token IS NOT NULL AND TRIM(b.mobile_token) <> '' THEN b.mobile_token
+            WHEN b.mobile_norm IS NULL OR TRIM(b.mobile_norm) = '' THEN CAST(NULL AS STRING)
+            ELSE vt_tokenize(TRIM(b.mobile_norm))
+        END AS mobile_token,
+        CASE
+            WHEN b.bvn_raw IS NULL OR TRIM(b.bvn_raw) = '' THEN CAST('' AS STRING)
+            WHEN b.id_number_token IS NOT NULL AND TRIM(b.id_number_token) <> '' THEN b.id_number_token
+            ELSE vt_tokenize(TRIM(b.bvn_raw))
         END AS id_number_token,
         CASE
-            WHEN TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) IS NULL
-                OR TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) = ''
-                THEN CAST(NULL AS STRING)
-            ELSE vt_tokenize(TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))))
+            WHEN b.gaid_idfa_raw IS NULL OR TRIM(b.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
+            WHEN b.gaid_idfa_token IS NOT NULL AND TRIM(b.gaid_idfa_token) <> '' THEN b.gaid_idfa_token
+            ELSE vt_tokenize(TRIM(b.gaid_idfa_raw))
         END AS gaid_idfa_token,
-        COALESCE(u.device_id, '') AS device_uuid,
-        di.session_uuid AS session_id,
-        COALESCE(ub.bank_code, '') AS bank_code,
-        COALESCE(ub.bank_holder, '') AS bank_account_name,
-        vt_tokenize(TRIM(ub.bank_account)) AS bank_account_token,
-        o.product_id,
-        CAST(COALESCE(o.period_days, 7) AS INT) AS period_days,
-        CAST(COALESCE(o.period_count, 1) AS INT) AS period_count,
-        CAST(COALESCE(o.re_loan, 0) AS TINYINT) AS re_loan,
-        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT) AS credit_limit_minor,
-        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT) AS loan_amount_minor,
-        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT) AS principal_minor,
-        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT) AS total_amount_minor,
-        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT) AS disbursed_amount_minor,
-        CAST(UNIX_TIMESTAMP(CAST(o.order_time AS STRING)) * 1000 AS BIGINT) AS created_time_ms,
-        CASE WHEN ra.callback_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(ra.callback_time AS STRING)) * 1000 END AS reviewed_time_ms,
-        CASE WHEN o.disburse_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(o.disburse_time AS STRING)) * 1000 END AS disbursed_time_ms,
-        CASE WHEN ur.callback_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(ur.callback_time AS STRING)) * 1000 END AS last_paid_time_ms,
-        CASE WHEN o.settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(o.settled_time AS STRING)) * 1000 END AS paid_off_time_ms,
-        (UNIX_TIMESTAMP(CAST(o.order_time AS STRING)) + 7 * 86400) * 1000 AS lock_expire_ms,
-        CAST(
-            CASE CAST(o.risk_order_status AS INT)
-                WHEN 2 THEN 3
-                WHEN 4 THEN 5
-                WHEN 6 THEN 13
-                WHEN 8 THEN 15
-                WHEN 10 THEN CASE WHEN COALESCE(ov.is_overdue, 0) = 1 THEN 23 ELSE 20 END
-                WHEN 11 THEN 23
-                WHEN 40 THEN 25
-                WHEN 20 THEN 27
-                WHEN 30 THEN 27
-                WHEN 50 THEN 27
-                ELSE 1
-            END AS TINYINT
-        ) AS risk_status,
-        JSON_STRING(JSON_OBJECT(
-            KEY 'roll_sequence' VALUE CAST(0 AS INT),
-            KEY 'period' VALUE CAST(1 AS INT),
-            KEY 'principal' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            KEY 'disbursed_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            KEY 'interest' VALUE CAST(0 AS BIGINT),
-            KEY 'admin_fee' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            KEY 'service_fee' VALUE CAST(0 AS BIGINT),
-            KEY 'tax_fee' VALUE CAST(0 AS BIGINT),
-            KEY 'reduction_amount' VALUE CAST(0 AS BIGINT),
-            KEY 'total_amount' VALUE CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS BIGINT),
-            KEY 'term' VALUE CAST(COALESCE(o.period_days, 7) AS INT),
-            KEY 'start_date' VALUE DATE_FORMAT(o.order_time, 'yyyy-MM-dd'),
-            KEY 'due_date' VALUE DATE_FORMAT(o.last_repayment_time, 'yyyy-MM-dd'),
-            KEY 'roll_allowed' VALUE CAST(0 AS INT)
-        )) AS repayment_plan_json,
-        bvn.bvn AS bvn_raw
+        COALESCE(b.device_uuid, '') AS device_uuid,
+        b.session_id,
+        COALESCE(b.bank_code, '') AS bank_code,
+        COALESCE(b.bank_account_name, '') AS bank_account_name,
+        CASE
+            WHEN b.bank_account_token IS NOT NULL AND TRIM(b.bank_account_token) <> '' THEN b.bank_account_token
+            WHEN b.bank_account_raw IS NULL OR TRIM(b.bank_account_raw) = '' THEN CAST(NULL AS STRING)
+            ELSE vt_tokenize(TRIM(b.bank_account_raw))
+        END AS bank_account_token,
+        b.product_id,
+        CAST(b.period_days AS INT) AS period_days,
+        CAST(b.period_count AS INT) AS period_count,
+        CAST(b.re_loan AS TINYINT) AS re_loan,
+        b.credit_limit_minor,
+        b.loan_amount_minor,
+        b.principal_minor,
+        b.total_amount_minor,
+        b.disbursed_amount_minor,
+        CAST(UNIX_TIMESTAMP(CAST(b.order_time AS STRING)) * 1000 AS BIGINT) AS created_time_ms,
+        CASE WHEN b.reviewed_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(b.reviewed_time AS STRING)) * 1000 END AS reviewed_time_ms,
+        CASE WHEN b.disburse_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(b.disburse_time AS STRING)) * 1000 END AS disbursed_time_ms,
+        CASE WHEN b.last_paid_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(b.last_paid_time AS STRING)) * 1000 END AS last_paid_time_ms,
+        CASE WHEN b.settled_time IS NULL THEN CAST(NULL AS BIGINT) ELSE UNIX_TIMESTAMP(CAST(b.settled_time AS STRING)) * 1000 END AS paid_off_time_ms,
+        (UNIX_TIMESTAMP(CAST(b.order_time AS STRING)) + 7 * 86400) * 1000 AS lock_expire_ms,
+        CAST(b.risk_status AS TINYINT) AS risk_status,
+        b.repayment_plan_json,
+        b.bvn_raw
     FROM v_application_triggers AS t
-    INNER JOIN dim_application_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON o.id = t.order_id
-    INNER JOIN dim_user FOR SYSTEM_TIME AS OF t.proc_time AS u ON CAST(u.id AS BIGINT) = o.user_id
-    LEFT JOIN dim_user_bank_default FOR SYSTEM_TIME AS OF t.proc_time AS ub ON CAST(ub.user_id AS BIGINT) = o.user_id
-    LEFT JOIN dim_user_bvn FOR SYSTEM_TIME AS OF t.proc_time AS bvn ON CAST(bvn.user_id AS BIGINT) = o.user_id
-    LEFT JOIN dim_device_ids FOR SYSTEM_TIME AS OF t.proc_time AS di
-        ON u.device_id IS NOT NULL AND TRIM(u.device_id) <> '' AND di.device_uuid = u.device_id
-    LEFT JOIN dim_risk_approval FOR SYSTEM_TIME AS OF t.proc_time AS ra ON ra.order_no = o.order_no
-    LEFT JOIN dim_user_repay_paid FOR SYSTEM_TIME AS OF t.proc_time AS ur ON ur.order_no = o.order_no
-    LEFT JOIN dim_installment_overdue FOR SYSTEM_TIME AS OF t.proc_time AS ov ON CAST(ov.user_order_id AS BIGINT) = o.id
-    WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
+    INNER JOIN dim_application_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b
+        ON b.id = t.order_id
+    WHERE b.sn IS NOT NULL AND TRIM(b.sn) <> ''
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''
   AND e.bank_account_token IS NOT NULL AND TRIM(e.bank_account_token) <> ''

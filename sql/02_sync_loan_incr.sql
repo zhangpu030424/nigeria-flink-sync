@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS dim_installment (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_order (
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS dim_user_order (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_repay_period (
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS dim_repay_period (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TEMPORARY VIEW v_loan_triggers AS

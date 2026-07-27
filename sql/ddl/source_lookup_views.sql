@@ -439,3 +439,145 @@ FROM (
          WHERE user_id IS NOT NULL AND product_id IS NOT NULL AND TRIM(product_id) <> ''
      ) t
 WHERE rn = 1;
+
+-- ========== application 增量（30s SLA：单次 bundle Lookup + 无双流 Join）==========
+
+CREATE OR REPLACE VIEW application_order_id_by_order_no_lookup AS
+SELECT CAST(order_no AS CHAR) AS order_no,
+       CAST(id AS SIGNED) AS order_id
+FROM (
+         SELECT id, order_no,
+                ROW_NUMBER() OVER (PARTITION BY order_no ORDER BY id DESC) AS rn
+         FROM user_order
+         WHERE order_no IS NOT NULL AND TRIM(order_no) <> ''
+           AND app_code IN (567, 568, 569, 571, 572, 573)
+     ) t
+WHERE rn = 1;
+
+CREATE OR REPLACE VIEW application_latest_order_by_user_lookup AS
+SELECT CAST(user_id AS SIGNED) AS user_id,
+       CAST(order_id AS SIGNED) AS order_id
+FROM (
+         SELECT user_id, id AS order_id,
+                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
+         FROM user_order
+         WHERE user_id IS NOT NULL
+           AND app_code IN (567, 568, 569, 571, 572, 573)
+     ) t
+WHERE rn = 1;
+
+CREATE OR REPLACE VIEW application_latest_order_by_device_lookup AS
+SELECT CAST(device_uuid AS CHAR) AS device_uuid,
+       CAST(order_id AS SIGNED) AS order_id
+FROM (
+         SELECT u.device_id AS device_uuid, o.id AS order_id,
+                ROW_NUMBER() OVER (PARTITION BY u.device_id ORDER BY o.id DESC) AS rn
+         FROM user u
+                  INNER JOIN user_order o ON o.user_id = u.id
+         WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+           AND o.app_code IN (567, 568, 569, 571, 572, 573)
+     ) t
+WHERE rn = 1;
+
+-- 按 order.id 一次组装 application 增量所需字段（含 VT cache token）
+CREATE OR REPLACE VIEW application_incr_bundle_lookup AS
+SELECT CAST(o.id AS SIGNED) AS id,
+       CAST(CONCAT('ng0', CAST(o.app_code AS CHAR), '-', o.order_no) AS CHAR) AS application_no,
+       CAST(o.order_no AS CHAR) AS sn,
+       CAST(o.user_id AS SIGNED) AS user_id,
+       CAST(o.app_code AS SIGNED) AS app_code,
+       CAST(COALESCE(u.device_id, '') AS CHAR) AS device_uuid,
+       CAST(di.session_uuid AS CHAR) AS session_id,
+       CAST((CASE
+                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                 ELSE CONCAT('+234', TRIM(u.mobile))
+           END) AS CHAR) AS mobile_norm,
+       CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
+       CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
+       CAST(TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) AS CHAR) AS gaid_idfa_raw,
+       CAST(vt_m.token AS CHAR) AS mobile_token,
+       CAST(vt_id.token AS CHAR) AS id_number_token,
+       CAST(vt_g.token AS CHAR) AS gaid_idfa_token,
+       CAST(COALESCE(ub.bank_code, '') AS CHAR) AS bank_code,
+       CAST(COALESCE(ub.bank_holder, '') AS CHAR) AS bank_account_name,
+       CAST(vt_ba.token AS CHAR) AS bank_account_token,
+       CAST(COALESCE(pm.dst, TRIM(o.product_id)) AS CHAR) AS product_id,
+       CAST(COALESCE(o.period_days, 7) AS SIGNED) AS period_days,
+       CAST(COALESCE(o.period_count, 1) AS SIGNED) AS period_count,
+       CAST(COALESCE(o.re_loan, 0) AS SIGNED) AS re_loan,
+       CAST(o.order_time AS DATETIME(3)) AS order_time,
+       CAST(ruac.callback_time AS DATETIME(3)) AS reviewed_time,
+       CAST(o.disburse_time AS DATETIME(3)) AS disburse_time,
+       CAST(o.settled_time AS DATETIME(3)) AS settled_time,
+       CAST(ur_lp.callback_time AS DATETIME(3)) AS last_paid_time,
+       CAST(o.last_repayment_time AS DATETIME(3)) AS last_repayment_time,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_limit_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS loan_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS total_amount_minor,
+       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS disbursed_amount_minor,
+       CAST(
+               CASE CAST(o.risk_order_status AS SIGNED)
+                   WHEN 2 THEN 3
+                   WHEN 4 THEN 5
+                   WHEN 6 THEN 13
+                   WHEN 8 THEN 15
+                   WHEN 10 THEN CASE WHEN COALESCE(inst.is_overdue, 0) = 1 THEN 23 ELSE 20 END
+                   WHEN 11 THEN 23
+                   WHEN 40 THEN 25
+                   WHEN 20 THEN 27
+                   WHEN 30 THEN 27
+                   WHEN 50 THEN 27
+                   ELSE 1
+                   END AS SIGNED
+       ) AS risk_status,
+       CAST(JSON_OBJECT(
+               'roll_sequence', 0,
+               'period', 1,
+               'principal', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
+               'disbursed_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
+               'interest', 0,
+               'admin_fee', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.poundage), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
+               'service_fee', 0,
+               'tax_fee', 0,
+               'reduction_amount', 0,
+               'total_amount', CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED),
+               'term', COALESCE(o.period_days, 7),
+               'start_date', DATE_FORMAT(o.order_time, '%Y-%m-%d'),
+               'due_date', DATE_FORMAT(o.last_repayment_time, '%Y-%m-%d'),
+               'roll_allowed', 0
+            ) AS CHAR) AS repayment_plan_json
+FROM user_order o
+         INNER JOIN `user` u ON u.id = o.user_id
+         LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id)
+         LEFT JOIN user_bvn_lookup p ON p.user_id = o.user_id
+         LEFT JOIN user_bank_default_lookup ub ON ub.user_id = o.user_id
+         LEFT JOIN device_ids_latest_lookup di ON di.device_uuid = u.device_id
+         LEFT JOIN vt_token_cache vt_m
+                   ON vt_m.vt_type = 1 AND vt_m.status = 1
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
+                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                           ELSE CONCAT('+234', TRIM(u.mobile))
+                       END) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_id
+                   ON vt_id.vt_type = 4 AND vt_id.status = 1
+                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_g
+                   ON vt_g.vt_type = 2 AND vt_g.status = 1
+                       AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''),
+                                                                              NULLIF(TRIM(u.idfa), ''),
+                                                                              NULLIF(TRIM(di.aaid), ''))) COLLATE utf8mb4_bin
+         LEFT JOIN vt_token_cache vt_ba
+                   ON vt_ba.vt_type = 3 AND vt_ba.status = 1
+                       AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
+         LEFT JOIN risk_approval_latest_by_order ruac ON ruac.order_no = o.order_no
+         LEFT JOIN user_repay_paid_latest_by_order ur_lp ON ur_lp.order_no = o.order_no
+         LEFT JOIN user_order_installment_overdue inst ON inst.user_order_id = o.id
+WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';

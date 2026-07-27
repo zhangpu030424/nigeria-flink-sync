@@ -33,6 +33,10 @@ SOURCE_LOOKUP_CHECK_VIEWS=(
   risk_approval_latest_by_order
   user_repay_paid_latest_by_order
   user_order_installment_overdue
+  application_order_id_by_order_no_lookup
+  application_latest_order_by_user_lookup
+  application_latest_order_by_device_lookup
+  application_incr_bundle_lookup
 )
 
 source_lookup_views_all_exist() {

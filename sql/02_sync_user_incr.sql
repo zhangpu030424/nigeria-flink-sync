@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS dim_user_row (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '500000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_users_by_adid (
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS dim_users_by_adid (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_adjust (
@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS dim_user_adjust (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '1s'
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
 CREATE TEMPORARY VIEW v_user_triggers AS
