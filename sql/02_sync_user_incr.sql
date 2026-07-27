@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS dim_user_row (
     id BIGINT,
     app_code BIGINT,
     mobile STRING,
+    mobile_norm STRING,
+    mobile_token STRING,
     device_id STRING,
     adid STRING,
     create_time TIMESTAMP(3),
@@ -175,15 +177,11 @@ FROM (
         CAST(u.app_code AS INT) AS app_id,
         u.id + 100000000 AS group_user_id,
         u.id + 100000000 AS info_user_id,
-        vt_tokenize(
-            CASE
-                WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN CAST(NULL AS STRING)
-                WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                ELSE CONCAT('+234', TRIM(u.mobile))
-            END
-        ) AS mobile_token,
+        CASE
+            WHEN u.mobile_token IS NOT NULL AND TRIM(u.mobile_token) <> '' THEN u.mobile_token
+            WHEN u.mobile_norm IS NULL OR TRIM(u.mobile_norm) = '' THEN CAST(NULL AS STRING)
+            ELSE vt_tokenize(TRIM(u.mobile_norm))
+        END AS mobile_token,
         CAST(0 AS BIGINT) AS closed_time,
         COALESCE(u.device_id, '') AS reg_device_uuid,
         CAST(UNIX_TIMESTAMP(CAST(u.create_time AS STRING)) * 1000 AS BIGINT) AS reg_time,

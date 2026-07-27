@@ -141,19 +141,49 @@ CREATE TABLE IF NOT EXISTS dim_repay_period (
     'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
+CREATE TABLE IF NOT EXISTS dim_installment_by_order (
+    user_order_id BIGINT,
+    installment_id BIGINT,
+    PRIMARY KEY (user_order_id, installment_id) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'loan_installment_ids_by_user_order_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
+);
+
+CREATE TABLE IF NOT EXISTS dim_installment_by_order_period (
+    order_no STRING,
+    current_period BIGINT,
+    installment_id BIGINT,
+    PRIMARY KEY (order_no, current_period) NOT ENFORCED
+) WITH (
+    'connector' = 'jdbc',
+    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
+    'table-name' = 'loan_installment_id_by_order_no_period_lookup',
+    'username' = '${SOURCE_MYSQL_USER}',
+    'password' = '${SOURCE_MYSQL_PASSWORD}',
+    'lookup.cache.max-rows' = '500000',
+    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
+);
+
 CREATE TEMPORARY VIEW v_loan_triggers AS
 SELECT id AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
 UNION ALL
-SELECT i.id AS installment_id, o.proc_time
+SELECT di.installment_id, o.proc_time
 FROM cdc_user_order AS o
-INNER JOIN cdc_user_order_installment AS i ON i.user_order_id = o.id
+INNER JOIN dim_installment_by_order FOR SYSTEM_TIME AS OF o.proc_time AS di
+    ON di.user_order_id = o.id
+WHERE di.installment_id IS NOT NULL
 UNION ALL
-SELECT i.id AS installment_id, ur.proc_time
+SELECT dip.installment_id, ur.proc_time
 FROM cdc_user_repay AS ur
-INNER JOIN cdc_user_order AS o ON o.order_no = ur.order_no
-INNER JOIN cdc_user_order_installment AS i
-    ON i.user_order_id = o.id AND CAST(i.current_period AS BIGINT) = ur.current_period
-WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> '';
+INNER JOIN dim_installment_by_order_period FOR SYSTEM_TIME AS OF ur.proc_time AS dip
+    ON dip.order_no = ur.order_no AND dip.current_period = ur.current_period
+WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> '' AND dip.installment_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_loan (
     loan_no STRING, application_no STRING, `period` TINYINT, roll_sequence TINYINT,
@@ -226,7 +256,7 @@ SELECT
     )
 FROM v_loan_triggers AS t
 INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i ON i.id = t.installment_id
-INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON CAST(o.id AS BIGINT) = i.user_order_id
+INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON o.id = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF t.proc_time AS rp
     ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''

@@ -80,7 +80,7 @@ WHERE status = 2 AND callback_time IS NOT NULL
 GROUP BY order_no, current_period;
 
 CREATE OR REPLACE VIEW user_order_loan_lookup AS
-SELECT CAST(id AS SIGNED) AS id,
+SELECT id AS id,
        CAST(order_no AS CHAR) AS order_no,
        CAST(app_code AS SIGNED) AS app_code,
        CAST(order_time AS DATETIME(3)) AS order_time,
@@ -111,7 +111,7 @@ FROM user_order o
          LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id);
 
 CREATE OR REPLACE VIEW user_order_installment_loan_lookup AS
-SELECT CAST(id AS SIGNED) AS id,
+SELECT id AS id,
        CAST(user_order_id AS SIGNED) AS user_order_id,
        CAST(installment_order_no AS CHAR) AS installment_order_no,
        CAST(current_period AS SIGNED) AS current_period,
@@ -393,24 +393,41 @@ FROM `user` u
 -- ========== user / user_bankcard / user_product ==========
 
 CREATE OR REPLACE VIEW users_by_adid_lookup AS
-SELECT CAST(adid AS CHAR) AS adid,
-       CAST(MAX(id) AS SIGNED) AS user_id
+SELECT adid AS adid,
+       MAX(id) AS user_id
 FROM user
 WHERE adid IS NOT NULL AND TRIM(adid) <> ''
 GROUP BY adid;
 
 CREATE OR REPLACE VIEW user_incr_lookup AS
-SELECT CAST(id AS SIGNED) AS id,
-       CAST(app_code AS SIGNED) AS app_code,
-       CAST(mobile AS CHAR) AS mobile,
-       CAST(device_id AS CHAR) AS device_id,
-       CAST(adid AS CHAR) AS adid,
-       CAST(create_time AS DATETIME(3)) AS create_time
-FROM user;
+SELECT u.id AS id,
+       CAST(u.app_code AS SIGNED) AS app_code,
+       CAST(u.mobile AS CHAR) AS mobile,
+       CAST((CASE
+                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                 ELSE CONCAT('+234', TRIM(u.mobile))
+           END) AS CHAR) AS mobile_norm,
+       CAST(vt_m.token AS CHAR) AS mobile_token,
+       CAST(u.device_id AS CHAR) AS device_id,
+       CAST(u.adid AS CHAR) AS adid,
+       CAST(u.create_time AS DATETIME(3)) AS create_time
+FROM user u
+         LEFT JOIN vt_token_cache vt_m
+                   ON vt_m.vt_type = 1 AND vt_m.status = 1
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
+                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                           ELSE CONCAT('+234', TRIM(u.mobile))
+                       END) COLLATE utf8mb4_bin;
 
 CREATE OR REPLACE VIEW user_bankcard_id_by_account_lookup AS
-SELECT CAST(TRIM(bank_account) AS CHAR) AS bank_account,
-       CAST(id AS SIGNED) AS bank_id
+SELECT TRIM(bank_account) AS bank_account,
+       id AS bank_id
 FROM (
          SELECT id, bank_account,
                 ROW_NUMBER() OVER (PARTITION BY TRIM(bank_account) ORDER BY id DESC) AS rn
@@ -420,13 +437,18 @@ FROM (
 WHERE rn = 1;
 
 CREATE OR REPLACE VIEW user_bankcard_incr_lookup AS
-SELECT CAST(id AS SIGNED) AS id,
-       CAST(user_id AS SIGNED) AS user_id,
-       CAST(bank_code AS CHAR) AS bank_code,
-       CAST(bank_account AS CHAR) AS bank_account,
-       CAST(is_default AS SIGNED) AS is_default,
-       CAST(deleted AS SIGNED) AS deleted
-FROM user_bank_info;
+SELECT b.id AS id,
+       CAST(b.user_id AS SIGNED) AS user_id,
+       CAST(b.bank_code AS CHAR) AS bank_code,
+       CAST(b.bank_account AS CHAR) AS bank_account,
+       CAST(vt.token AS CHAR) AS bank_account_token,
+       CAST(b.is_default AS SIGNED) AS is_default,
+       CAST(b.deleted AS SIGNED) AS deleted
+FROM user_bank_info b
+         LEFT JOIN vt_token_cache vt
+                   ON vt.vt_type = 3 AND vt.status = 1
+                       AND vt.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin;
+
 
 CREATE OR REPLACE VIEW user_product_latest_lookup AS
 SELECT CAST(user_id AS SIGNED) AS user_id,
@@ -441,47 +463,37 @@ FROM (
 WHERE rn = 1;
 
 -- ========== application 增量（30s SLA：单次 bundle Lookup + 无双流 Join）==========
+-- 注意：Flink JDBC Lookup 是 WHERE pk=? 点查。禁止 JOIN 带 ROW_NUMBER/全表聚合的子视图，
+-- 否则优化器会先物化几十万行再过滤，表现为 LookupJoin 100% 反压。
 
 CREATE OR REPLACE VIEW application_order_id_by_order_no_lookup AS
-SELECT CAST(order_no AS CHAR) AS order_no,
-       CAST(id AS SIGNED) AS order_id
-FROM (
-         SELECT id, order_no,
-                ROW_NUMBER() OVER (PARTITION BY order_no ORDER BY id DESC) AS rn
-         FROM user_order
-         WHERE order_no IS NOT NULL AND TRIM(order_no) <> ''
-           AND app_code IN (567, 568, 569, 571, 572, 573)
-     ) t
-WHERE rn = 1;
+SELECT order_no AS order_no,
+       MAX(id) AS order_id
+FROM user_order
+WHERE order_no IS NOT NULL AND TRIM(order_no) <> ''
+  AND app_code IN (567, 568, 569, 571, 572, 573)
+GROUP BY order_no;
 
 CREATE OR REPLACE VIEW application_latest_order_by_user_lookup AS
-SELECT CAST(user_id AS SIGNED) AS user_id,
-       CAST(order_id AS SIGNED) AS order_id
-FROM (
-         SELECT user_id, id AS order_id,
-                ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY id DESC) AS rn
-         FROM user_order
-         WHERE user_id IS NOT NULL
-           AND app_code IN (567, 568, 569, 571, 572, 573)
-     ) t
-WHERE rn = 1;
+SELECT user_id AS user_id,
+       MAX(id) AS order_id
+FROM user_order
+WHERE user_id IS NOT NULL
+  AND app_code IN (567, 568, 569, 571, 572, 573)
+GROUP BY user_id;
 
 CREATE OR REPLACE VIEW application_latest_order_by_device_lookup AS
-SELECT CAST(device_uuid AS CHAR) AS device_uuid,
-       CAST(order_id AS SIGNED) AS order_id
-FROM (
-         SELECT u.device_id AS device_uuid, o.id AS order_id,
-                ROW_NUMBER() OVER (PARTITION BY u.device_id ORDER BY o.id DESC) AS rn
-         FROM user u
-                  INNER JOIN user_order o ON o.user_id = u.id
-         WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
-           AND o.app_code IN (567, 568, 569, 571, 572, 573)
-     ) t
-WHERE rn = 1;
+SELECT u.device_id AS device_uuid,
+       MAX(o.id) AS order_id
+FROM `user` u
+         INNER JOIN user_order o ON o.user_id = u.id
+WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+GROUP BY u.device_id;
 
--- 按 order.id 一次组装 application 增量所需字段（含 VT cache token）
+-- 按 order.id 点查友好：禁止 SELECT 列表子查询（会强制 TEMPTABLE 全表物化）
 CREATE OR REPLACE VIEW application_incr_bundle_lookup AS
-SELECT CAST(o.id AS SIGNED) AS id,
+SELECT o.id AS id,
        CAST(CONCAT('ng0', CAST(o.app_code AS CHAR), '-', o.order_no) AS CHAR) AS application_no,
        CAST(o.order_no AS CHAR) AS sn,
        CAST(o.user_id AS SIGNED) AS user_id,
@@ -525,7 +537,7 @@ SELECT CAST(o.id AS SIGNED) AS id,
                    WHEN 4 THEN 5
                    WHEN 6 THEN 13
                    WHEN 8 THEN 15
-                   WHEN 10 THEN CASE WHEN COALESCE(inst.is_overdue, 0) = 1 THEN 23 ELSE 20 END
+                   WHEN 10 THEN CASE WHEN ov.id IS NOT NULL THEN 23 ELSE 20 END
                    WHEN 11 THEN 23
                    WHEN 40 THEN 25
                    WHEN 20 THEN 27
@@ -553,9 +565,53 @@ SELECT CAST(o.id AS SIGNED) AS id,
 FROM user_order o
          INNER JOIN `user` u ON u.id = o.user_id
          LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id)
-         LEFT JOIN user_bvn_lookup p ON p.user_id = o.user_id
-         LEFT JOIN user_bank_default_lookup ub ON ub.user_id = o.user_id
-         LEFT JOIN device_ids_latest_lookup di ON di.device_uuid = u.device_id
+         LEFT JOIN user_personal_info p
+                   ON p.id = (
+                       SELECT MAX(p2.id)
+                       FROM user_personal_info p2
+                       WHERE p2.user_id = o.user_id
+                         AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
+                   )
+         LEFT JOIN user_bank_info ub
+                   ON ub.id = (
+                       SELECT MAX(b2.id)
+                       FROM user_bank_info b2
+                       WHERE b2.user_id = o.user_id
+                         AND b2.deleted = 0 AND b2.is_default = 1
+                         AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
+                   )
+         LEFT JOIN device_ids di
+                   ON di.id = (
+                       SELECT MAX(d2.id)
+                       FROM device_ids d2
+                       WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+                         AND d2.device_uuid = u.device_id
+                   )
+         LEFT JOIN risk_user_approval_callback ruac
+                   ON ruac.order_no = o.order_no
+                       AND ruac.callback_time = (
+                           SELECT MAX(ra2.callback_time)
+                           FROM risk_user_approval_callback ra2
+                           WHERE ra2.order_no = o.order_no
+                             AND ra2.callback_time IS NOT NULL
+                       )
+         LEFT JOIN user_repay ur_lp
+                   ON ur_lp.order_no = o.order_no
+                       AND ur_lp.status = 2
+                       AND ur_lp.callback_time = (
+                           SELECT MAX(ur2.callback_time)
+                           FROM user_repay ur2
+                           WHERE ur2.order_no = o.order_no
+                             AND ur2.status = 2
+                             AND ur2.callback_time IS NOT NULL
+                       )
+         LEFT JOIN user_order_installment ov
+                   ON ov.id = (
+                       SELECT MAX(i2.id)
+                       FROM user_order_installment i2
+                       WHERE i2.user_order_id = o.id
+                         AND COALESCE(i2.is_overdue, 0) = 1
+                   )
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 1 AND vt_m.status = 1
                        AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
@@ -576,8 +632,21 @@ FROM user_order o
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 3 AND vt_ba.status = 1
                        AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
-         LEFT JOIN risk_approval_latest_by_order ruac ON ruac.order_no = o.order_no
-         LEFT JOIN user_repay_paid_latest_by_order ur_lp ON ur_lp.order_no = o.order_no
-         LEFT JOIN user_order_installment_overdue inst ON inst.user_order_id = o.id
 WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
+
+-- ========== loan 增量：去掉 CDC 双流 Join ==========
+CREATE OR REPLACE VIEW loan_installment_ids_by_user_order_lookup AS
+SELECT user_order_id AS user_order_id,
+       id AS installment_id
+FROM user_order_installment
+WHERE user_order_id IS NOT NULL;
+
+CREATE OR REPLACE VIEW loan_installment_id_by_order_no_period_lookup AS
+SELECT o.order_no AS order_no,
+       i.current_period AS current_period,
+       i.id AS installment_id
+FROM user_order_installment i
+         INNER JOIN user_order o ON o.id = i.user_order_id
+WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
+  AND i.current_period IS NOT NULL;

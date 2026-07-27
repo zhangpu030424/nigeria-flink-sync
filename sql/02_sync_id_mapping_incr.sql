@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS src_id_mapping_staging (
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
     'table-name' = 'id_mapping_sync_staging',
     'server-time-zone' = 'Africa/Lagos',
+    'server-id' = '${CDC_SERVER_ID_ID_MAPPING}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
     'scan.startup.timestamp-millis' = '${CDC_STARTUP_TIMESTAMP_MILLIS}',
     'scan.incremental.snapshot.enabled' = 'true',

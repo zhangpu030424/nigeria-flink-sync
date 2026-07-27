@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS dim_user_bankcard (
     user_id BIGINT,
     bank_code STRING,
     bank_account STRING,
+    bank_account_token STRING,
     is_default BIGINT,
     deleted BIGINT,
     PRIMARY KEY (id) NOT ENFORCED
@@ -132,7 +133,10 @@ FROM (
     SELECT
         b.user_id + 100000000 AS group_user_id,
         COALESCE(b.bank_code, '') AS bank_code,
-        vt_tokenize(TRIM(b.bank_account)) AS bank_account_number,
+        CASE
+            WHEN b.bank_account_token IS NOT NULL AND TRIM(b.bank_account_token) <> '' THEN b.bank_account_token
+            ELSE vt_tokenize(TRIM(b.bank_account))
+        END AS bank_account_number,
         CAST(COALESCE(b.is_default, 0) AS TINYINT) AS is_default
     FROM v_bankcard_triggers AS t
     INNER JOIN dim_user_bankcard FOR SYSTEM_TIME AS OF t.proc_time AS b ON b.id = t.bank_id

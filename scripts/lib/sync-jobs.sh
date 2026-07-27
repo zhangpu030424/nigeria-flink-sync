@@ -64,16 +64,23 @@ sync_jobs_print_plan() {
   echo ">> ${phase} Job 顺序 (${#SYNC_ENABLED_JOBS[@]}): ${SYNC_ENABLED_JOBS[*]}"
 }
 
-# 按 Job 解析并行度（user_info 默认高于 FLINK_PARALLELISM_INCR）
+# 按 Job 解析并行度
+# 增量默认（30 slot 上跑齐 7 Job）：
+#   user / user_product / user_bankcard / user_info / id_mapping → 2
+#   application / loan → 8
+# 可用 FLINK_PARALLELISM_INCR_<JOB>（大写，如 FLINK_PARALLELISM_INCR_APPLICATION=8）覆盖
 # 用法: sync_job_parallelism user_info incr
 sync_job_parallelism() {
   local job_key="$1"
   local mode="${2:-incr}"
-  local incr_default="${FLINK_PARALLELISM_INCR:-4}"
+  local incr_default="${FLINK_PARALLELISM_INCR:-2}"
   local bulk_default="${FLINK_PARALLELISM_BULK:-${FLINK_PARALLELISM:-8}}"
+  local job_env
+  job_env="$(echo "$job_key" | tr '[:lower:]' '[:upper:]')"
+  job_env="FLINK_PARALLELISM_INCR_${job_env}"
 
-  if [[ "$job_key" == "user_info" ]]; then
-    if [[ "$mode" == "bulk" ]]; then
+  if [[ "$mode" == "bulk" ]]; then
+    if [[ "$job_key" == "user_info" ]]; then
       if [[ -n "${FLINK_PARALLELISM_USER_INFO_BULK:-}" ]]; then
         echo "${FLINK_PARALLELISM_USER_INFO_BULK}"
       elif [[ -n "${FLINK_PARALLELISM_USER_INFO:-}" ]]; then
@@ -83,22 +90,39 @@ sync_job_parallelism() {
       fi
       return 0
     fi
-    if [[ -n "${FLINK_PARALLELISM_USER_INFO_INCR:-}" ]]; then
-      echo "${FLINK_PARALLELISM_USER_INFO_INCR}"
-    elif [[ -n "${FLINK_PARALLELISM_USER_INFO:-}" ]]; then
-      echo "${FLINK_PARALLELISM_USER_INFO}"
-    else
-      # 默认 2× 通用增量并行（Lookup + VT UDF 较重）
-      echo $(( incr_default * 2 ))
-    fi
+    echo "$bulk_default"
     return 0
   fi
 
-  if [[ "$mode" == "bulk" ]]; then
-    echo "$bulk_default"
-  else
-    echo "$incr_default"
+  # 增量：优先 per-job 环境变量
+  if [[ -n "${!job_env:-}" ]]; then
+    echo "${!job_env}"
+    return 0
   fi
+
+  # 兼容旧变量
+  if [[ "$job_key" == "user_info" ]]; then
+    if [[ -n "${FLINK_PARALLELISM_USER_INFO_INCR:-}" ]]; then
+      echo "${FLINK_PARALLELISM_USER_INFO_INCR}"
+      return 0
+    fi
+    if [[ -n "${FLINK_PARALLELISM_USER_INFO:-}" ]]; then
+      echo "${FLINK_PARALLELISM_USER_INFO}"
+      return 0
+    fi
+  fi
+
+  case "$job_key" in
+    application|loan)
+      echo "${FLINK_PARALLELISM_INCR_HEAVY:-8}"
+      ;;
+    user|user_product|user_bankcard|user_info|id_mapping)
+      echo "${FLINK_PARALLELISM_INCR_LIGHT:-2}"
+      ;;
+    *)
+      echo "$incr_default"
+      ;;
+  esac
 }
 
 # 估算多 Job 增量峰值 slot（user_info 按专用并行度计）

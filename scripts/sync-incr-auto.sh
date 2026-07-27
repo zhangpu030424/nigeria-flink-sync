@@ -85,10 +85,16 @@ source scripts/lib/sync-jobs.sh
 # shellcheck source=scripts/lib/mysql-source.sh
 source scripts/lib/mysql-source.sh
 
+sync_jobs_load "${JOBS_FILTER}"
+
 echo "=========================================="
 echo "增量迁移 sync-incr-auto"
 echo "  FLINK_PARALLELISM_INCR=${FLINK_PARALLELISM_INCR:-?}"
-echo "  FLINK_PARALLELISM_USER_INFO=$(sync_job_parallelism user_info incr)（user_info 专用）"
+echo "  并行度计划:"
+for _jk in "${SYNC_ENABLED_JOBS[@]}"; do
+  echo "    ${_jk}=$(sync_job_parallelism "$_jk" incr)"
+done
+echo "  峰值 slot≈$(sync_jobs_peak_incr_slots "${SYNC_ENABLED_JOBS[@]}") / TASK_SLOTS=${FLINK_TASK_SLOTS:-?}"
 echo "  CDC_STARTUP_MODE=${STARTUP_MODE}"
 echo "=========================================="
 

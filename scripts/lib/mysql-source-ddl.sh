@@ -37,6 +37,8 @@ SOURCE_LOOKUP_CHECK_VIEWS=(
   application_latest_order_by_user_lookup
   application_latest_order_by_device_lookup
   application_incr_bundle_lookup
+  loan_installment_ids_by_user_order_lookup
+  loan_installment_id_by_order_no_period_lookup
 )
 
 source_lookup_views_all_exist() {
