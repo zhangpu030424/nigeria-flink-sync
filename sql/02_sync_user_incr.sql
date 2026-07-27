@@ -140,13 +140,14 @@ CREATE TABLE IF NOT EXISTS sink_user (
     PRIMARY KEY (mobile, app_id, closed_time) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true',
+    'url' = 'jdbc:mysql://${TARGET_MYSQL_HOST}:${TARGET_MYSQL_PORT}/${TARGET_MYSQL_DATABASE}?${TARGET_JDBC_PARAMS}',
     'table-name' = 'user',
     'username' = '${TARGET_MYSQL_USER}',
     'password' = '${TARGET_MYSQL_PASSWORD}',
     'sink.buffer-flush.max-rows' = '${FLINK_SINK_BUFFER_ROWS}',
     'sink.buffer-flush.interval' = '200ms',
-    'sink.max-retries' = '3'
+    'sink.max-retries' = '${FLINK_SINK_MAX_RETRIES}',
+    'connection.max-retry-timeout' = '${FLINK_JDBC_RETRY_TIMEOUT}'
 );
 
 INSERT INTO sink_user

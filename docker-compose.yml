@@ -33,6 +33,10 @@ services:
         execution.checkpointing.unaligned: true
         execution.checkpointing.mode: EXACTLY_ONCE
         execution.checkpointing.externalized-checkpoint-retention: DELETE_ON_CANCELLATION
+        # Sink 短暂连不上目标库时：任务失败后自动从 checkpoint 恢复（UPSERT 幂等）
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 2147483647
+        restart-strategy.fixed-delay.delay: 10s
         table.local-time-zone: Africa/Lagos
     volumes:
       - ./data/flink-checkpoints:/tmp/flink-checkpoints
@@ -77,6 +81,9 @@ services:
         state.checkpoints.dir: file:///tmp/flink-checkpoints
         state.savepoints.dir: file:///tmp/flink-savepoints
         state.checkpoint-storage: filesystem
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 2147483647
+        restart-strategy.fixed-delay.delay: 10s
         table.local-time-zone: Africa/Lagos
     volumes:
       - ./data/flink-checkpoints:/tmp/flink-checkpoints
