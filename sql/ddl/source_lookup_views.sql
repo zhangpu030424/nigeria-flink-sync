@@ -446,14 +446,12 @@ FROM `user` u
                        FROM risk_user_credit_callback cc2
                        WHERE cc2.user_id = u.id
                    )
-         LEFT JOIN adjust_latest_by_adid adj
-                   ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid
+         LEFT JOIN adjust_latest_by_adid adj ON adj.adid = u.adid
          LEFT JOIN device_network dn
                    ON dn.id = (
                        SELECT MAX(dn2.id)
                        FROM device_network dn2
-                       WHERE u.device_id IS NOT NULL AND u.device_id <> ''
-                         AND dn2.device_uuid = u.device_id
+                       WHERE dn2.device_uuid = u.device_id
                          AND dn2.ip IS NOT NULL AND dn2.ip <> ''
                    );
 
