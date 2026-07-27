@@ -11,6 +11,7 @@ GRANT SELECT ON nigeria_backend.user_info_incr_bundle_lookup TO 'flink_cdc'@'101
 GRANT SELECT ON nigeria_backend.vt_token_cache_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_incr_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.users_by_adid_lookup TO 'flink_cdc'@'101.47.31.184';
+GRANT SELECT ON nigeria_backend.users_by_bvn_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_bankcard_incr_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_bankcard_id_by_account_lookup TO 'flink_cdc'@'101.47.31.184';
 GRANT SELECT ON nigeria_backend.user_product_latest_lookup TO 'flink_cdc'@'101.47.31.184';
