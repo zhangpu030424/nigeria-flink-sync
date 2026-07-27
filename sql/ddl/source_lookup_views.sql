@@ -639,16 +639,17 @@ WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
 
 -- ========== loan 增量：去掉 CDC 双流 Join ==========
+-- installment.id 为 bigint unsigned：必须 CAST SIGNED，否则 Flink JDBC 读成 BigInteger → ClassCast
 CREATE OR REPLACE VIEW loan_installment_ids_by_user_order_lookup AS
 SELECT user_order_id AS user_order_id,
-       id AS installment_id
+       CAST(id AS SIGNED) AS installment_id
 FROM user_order_installment
 WHERE user_order_id IS NOT NULL;
 
 CREATE OR REPLACE VIEW loan_installment_id_by_order_no_period_lookup AS
 SELECT o.order_no AS order_no,
-       i.current_period AS current_period,
-       i.id AS installment_id
+       CAST(i.current_period AS SIGNED) AS current_period,
+       CAST(i.id AS SIGNED) AS installment_id
 FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''

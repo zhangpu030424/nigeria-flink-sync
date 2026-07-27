@@ -1,6 +1,8 @@
 -- 增量 loan：多源 CDC 触发 + Lookup 组装
 -- CDC: user_order_installment, user_order, user_repay
 -- 前置: ./scripts/deploy-source-ddl.sh
+-- 类型约定：Lookup 视图已 CAST 为 signed；Flink 一律 BIGINT/INT，禁止 DECIMAL(id)
+--   （DECIMAL + JDBC 返回 Long → ClassCastException）
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '200ms';
@@ -61,7 +63,7 @@ CREATE TABLE IF NOT EXISTS cdc_user_order (
 CREATE TABLE IF NOT EXISTS cdc_user_repay (
     id BIGINT,
     order_no STRING,
-    current_period BIGINT,
+    current_period INT,
     proc_time AS PROCTIME(),
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
@@ -83,9 +85,8 @@ CREATE TABLE IF NOT EXISTS cdc_user_repay (
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment (
-    -- installment/user_order.id 为 bigint unsigned；Flink BIGINT 会 ClassCast(BigInteger→Long)
-    id DECIMAL(20, 0),
-    user_order_id DECIMAL(20, 0),
+    id BIGINT,
+    user_order_id BIGINT,
     installment_order_no STRING,
     current_period BIGINT,
     received STRING,
@@ -109,7 +110,7 @@ CREATE TABLE IF NOT EXISTS dim_installment (
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_order (
-    id DECIMAL(20, 0),
+    id BIGINT,
     order_no STRING,
     app_code BIGINT,
     order_time TIMESTAMP(3),
@@ -143,8 +144,8 @@ CREATE TABLE IF NOT EXISTS dim_repay_period (
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment_by_order (
-    user_order_id DECIMAL(20, 0),
-    installment_id DECIMAL(20, 0),
+    user_order_id BIGINT,
+    installment_id BIGINT,
     PRIMARY KEY (user_order_id, installment_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -159,7 +160,7 @@ CREATE TABLE IF NOT EXISTS dim_installment_by_order (
 CREATE TABLE IF NOT EXISTS dim_installment_by_order_period (
     order_no STRING,
     current_period BIGINT,
-    installment_id DECIMAL(20, 0),
+    installment_id BIGINT,
     PRIMARY KEY (order_no, current_period) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -172,18 +173,18 @@ CREATE TABLE IF NOT EXISTS dim_installment_by_order_period (
 );
 
 CREATE TEMPORARY VIEW v_loan_triggers AS
-SELECT CAST(id AS DECIMAL(20, 0)) AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
+SELECT id AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
 UNION ALL
 SELECT di.installment_id, o.proc_time
 FROM cdc_user_order AS o
 INNER JOIN dim_installment_by_order FOR SYSTEM_TIME AS OF o.proc_time AS di
-    ON di.user_order_id = CAST(o.id AS DECIMAL(20, 0))
+    ON di.user_order_id = o.id
 WHERE di.installment_id IS NOT NULL
 UNION ALL
 SELECT dip.installment_id, ur.proc_time
 FROM cdc_user_repay AS ur
 INNER JOIN dim_installment_by_order_period FOR SYSTEM_TIME AS OF ur.proc_time AS dip
-    ON dip.order_no = ur.order_no AND dip.current_period = ur.current_period
+    ON dip.order_no = ur.order_no AND dip.current_period = CAST(ur.current_period AS BIGINT)
 WHERE ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> '' AND dip.installment_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sink_loan (
@@ -256,10 +257,8 @@ SELECT
         END AS TINYINT
     )
 FROM v_loan_triggers AS t
-INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i
-    ON i.id = CAST(t.installment_id AS DECIMAL(20, 0))
-INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o
-    ON o.id = i.user_order_id
+INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i ON i.id = t.installment_id
+INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON o.id = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF t.proc_time AS rp
     ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
