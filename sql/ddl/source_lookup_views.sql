@@ -294,7 +294,8 @@ FROM user u
 
 -- Flink user_info 增量唯一 Lookup 入口
 CREATE OR REPLACE VIEW user_info_incr_bundle_lookup AS
-SELECT CAST(u.id AS SIGNED) AS user_id,
+-- user_id 必须裸列 u.id：CAST(... AS SIGNED) 会导致 WHERE user_id=? 无法走 PRIMARY（全表扫）
+SELECT u.id AS user_id,
        CAST(u.app_code AS SIGNED) AS app_code,
        CAST(u.create_time AS DATETIME(3)) AS create_time,
        CAST(p.bvn AS CHAR) AS bvn,
