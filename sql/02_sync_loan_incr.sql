@@ -83,8 +83,9 @@ CREATE TABLE IF NOT EXISTS cdc_user_repay (
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment (
-    id BIGINT,
-    user_order_id BIGINT,
+    -- installment/user_order.id 为 bigint unsigned；Flink BIGINT 会 ClassCast(BigInteger→Long)
+    id DECIMAL(20, 0),
+    user_order_id DECIMAL(20, 0),
     installment_order_no STRING,
     current_period BIGINT,
     received STRING,
@@ -108,7 +109,7 @@ CREATE TABLE IF NOT EXISTS dim_installment (
 );
 
 CREATE TABLE IF NOT EXISTS dim_user_order (
-    id BIGINT,
+    id DECIMAL(20, 0),
     order_no STRING,
     app_code BIGINT,
     order_time TIMESTAMP(3),
@@ -142,8 +143,8 @@ CREATE TABLE IF NOT EXISTS dim_repay_period (
 );
 
 CREATE TABLE IF NOT EXISTS dim_installment_by_order (
-    user_order_id BIGINT,
-    installment_id BIGINT,
+    user_order_id DECIMAL(20, 0),
+    installment_id DECIMAL(20, 0),
     PRIMARY KEY (user_order_id, installment_id) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
@@ -158,7 +159,7 @@ CREATE TABLE IF NOT EXISTS dim_installment_by_order (
 CREATE TABLE IF NOT EXISTS dim_installment_by_order_period (
     order_no STRING,
     current_period BIGINT,
-    installment_id BIGINT,
+    installment_id DECIMAL(20, 0),
     PRIMARY KEY (order_no, current_period) NOT ENFORCED
 ) WITH (
     'connector' = 'jdbc',
