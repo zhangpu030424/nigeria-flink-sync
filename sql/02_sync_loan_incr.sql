@@ -172,12 +172,12 @@ CREATE TABLE IF NOT EXISTS dim_installment_by_order_period (
 );
 
 CREATE TEMPORARY VIEW v_loan_triggers AS
-SELECT id AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
+SELECT CAST(id AS DECIMAL(20, 0)) AS installment_id, proc_time FROM cdc_user_order_installment WHERE id IS NOT NULL
 UNION ALL
 SELECT di.installment_id, o.proc_time
 FROM cdc_user_order AS o
 INNER JOIN dim_installment_by_order FOR SYSTEM_TIME AS OF o.proc_time AS di
-    ON di.user_order_id = o.id
+    ON di.user_order_id = CAST(o.id AS DECIMAL(20, 0))
 WHERE di.installment_id IS NOT NULL
 UNION ALL
 SELECT dip.installment_id, ur.proc_time
@@ -256,8 +256,10 @@ SELECT
         END AS TINYINT
     )
 FROM v_loan_triggers AS t
-INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i ON i.id = t.installment_id
-INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o ON o.id = i.user_order_id
+INNER JOIN dim_installment FOR SYSTEM_TIME AS OF t.proc_time AS i
+    ON i.id = CAST(t.installment_id AS DECIMAL(20, 0))
+INNER JOIN dim_user_order FOR SYSTEM_TIME AS OF t.proc_time AS o
+    ON o.id = i.user_order_id
 LEFT JOIN dim_repay_period FOR SYSTEM_TIME AS OF t.proc_time AS rp
     ON rp.order_no = o.order_no AND rp.current_period = CAST(i.current_period AS BIGINT)
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
