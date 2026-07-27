@@ -245,7 +245,9 @@ CREATE TABLE IF NOT EXISTS dim_latest_order_by_device (
 );
 
 CREATE TABLE IF NOT EXISTS dim_application_bundle (
-    id BIGINT,
+    -- user_order.id 为 bigint unsigned；Flink BIGINT(signed) 会 ClassCast，故用 DECIMAL
+    -- 视图主键列保持裸 o.id（勿 CAST），否则 WHERE id=? 无法走 PRIMARY
+    id DECIMAL(20, 0),
     application_no STRING,
     sn STRING,
     user_id BIGINT,
