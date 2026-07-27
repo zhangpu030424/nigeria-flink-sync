@@ -466,9 +466,11 @@ WHERE rn = 1;
 -- 注意：Flink JDBC Lookup 是 WHERE pk=? 点查。禁止 JOIN 带 ROW_NUMBER/全表聚合的子视图，
 -- 否则优化器会先物化几十万行再过滤，表现为 LookupJoin 100% 反压。
 
+-- order_id 必须 SIGNED：MAX(id) 在 MySQL 对 bigint unsigned 会变成 unsigned，
+-- Flink JDBC Lookup 读成 BigInteger → ClassCastException（不能转 Long）
 CREATE OR REPLACE VIEW application_order_id_by_order_no_lookup AS
 SELECT order_no AS order_no,
-       MAX(id) AS order_id
+       CAST(MAX(id) AS SIGNED) AS order_id
 FROM user_order
 WHERE order_no IS NOT NULL AND TRIM(order_no) <> ''
   AND app_code IN (567, 568, 569, 571, 572, 573)
@@ -476,7 +478,7 @@ GROUP BY order_no;
 
 CREATE OR REPLACE VIEW application_latest_order_by_user_lookup AS
 SELECT user_id AS user_id,
-       MAX(id) AS order_id
+       CAST(MAX(id) AS SIGNED) AS order_id
 FROM user_order
 WHERE user_id IS NOT NULL
   AND app_code IN (567, 568, 569, 571, 572, 573)
@@ -484,7 +486,7 @@ GROUP BY user_id;
 
 CREATE OR REPLACE VIEW application_latest_order_by_device_lookup AS
 SELECT u.device_id AS device_uuid,
-       MAX(o.id) AS order_id
+       CAST(MAX(o.id) AS SIGNED) AS order_id
 FROM `user` u
          INNER JOIN user_order o ON o.user_id = u.id
 WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
