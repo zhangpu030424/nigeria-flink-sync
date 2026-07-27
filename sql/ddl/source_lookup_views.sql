@@ -395,10 +395,19 @@ FROM `user` u
 
 CREATE OR REPLACE VIEW users_by_adid_lookup AS
 SELECT adid AS adid,
-       MAX(id) AS user_id
+       CAST(MAX(id) AS SIGNED) AS user_id
 FROM user
 WHERE adid IS NOT NULL AND TRIM(adid) <> ''
 GROUP BY adid;
+
+-- user_info 增量：vt_token_cache(BVN) 反查 user_id
+CREATE OR REPLACE VIEW users_by_bvn_lookup AS
+SELECT TRIM(bvn) AS bvn,
+       CAST(MAX(user_id) AS SIGNED) AS user_id
+FROM user_personal_info
+WHERE user_id IS NOT NULL
+  AND bvn IS NOT NULL AND TRIM(bvn) <> ''
+GROUP BY TRIM(bvn);
 
 CREATE OR REPLACE VIEW user_incr_lookup AS
 SELECT u.id AS id,
