@@ -293,8 +293,9 @@ FROM user u
                    ON u.adid IS NOT NULL AND u.adid <> '' AND adj.adid = u.adid;
 
 -- Flink user_info 增量唯一 Lookup 入口
+-- 关键：禁止依赖 CAST(user_id AS SIGNED) 的子视图（会 TEMPTABLE 物化全表）；
+-- 一律裸列 JOIN / 相关子查询，保证 WHERE user_id=? 下推为 const PRIMARY。
 CREATE OR REPLACE VIEW user_info_incr_bundle_lookup AS
--- user_id 必须裸列 u.id：CAST(... AS SIGNED) 会导致 WHERE user_id=? 无法走 PRIMARY（全表扫）
 SELECT u.id AS user_id,
        CAST(u.app_code AS SIGNED) AS app_code,
        CAST(u.create_time AS DATETIME(3)) AS create_time,
@@ -319,16 +320,73 @@ SELECT u.id AS user_id,
        CAST(ac.app_name AS CHAR) AS app_name,
        CAST(ac.version AS CHAR) AS app_version,
        CAST(cc.credit_limit AS CHAR) AS credit_limit,
-       CAST(rip.ip AS CHAR) AS reg_ip,
-       CAST(ec.emergency_contacts AS CHAR) AS emergency_contacts,
-       CAST(isrc.install_source AS CHAR) AS install_source,
-       -- 与 user_info_sync_staging.info_json 同结构：固定全部 key，无值写 null；emergency_contacts 无数据为 []
+       CAST(dn.ip AS CHAR) AS reg_ip,
+       CAST((
+                 SELECT COALESCE(
+                                JSON_ARRAYAGG(
+                                        JSON_OBJECT(
+                                                'name', NULLIF(TRIM(ec.contact_name), ''),
+                                                'mobile', CASE
+                                                              WHEN ec.contact_number IS NULL OR TRIM(ec.contact_number) = ''
+                                                                  THEN CAST(NULL AS JSON)
+                                                              WHEN vt5.token IS NOT NULL AND TRIM(vt5.token) <> ''
+                                                                  THEN vt5.token
+                                                              ELSE (
+                                                                  CASE
+                                                                      WHEN TRIM(ec.contact_number) LIKE '+%'
+                                                                          THEN TRIM(ec.contact_number)
+                                                                      WHEN TRIM(ec.contact_number) LIKE '234%'
+                                                                          THEN CONCAT('+', TRIM(ec.contact_number))
+                                                                      WHEN TRIM(ec.contact_number) LIKE '0%'
+                                                                          THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+                                                                      ELSE CONCAT('+234', TRIM(ec.contact_number))
+                                                                      END
+                                                                  )
+                                                    END,
+                                                'relation', ec.contact_relationship
+                                        )
+                                ),
+                                JSON_ARRAY()
+                        )
+                 FROM user_emergency_contact ec
+                          LEFT JOIN vt_token_cache vt5
+                                    ON vt5.vt_type = 5 AND vt5.status = 1
+                                        AND vt5.token IS NOT NULL AND TRIM(vt5.token) <> ''
+                                        AND vt5.raw_value COLLATE utf8mb4_bin = (
+                                            CASE
+                                                WHEN ec.contact_number IS NULL OR TRIM(ec.contact_number) = '' THEN NULL
+                                                WHEN TRIM(ec.contact_number) LIKE '+%' THEN TRIM(ec.contact_number)
+                                                WHEN TRIM(ec.contact_number) LIKE '234%'
+                                                    THEN CONCAT('+', TRIM(ec.contact_number))
+                                                WHEN TRIM(ec.contact_number) LIKE '0%'
+                                                    THEN CONCAT('+234', SUBSTRING(TRIM(ec.contact_number), 2))
+                                                ELSE CONCAT('+234', TRIM(ec.contact_number))
+                                                END
+                                            ) COLLATE utf8mb4_bin
+                 WHERE ec.user_id = u.id
+             ) AS CHAR) AS emergency_contacts,
+       CAST(
+               CASE
+                   WHEN adj.tracker_name IS NULL OR TRIM(adj.tracker_name) = '' THEN NULL
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%unattributed%' THEN NULL
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%organic%' THEN 'ORGANIC'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%google%' THEN 'GG'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%apple%' THEN 'ASA'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%tiktok%' THEN 'TT'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%facebook%'
+                       OR LOWER(TRIM(adj.tracker_name)) LIKE '%instagram%'
+                       OR LOWER(TRIM(adj.tracker_name)) LIKE '%messenger%' THEN 'FB'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%sms%' THEN 'SMS'
+                   WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%kuai%' THEN 'KW'
+                   ELSE TRIM(adj.tracker_name)
+               END AS CHAR
+       ) AS install_source,
        CAST(JSON_OBJECT(
                'birthday', DATE_FORMAT(p.date_of_birth, '%Y-%m-%d'),
                'job_type', wr.work_type,
                'education', p.education_level,
                'gender', p.gender,
-               'registration_ip', rip.ip,
+               'registration_ip', dn.ip,
                'salary', CASE
                              WHEN wr.monthly_income IS NULL OR TRIM(wr.monthly_income) = '' THEN NULL
                              WHEN LENGTH(REPLACE(TRIM(wr.monthly_income), ',', '')) BETWEEN 1 AND 19
@@ -347,7 +405,20 @@ SELECT u.id AS user_id,
                                    ELSE NULL
                    END,
                'company', NULLIF(TRIM(wr.company_name), ''),
-               'install_source', isrc.install_source,
+               'install_source', CASE
+                                     WHEN adj.tracker_name IS NULL OR TRIM(adj.tracker_name) = '' THEN NULL
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%unattributed%' THEN NULL
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%organic%' THEN 'ORGANIC'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%google%' THEN 'GG'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%apple%' THEN 'ASA'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%tiktok%' THEN 'TT'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%facebook%'
+                                         OR LOWER(TRIM(adj.tracker_name)) LIKE '%instagram%'
+                                         OR LOWER(TRIM(adj.tracker_name)) LIKE '%messenger%' THEN 'FB'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%sms%' THEN 'SMS'
+                                     WHEN LOWER(TRIM(adj.tracker_name)) LIKE '%kuai%' THEN 'KW'
+                                     ELSE TRIM(adj.tracker_name)
+                   END,
                'registration_time', UNIX_TIMESTAMP(u.create_time),
                'email', NULL,
                'ocr', NULL,
@@ -357,7 +428,50 @@ SELECT u.id AS user_id,
                        'version', ac.version,
                        'app_id', u.app_code
                       ),
-               'emergency_contacts', COALESCE(CAST(ec.emergency_contacts AS JSON), CAST('[]' AS JSON)),
+               'emergency_contacts', COALESCE((
+                                                  SELECT CAST(COALESCE(
+                                                                      JSON_ARRAYAGG(
+                                                                              JSON_OBJECT(
+                                                                                      'name', NULLIF(TRIM(ec2.contact_name), ''),
+                                                                                      'mobile', CASE
+                                                                                                    WHEN ec2.contact_number IS NULL OR TRIM(ec2.contact_number) = ''
+                                                                                                        THEN CAST(NULL AS JSON)
+                                                                                                    WHEN vt5b.token IS NOT NULL AND TRIM(vt5b.token) <> ''
+                                                                                                        THEN vt5b.token
+                                                                                                    ELSE (
+                                                                                                        CASE
+                                                                                                            WHEN TRIM(ec2.contact_number) LIKE '+%'
+                                                                                                                THEN TRIM(ec2.contact_number)
+                                                                                                            WHEN TRIM(ec2.contact_number) LIKE '234%'
+                                                                                                                THEN CONCAT('+', TRIM(ec2.contact_number))
+                                                                                                            WHEN TRIM(ec2.contact_number) LIKE '0%'
+                                                                                                                THEN CONCAT('+234', SUBSTRING(TRIM(ec2.contact_number), 2))
+                                                                                                            ELSE CONCAT('+234', TRIM(ec2.contact_number))
+                                                                                                            END
+                                                                                                        )
+                                                                                      END,
+                                                                                      'relation', ec2.contact_relationship
+                                                                              )
+                                                                      ),
+                                                                      JSON_ARRAY()
+                                                              ) AS JSON)
+                                                  FROM user_emergency_contact ec2
+                                                           LEFT JOIN vt_token_cache vt5b
+                                                                     ON vt5b.vt_type = 5 AND vt5b.status = 1
+                                                                         AND vt5b.token IS NOT NULL AND TRIM(vt5b.token) <> ''
+                                                                         AND vt5b.raw_value COLLATE utf8mb4_bin = (
+                                                                             CASE
+                                                                                 WHEN ec2.contact_number IS NULL OR TRIM(ec2.contact_number) = '' THEN NULL
+                                                                                 WHEN TRIM(ec2.contact_number) LIKE '+%' THEN TRIM(ec2.contact_number)
+                                                                                 WHEN TRIM(ec2.contact_number) LIKE '234%'
+                                                                                     THEN CONCAT('+', TRIM(ec2.contact_number))
+                                                                                 WHEN TRIM(ec2.contact_number) LIKE '0%'
+                                                                                     THEN CONCAT('+234', SUBSTRING(TRIM(ec2.contact_number), 2))
+                                                                                 ELSE CONCAT('+234', TRIM(ec2.contact_number))
+                                                                                 END
+                                                                             ) COLLATE utf8mb4_bin
+                                                  WHERE ec2.user_id = u.id
+                                              ), CAST('[]' AS JSON)),
                'salary_day', NULL,
                'address', JSON_OBJECT(
                        'province', p.living_address_state,
@@ -379,17 +493,29 @@ SELECT u.id AS user_id,
                'salary_type', NULL
        ) AS CHAR) AS info_json
 FROM `user` u
-         LEFT JOIN user_personal_latest_lookup p ON p.user_id = u.id
+         LEFT JOIN user_personal_info p ON p.user_id = u.id
+         LEFT JOIN user_work_related wr ON wr.user_id = u.id
+         LEFT JOIN app_config ac ON ac.app_code = u.app_code
          LEFT JOIN vt_token_cache vt
                    ON vt.vt_type = 4 AND vt.status = 1
                        AND p.bvn IS NOT NULL AND TRIM(p.bvn) <> ''
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
-         LEFT JOIN user_work_latest_lookup wr ON wr.user_id = u.id
-         LEFT JOIN app_config_lookup ac ON ac.app_code = u.app_code
-         LEFT JOIN user_credit_latest_lookup cc ON cc.user_id = u.id
-         LEFT JOIN user_reg_ip_lookup rip ON rip.user_id = u.id
-         LEFT JOIN user_emergency_contacts_lookup ec ON ec.user_id = u.id
-         LEFT JOIN user_info_install_source_lookup isrc ON isrc.user_id = u.id;
+         LEFT JOIN risk_user_credit_callback cc
+                   ON cc.id = (
+                       SELECT MAX(cc2.id)
+                       FROM risk_user_credit_callback cc2
+                       WHERE cc2.user_id = u.id
+                   )
+         LEFT JOIN adjust_latest_by_adid adj
+                   ON u.adid IS NOT NULL AND TRIM(u.adid) <> '' AND adj.adid = u.adid
+         LEFT JOIN device_network dn
+                   ON dn.id = (
+                       SELECT MAX(dn2.id)
+                       FROM device_network dn2
+                       WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+                         AND dn2.device_uuid = u.device_id
+                         AND dn2.ip IS NOT NULL AND TRIM(dn2.ip) <> ''
+                   );
 
 -- ========== user / user_bankcard / user_product ==========
 
