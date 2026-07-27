@@ -71,15 +71,23 @@ _verify_user_info_dirty_objects() {
   return "$failed"
 }
 
-# 自动部署：已齐全则跳过；否则先用 flink_cdc，失败再尝试 SOURCE_MYSQL_ROOT_*（可选）
+# 自动部署：user_info 增量已改多源 CDC，dirty TRIGGER 非必需。
+# DEPLOY_REQUIRE_USER_INFO_DIRTY=1 时才硬失败；默认只告警。
 ensure_user_info_dirty_deploy() {
+  local require="${DEPLOY_REQUIRE_USER_INFO_DIRTY:-0}"
+
+  if [[ "${DEPLOY_SKIP_USER_INFO_DIRTY:-0}" == "1" ]]; then
+    echo ">> 跳过 user_info_dirty（DEPLOY_SKIP_USER_INFO_DIRTY=1；多源 CDC 不依赖 TRIGGER）"
+    return 0
+  fi
+
   if user_info_dirty_procs_ok && user_info_dirty_triggers_ok; then
     echo ">> user_info_dirty 存储过程 + TRIGGER 已就绪，跳过"
     _verify_user_info_dirty_objects
     return 0
   fi
 
-  echo ">> user_info_dirty 未就绪，尝试部署存储过程 + TRIGGER"
+  echo ">> user_info_dirty 未就绪，尝试部署存储过程 + TRIGGER（可选；增量 Job 已不 CDC dirty）"
   echo ">> 使用 ${SOURCE_MYSQL_USER} 部署"
   deploy_user_info_dirty_sql || true
 
@@ -95,11 +103,11 @@ ensure_user_info_dirty_deploy() {
   fi
 
   echo ""
-  echo "ERR: user_info_dirty 部署未完整。"
-  echo "  若 ${SOURCE_MYSQL_USER} 已有 CREATE ROUTINE + TRIGGER 权限，请确认先执行:"
-  echo "    sql/ddl/user_info_dirty_enqueue.sql（存储过程）"
-  echo "    sql/ddl/user_info_dirty.sql（TRIGGER）"
-  echo "  或重跑: ./scripts/deploy-source-ddl.sh"
-  echo "  若 ${SOURCE_MYSQL_USER} 无权限，可在 .env 配置 SOURCE_MYSQL_ROOT_* 作为兜底"
-  return 1
+  echo "WARN: user_info_dirty TRIGGER/存储过程未完整（可忽略：02_sync_user_info_incr 已多源 CDC）。"
+  echo "  若仍要部署: sql/ddl/user_info_dirty_enqueue.sql + user_info_dirty.sql"
+  echo "  或 DEPLOY_SKIP_USER_INFO_DIRTY=1 彻底跳过；硬要求则设 DEPLOY_REQUIRE_USER_INFO_DIRTY=1"
+  if [[ "$require" == "1" ]]; then
+    return 1
+  fi
+  return 0
 }

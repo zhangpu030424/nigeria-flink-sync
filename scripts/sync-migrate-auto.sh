@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 完整迁移：全量 → 增量（两阶段，推荐）
+# 完整迁移：全量 → 增量（两阶段）
 #
 # 等价于:
 #   ./scripts/sync-bulk-auto.sh [bulk 参数]
@@ -14,6 +14,8 @@
 #   ./scripts/sync-migrate-auto.sh --truncate-user-info-dirty
 #
 # 默认会先 cancel 全部 Job 并清空 checkpoint，避免 CDC restore 已 purge 的 binlog 位点。
+# 警告：线上增量已健康时不要重跑本脚本（会中断 CDC）。只补增量用 sync-incr-auto.sh --keep-jobs。
+# 增量覆盖 config/sync-jobs.conf 全部表（含多源 CDC 的 user_info）；id_mapping 仍 CDC 宽表。
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."

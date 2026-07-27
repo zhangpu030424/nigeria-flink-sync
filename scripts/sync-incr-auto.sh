@@ -4,7 +4,7 @@
 # 流程:
 #   1. 读取 logs/bulk-start-ms.env（或 --bulk-start-ms）
 #   2. deploy-source-ddl
-#   3. 默认保留 user_info_dirty（全量期间入队变更由增量 CDC timestamp 消费；清队列仅在 rebuild-all-staging 建宽表前）
+#   3. user_info 已多源 CDC，不再依赖 dirty；--truncate-user-info-dirty 仅清理遗留队列
 #   4. 可选 Cancel 存量 Job
 #   5. 默认 CDC_STARTUP_MODE=timestamp（正确性优先，补 bulk-start 后 binlog）
 #   6. 按 config/sync-jobs.conf 顺序提交各表增量 Job

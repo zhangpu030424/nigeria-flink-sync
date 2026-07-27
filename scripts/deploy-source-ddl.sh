@@ -134,12 +134,14 @@ if [[ "$failed" -ne 0 ]]; then
 fi
 
 echo ""
-echo ">> 校验 user_info_dirty 表"
+echo ">> 校验 user_info_dirty 表（可选；多源 CDC 不依赖）"
 if table_exists user_info_dirty; then
   echo "  ✓ user_info_dirty 表"
 else
-  echo "  ✗ user_info_dirty 表缺失"
-  failed=1
+  echo "  WARN: user_info_dirty 表缺失（可忽略；仅旧脏队列方案需要）"
+  if [[ "${DEPLOY_REQUIRE_USER_INFO_DIRTY:-0}" == "1" ]]; then
+    failed=1
+  fi
 fi
 
 if [[ "$failed" -ne 0 ]]; then
