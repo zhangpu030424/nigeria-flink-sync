@@ -44,6 +44,8 @@ DEFAULT_BID = "ng01"
 DEFAULT_BATCH = 1000
 DEFAULT_VT_URL = "http://101.47.23.241:9505"
 DEFAULT_PASSWORD = "ng01123456."
+# htpasswd -bnBC 10 "" ng01123456. 预生成；无 bcrypt/htpasswd 时兜底
+DEFAULT_PASSWORD_HASH = "$2y$10$j6w2VR3rPMu69vTjHxfss.N5AVpj5e4fn0Yx.Ec1.mxLsuDIJeET6"
 # 源 user_emergency_contact.contact_relationship:
 #   0 Cousin / 1 Colleague / 2 Friend / 3 Wife/Husband /
 #   4 Sister/Brother / 5 Other / 6 parents
@@ -232,7 +234,7 @@ def password_hash() -> str:
     if override:
         return override
 
-    # 优先纯 Python bcrypt，避免机器上没有 htpasswd
+    # 优先纯 Python bcrypt
     try:
         import bcrypt  # type: ignore
 
@@ -241,20 +243,17 @@ def password_hash() -> str:
     except Exception:
         pass
 
+    # 其次 htpasswd（包名 apache2-utils）
     cmd = ["htpasswd", "-bnBC", "10", "", DEFAULT_PASSWORD]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip().lstrip(":")
     except FileNotFoundError:
-        proc = None
-    if proc is not None and proc.returncode == 0:
-        return proc.stdout.strip().lstrip(":")
+        pass
 
-    raise RuntimeError(
-        "生成默认 bcrypt hash 失败；请任选其一："
-        "1) pip3 install bcrypt  "
-        "2) apt-get install -y apache2-utils  "
-        "3) 预先设置 COLLECTION_DEFAULT_PASSWORD_HASH"
-    )
+    # 最后兜底：默认口令预生成 hash，保证迁移不被环境卡住
+    return DEFAULT_PASSWORD_HASH
 
 
 @dataclass
