@@ -657,10 +657,13 @@ class Migrator:
         if not local10:
             return ""
         sql = """
-        SELECT CONCAT_WS(' ', NULLIF(TRIM(first_name), ''), NULLIF(TRIM(sur_name), '')) AS full_name
-        FROM `user`
-        WHERE RIGHT(REPLACE(REPLACE(TRIM(mobile), '+', ''), ' ', ''), 10) = %s
-        ORDER BY id DESC
+        SELECT CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name
+        FROM `user` u
+        LEFT JOIN user_personal_info p ON p.id = (
+            SELECT MAX(p2.id) FROM user_personal_info p2 WHERE p2.user_id = u.id
+        )
+        WHERE RIGHT(REPLACE(REPLACE(TRIM(u.mobile), '+', ''), ' ', ''), 10) = %s
+        ORDER BY u.id DESC
         LIMIT 1
         """
         row = self.fetch_one(self.backend, sql, (local10,))
