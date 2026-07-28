@@ -70,16 +70,24 @@ SELECT CAST(id AS SIGNED) AS id,
        CAST(idfa AS CHAR) AS idfa
 FROM user;
 
-CREATE OR REPLACE VIEW user_repay_paid_by_order_period AS
-SELECT CAST(order_no AS CHAR) AS order_no,
-       CAST(current_period AS SIGNED) AS current_period,
-       CAST(MAX(callback_time) AS DATETIME(3)) AS callback_time
-FROM user_repay
-WHERE status = 2 AND callback_time IS NOT NULL
-  AND order_no IS NOT NULL AND TRIM(order_no) <> ''
-GROUP BY order_no, current_period;
+CREATE OR REPLACE ALGORITHM=MERGE VIEW user_repay_paid_by_order_period AS
+SELECT ur.order_no AS order_no,
+       CAST(ur.current_period AS SIGNED) AS current_period,
+       CAST(ur.callback_time AS DATETIME(3)) AS callback_time
+FROM user_repay ur
+WHERE ur.status = 2
+  AND ur.callback_time IS NOT NULL
+  AND ur.order_no IS NOT NULL AND TRIM(ur.order_no) <> ''
+  AND ur.callback_time = (
+      SELECT MAX(ur2.callback_time)
+      FROM user_repay ur2
+      WHERE ur2.order_no = ur.order_no
+        AND ur2.current_period = ur.current_period
+        AND ur2.status = 2
+        AND ur2.callback_time IS NOT NULL
+  );
 
-CREATE OR REPLACE VIEW user_order_loan_lookup AS
+CREATE OR REPLACE ALGORITHM=MERGE VIEW user_order_loan_lookup AS
 SELECT id AS id,
        CAST(order_no AS CHAR) AS order_no,
        CAST(app_code AS SIGNED) AS app_code,
@@ -110,7 +118,7 @@ SELECT CAST(o.id AS SIGNED) AS id,
 FROM user_order o
          LEFT JOIN product_id_map pm ON pm.src = TRIM(o.product_id);
 
-CREATE OR REPLACE VIEW user_order_installment_loan_lookup AS
+CREATE OR REPLACE ALGORITHM=MERGE VIEW user_order_installment_loan_lookup AS
 SELECT id AS id,
        CAST(user_order_id AS SIGNED) AS user_order_id,
        CAST(installment_order_no AS CHAR) AS installment_order_no,
@@ -708,18 +716,51 @@ WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
 
 -- ========== loan 增量：去掉 CDC 双流 Join ==========
--- installment.id 为 bigint unsigned：必须 CAST SIGNED，否则 Flink JDBC 读成 BigInteger → ClassCast
-CREATE OR REPLACE VIEW loan_installment_ids_by_user_order_lookup AS
+-- installment.id / user_order.id 点查键必须裸列（勿 CAST），否则 JDBC Lookup 全表扫
+-- Flink 侧用 DECIMAL(20,0) 承接 bigint unsigned → BigInteger
+CREATE OR REPLACE ALGORITHM=MERGE VIEW loan_installment_ids_by_user_order_lookup AS
 SELECT user_order_id AS user_order_id,
-       CAST(id AS SIGNED) AS installment_id
+       id AS installment_id
 FROM user_order_installment
 WHERE user_order_id IS NOT NULL;
 
-CREATE OR REPLACE VIEW loan_installment_id_by_order_no_period_lookup AS
+CREATE OR REPLACE ALGORITHM=MERGE VIEW loan_installment_id_by_order_no_period_lookup AS
 SELECT o.order_no AS order_no,
        CAST(i.current_period AS SIGNED) AS current_period,
-       CAST(i.id AS SIGNED) AS installment_id
+       i.id AS installment_id
 FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
   AND i.current_period IS NOT NULL;
+
+-- 主路径一次点查拿齐 installment + order + repay callback（避免 3 段 LookupJoin 串行）
+CREATE OR REPLACE ALGORITHM=MERGE VIEW loan_incr_bundle_lookup AS
+SELECT i.id                                                         AS installment_id,
+       i.user_order_id                                              AS user_order_id,
+       CAST(i.current_period AS SIGNED)                             AS current_period,
+       CAST(i.received AS CHAR)                                     AS received,
+       CAST(i.interests AS CHAR)                                    AS interests,
+       CAST(i.poundage_fees AS CHAR)                                AS poundage_fees,
+       CAST(i.penalty_amount AS CHAR)                               AS penalty_amount,
+       CAST(i.amt_due AS CHAR)                                      AS amt_due,
+       CAST(i.repaid_amount AS CHAR)                                AS repaid_amount,
+       CAST(i.repayment_time AS DATETIME(3))                        AS repayment_time,
+       CAST(i.is_overdue AS SIGNED)                                 AS is_overdue,
+       CAST(i.create_time AS DATETIME(3))                           AS create_time,
+       CAST(o.order_no AS CHAR)                                     AS order_no,
+       CAST(o.app_code AS SIGNED)                                   AS app_code,
+       CAST(o.order_time AS DATETIME(3))                            AS order_time,
+       CAST(o.disburse_time AS DATETIME(3))                         AS disburse_time,
+       CAST(o.settled_time AS DATETIME(3))                          AS settled_time,
+       CAST(o.risk_order_status AS SIGNED)                          AS risk_order_status,
+       CAST((
+            SELECT MAX(ur.callback_time)
+            FROM user_repay ur
+            WHERE ur.order_no = o.order_no
+              AND ur.current_period = i.current_period
+              AND ur.status = 2
+              AND ur.callback_time IS NOT NULL
+       ) AS DATETIME(3))                                            AS callback_time
+FROM user_order_installment i
+         INNER JOIN user_order o ON o.id = i.user_order_id
+WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
