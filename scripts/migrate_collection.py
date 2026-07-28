@@ -307,8 +307,10 @@ class VtClient:
             self.cache[raw] = token
             return token
 
-        url = urllib.parse.urljoin(self.base_url + "/", "v2t")
-        body = json.dumps({"values": [raw]}).encode("utf-8")
+        # 与 vt-preload / Flink UDF 一致：请求体是 JSON 字符串数组，不是 {"values":[...]}
+        path = urllib.parse.urlparse(self.base_url).path.rstrip("/") + "/v2t"
+        url = f"{urllib.parse.urlparse(self.base_url).scheme}://{urllib.parse.urlparse(self.base_url).netloc}{path}"
+        body = json.dumps([raw], ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=body,
@@ -318,6 +320,9 @@ class VtClient:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"VT /v2t 调用失败: HTTP {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"VT /v2t 调用失败: {e}") from e
         tokens = data.get("tokens") or []
