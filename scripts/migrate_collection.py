@@ -204,6 +204,24 @@ def build_loan_no(order_no: str, current_period: Any) -> str:
     return f"ng-{order_no}-{period:02d}000"
 
 
+def as_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+
+
+def as_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def to_fen(value: Any) -> int:
     """源金额为主单位，目标统一按分写入。"""
     if value in (None, ""):
@@ -717,15 +735,17 @@ class Migrator:
         out = []
         seen = set()
         for r in rows:
-            mobile = normalize_mobile_local10(r.get("contact_number"))
-            key = (r.get("contact_name") or "", mobile)
-            if not mobile or key in seen:
+            vt_mobile = to_vt_mobile(r.get("contact_number"))
+            if not vt_mobile:
+                continue
+            key = ((r.get("contact_name") or "").strip(), vt_mobile)
+            if key in seen:
                 continue
             seen.add(key)
             rel = RELATION_MAP.get(int(r.get("relation") or 0))
             item = {
                 "name": (r.get("contact_name") or "").strip(),
-                "mobile": mobile,
+                "mobile": self.vt.tokenize(vt_mobile),
             }
             if rel is not None:
                 item["relation"] = rel
@@ -733,12 +753,12 @@ class Migrator:
         return ensure_json(out)
 
     def _cust_info(self, user_id: Any) -> str:
-        """按 cms.cases.cust_info 结构组装客户画像。"""
+        """按 cms.cases.cust_info 样例结构组装客户画像。"""
         if not user_id:
             return "{}"
         sql = """
         SELECT
-          DATE_FORMAT(p.date_of_birth, '%Y-%m-%d') AS birthday,
+          DATE_FORMAT(p.date_of_birth, '%%Y-%%m-%%d') AS birthday,
           p.gender,
           p.education_level AS education,
           p.marriage AS marital,
@@ -746,7 +766,6 @@ class Migrator:
           p.living_address_city AS city,
           NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
                              COALESCE(p.living_address_second_line, ''))), '') AS detail,
-          wr.work_type AS job_type,
           wr.occupation AS profession,
           NULLIF(TRIM(wr.company_name), '') AS company
         FROM user_personal_info p
@@ -759,24 +778,21 @@ class Migrator:
         LIMIT 1
         """
         row = self.fetch_one(self.backend, sql, (user_id,)) or {}
+        # 对齐样例：{"gender":1,"marital":1,"education":1,"profession":2,"birthday":"...","company":"...","address":{...}}
         info = {
-            "birthday": row.get("birthday") or "",
-            "gender": row.get("gender") if row.get("gender") is not None else "",
-            "id_card": "",
-            "live_image": "",
-            "company": row.get("company") or "",
-            "job_type": row.get("job_type") if row.get("job_type") is not None else "",
-            "profession": row.get("profession") or "",
-            "education": row.get("education") if row.get("education") is not None else "",
-            "marital": row.get("marital") if row.get("marital") is not None else "",
+            "gender": as_int(row.get("gender")),
             "address": {
-                # cms 字段名就是 provice（历史拼写）
-                "provice": row.get("province") or "",
-                "city": row.get("city") or "",
-                "district": "",
+                "city": as_str(row.get("city")),
+                "detail": as_str(row.get("detail")),
+                "provice": as_str(row.get("province")),
                 "village": "",
-                "detail": row.get("detail") or "",
+                "district": "",
             },
+            "company": as_str(row.get("company")),
+            "marital": as_int(row.get("marital")),
+            "birthday": as_str(row.get("birthday")),
+            "education": as_int(row.get("education")),
+            "profession": as_int(row.get("profession")),
         }
         return json_obj(info)
 
