@@ -661,6 +661,8 @@ class Migrator:
           o.order_time,
           o.last_repayment_time,
           CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) AS received_amount,
+          CAST(NULLIF(TRIM(o.repaid_amount), '') AS DECIMAL(20, 2)) AS repaid_amount,
+          CAST(NULLIF(TRIM(o.remaining_repayment), '') AS DECIMAL(20, 2)) AS remaining_repayment,
           DATE(COALESCE(o.disburse_time, o.order_time)) AS disburse_date,
           UNIX_TIMESTAMP(COALESCE(o.disburse_time, o.order_time)) AS disburse_ts,
           DATE(o.last_repayment_time) AS due_date,
@@ -730,6 +732,54 @@ class Migrator:
             out.append(item)
         return ensure_json(out)
 
+    def _cust_info(self, user_id: Any) -> str:
+        """按 cms.cases.cust_info 结构组装客户画像。"""
+        if not user_id:
+            return "{}"
+        sql = """
+        SELECT
+          DATE_FORMAT(p.date_of_birth, '%Y-%m-%d') AS birthday,
+          p.gender,
+          p.education_level AS education,
+          p.marriage AS marital,
+          p.living_address_state AS province,
+          p.living_address_city AS city,
+          NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
+                             COALESCE(p.living_address_second_line, ''))), '') AS detail,
+          wr.work_type AS job_type,
+          wr.occupation AS profession,
+          NULLIF(TRIM(wr.company_name), '') AS company
+        FROM user_personal_info p
+        LEFT JOIN user_work_related wr ON wr.id = (
+            SELECT MAX(w2.id) FROM user_work_related w2 WHERE w2.user_id = p.user_id
+        )
+        WHERE p.id = (
+            SELECT MAX(p2.id) FROM user_personal_info p2 WHERE p2.user_id = %s
+        )
+        LIMIT 1
+        """
+        row = self.fetch_one(self.backend, sql, (user_id,)) or {}
+        info = {
+            "birthday": row.get("birthday") or "",
+            "gender": row.get("gender") if row.get("gender") is not None else "",
+            "id_card": "",
+            "live_image": "",
+            "company": row.get("company") or "",
+            "job_type": row.get("job_type") if row.get("job_type") is not None else "",
+            "profession": row.get("profession") or "",
+            "education": row.get("education") if row.get("education") is not None else "",
+            "marital": row.get("marital") if row.get("marital") is not None else "",
+            "address": {
+                # cms 字段名就是 provice（历史拼写）
+                "provice": row.get("province") or "",
+                "city": row.get("city") or "",
+                "district": "",
+                "village": "",
+                "detail": row.get("detail") or "",
+            },
+        }
+        return json_obj(info)
+
     def migrate_cases(self) -> None:
         log("migrate cases")
         sql = """
@@ -797,8 +847,8 @@ class Migrator:
                 vt_mobile = to_vt_mobile(phone)
                 case_no = str(10000 + int(r.get("id") or 0))
                 loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
-                unpaid_amount = unsigned_amount(to_fen(r.get("amount_due")))
-                paid_amount = unsigned_amount(to_fen(r.get("repaid_amount")))
+                unpaid_amount = unsigned_amount(to_fen(bu.get("remaining_repayment")))
+                paid_amount = unsigned_amount(to_fen(bu.get("repaid_amount")))
                 total_amount = unsigned_amount(unpaid_amount + paid_amount)
                 # principal_due 在源库是「本金待还」，不是放款本金
                 principal = unsigned_amount(to_fen(r.get("principal_due")))
@@ -873,7 +923,7 @@ class Migrator:
                     "last_trace_id": 0,
                     "contacts": "[]",
                     "emerg_contacts": self._emerg_contacts(user_id),
-                    "cust_info": "{}",
+                    "cust_info": self._cust_info(user_id),
                     "updated_time": to_ts_seconds(r.get("updated_at")),
                 }
                 batch.append(row)
