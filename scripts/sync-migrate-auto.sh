@@ -63,8 +63,11 @@ echo "=========================================="
 if [[ "$KEEP_JOBS" -eq 0 ]]; then
   echo ">> [0] Cancel 全部 Job + 清空 checkpoint（禁止 restore 旧 binlog 位点）"
   bash scripts/cancel-flink-jobs.sh --yes
-  # 子脚本不再二次 cancel
-  BULK_ARGS+=(--keep-jobs)
+  # cancel 后窗口强制重建 Lookup（bulk 若带 --keep-jobs 会走 --skip-if-ok，易跳过 git 更新的视图）
+  echo ">> [0b] 强制重建源库 Lookup 视图"
+  ./scripts/deploy-source-ddl.sh --force-views
+  # 子脚本不再二次 cancel / 不再重复 DDL
+  BULK_ARGS+=(--keep-jobs --skip-ddl)
   INCR_ARGS+=(--keep-jobs)
 else
   echo ">> [0] --keep-jobs：保留存量 Job / checkpoint"
