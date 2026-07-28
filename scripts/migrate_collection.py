@@ -15,7 +15,7 @@
 - cases/dispatch 的 case_no = repayment_plan.repayment_plan_order_no
 - level_code：T0->D0，T-N->S-N，TN->SN
 - product_id：与 02_sync_user_product_incr.sql 同一套 P*/L* 映射
-- cases 迁移前预加载 backend 已放款 user_order（约 5 万）到内存，按 order_no 取
+- cases 迁移前预加载已放款 user_order + 对应用户姓名/画像/紧急联系人到内存
 - cases/dispatch：按主键区间多线程分片读 + 分批写（--workers）
 - 复杂表（cases / traces / dispatch）按“能迁多少迁多少”策略构造行，
   如果目标库少字段会自动跳过；如果源库列缺失会明确报错
@@ -495,9 +495,11 @@ class Migrator:
         self.workers = max(1, int(getattr(args, "workers", DEFAULT_WORKERS) or DEFAULT_WORKERS))
         # order_no -> user_order 宽字段（disburse_time 非空约 5 万单）
         self._order_cache: Optional[Dict[str, Dict[str, Any]]] = None
-        self._name_cache: Dict[str, str] = {}
+        self._name_by_user_id: Dict[Any, str] = {}
+        self._name_cache: Dict[str, str] = {}  # local10 phone -> name
         self._emerg_cache: Dict[Any, str] = {}
         self._cust_cache: Dict[Any, str] = {}
+        self._user_aux_ready = False
         self._aux_lock = threading.Lock()
         self._progress_lock = threading.Lock()
 
@@ -822,7 +824,7 @@ class Migrator:
         log(f"members done: {total}")
 
     def _ensure_order_cache(self) -> None:
-        """一次性把已放款订单（disburse_time 非空）灌进内存，避免 cases 逐单查 backend。"""
+        """一次性把已放款订单 + 用户画像灌进内存，避免 cases 逐单查 backend。"""
         if self._order_cache is not None:
             return
         log("preload backend user_order (disburse_time IS NOT NULL) ...")
@@ -844,8 +846,21 @@ class Migrator:
           p.bvn,
           b.bank_code,
           b.bank_account,
-          ui.current_period
+          ui.current_period,
+          CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name,
+          RIGHT(REPLACE(REPLACE(TRIM(u.mobile), '+', ''), ' ', ''), 10) AS user_mobile10,
+          DATE_FORMAT(p.date_of_birth, '%%Y-%%m-%%d') AS birthday,
+          p.gender,
+          p.education_level AS education,
+          p.marriage AS marital,
+          p.living_address_state AS province,
+          p.living_address_city AS city,
+          NULLIF(TRIM(CONCAT(COALESCE(p.living_address_first_line, ''), ' ',
+                             COALESCE(p.living_address_second_line, ''))), '') AS detail,
+          wr.occupation AS profession,
+          NULLIF(TRIM(wr.company_name), '') AS company
         FROM user_order o
+        LEFT JOIN `user` u ON u.id = o.user_id
         LEFT JOIN (
             SELECT user_id, MAX(id) AS mid FROM user_personal_info GROUP BY user_id
         ) px ON px.user_id = o.user_id
@@ -858,6 +873,10 @@ class Migrator:
             SELECT user_order_id, MAX(id) AS mid FROM user_order_installment GROUP BY user_order_id
         ) ux ON ux.user_order_id = o.id
         LEFT JOIN user_order_installment ui ON ui.id = ux.mid
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_work_related GROUP BY user_id
+        ) wx ON wx.user_id = o.user_id
+        LEFT JOIN user_work_related wr ON wr.id = wx.mid
         WHERE o.disburse_time IS NOT NULL
           AND UNIX_TIMESTAMP(o.disburse_time) > 0
         """
@@ -872,6 +891,102 @@ class Migrator:
             conn.close()
         self._order_cache = cache
         log(f"order cache ready: {len(cache)} rows")
+        self._preload_user_aux_from_orders(cache)
+
+    def _preload_user_aux_from_orders(self, orders: Dict[str, Dict[str, Any]]) -> None:
+        """从订单缓存的 user_id 灌姓名/画像，并批量加载紧急联系人。"""
+        if self._user_aux_ready:
+            return
+        user_ids = set()
+        for r in orders.values():
+            uid = r.get("user_id")
+            if uid is None:
+                continue
+            user_ids.add(uid)
+            name = (r.get("full_name") or "").strip()
+            if name:
+                self._name_by_user_id[uid] = name
+            m10 = (r.get("user_mobile10") or "").strip()
+            if m10 and name:
+                self._name_cache[m10] = name
+            if uid not in self._cust_cache:
+                info = {
+                    "gender": as_int(r.get("gender")),
+                    "address": {
+                        "city": as_str(r.get("city")),
+                        "detail": as_str(r.get("detail")),
+                        "provice": as_str(r.get("province")),
+                        "village": "",
+                        "district": "",
+                    },
+                    "company": as_str(r.get("company")),
+                    "marital": as_int(r.get("marital")),
+                    "birthday": as_str(r.get("birthday")),
+                    "education": as_int(r.get("education")),
+                    "profession": as_int(r.get("profession")),
+                }
+                self._cust_cache[uid] = json_obj(info)
+        log(
+            f"user profile cache ready: users={len(user_ids)} "
+            f"names={len(self._name_by_user_id)} phones={len(self._name_cache)} "
+            f"cust={len(self._cust_cache)}"
+        )
+        log("preload emergency contacts for disbursed users ...")
+        emerg_sql = """
+        SELECT
+          e.user_id,
+          e.contact_name,
+          e.contact_number,
+          e.contact_relationship AS relation,
+          e.id
+        FROM user_emergency_contact e
+        INNER JOIN (
+            SELECT DISTINCT user_id
+            FROM user_order
+            WHERE disburse_time IS NOT NULL
+              AND UNIX_TIMESTAMP(disburse_time) > 0
+        ) d ON d.user_id = e.user_id
+        ORDER BY e.user_id ASC, e.id DESC
+        """
+        by_user: Dict[Any, List[Dict[str, Any]]] = {}
+        conn = self.backend.connect(stream=True, retries=self.mysql_retries)
+        try:
+            for r in self.stream(conn, emerg_sql):
+                uid = r.get("user_id")
+                if uid is None:
+                    continue
+                bucket = by_user.setdefault(uid, [])
+                if len(bucket) >= 10:
+                    continue
+                bucket.append(r)
+        finally:
+            conn.close()
+        for uid, rows in by_user.items():
+            out = []
+            seen = set()
+            for r in rows:
+                vt_mobile = to_vt_mobile(r.get("contact_number"))
+                if not vt_mobile:
+                    continue
+                key = ((r.get("contact_name") or "").strip(), vt_mobile)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rel = RELATION_MAP.get(int(r.get("relation") or 0))
+                item = {
+                    "name": (r.get("contact_name") or "").strip(),
+                    "mobile": self.vt.tokenize(vt_mobile),
+                }
+                if rel is not None:
+                    item["relation"] = rel
+                out.append(item)
+            self._emerg_cache[uid] = ensure_json(out)
+        # 没有紧急联系人的用户也占位，避免运行时再打库
+        for uid in user_ids:
+            if uid not in self._emerg_cache:
+                self._emerg_cache[uid] = "[]"
+        self._user_aux_ready = True
+        log(f"emerg cache ready: users={len(self._emerg_cache)}")
 
     def _backend_user_bundle(self, order_no: str) -> Dict[str, Any]:
         order_no = (order_no or "").strip()
@@ -904,21 +1019,35 @@ class Migrator:
           p.bvn,
           b.bank_code,
           b.bank_account,
-          ui.current_period
+          ui.current_period,
+          CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name
         FROM user_order o
-        LEFT JOIN user_personal_info p ON p.id = (
-            SELECT MAX(p2.id) FROM user_personal_info p2 WHERE p2.user_id = o.user_id
-        )
-        LEFT JOIN user_bank_info b ON b.id = (
-            SELECT MAX(b2.id) FROM user_bank_info b2 WHERE b2.user_id = o.user_id AND b2.deleted = 0
-        )
-        LEFT JOIN user_order_installment ui ON ui.id = (
-            SELECT MAX(ui2.id) FROM user_order_installment ui2 WHERE ui2.user_order_id = o.id
-        )
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_personal_info GROUP BY user_id
+        ) px ON px.user_id = o.user_id
+        LEFT JOIN user_personal_info p ON p.id = px.mid
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_bank_info WHERE deleted = 0 GROUP BY user_id
+        ) bx ON bx.user_id = o.user_id
+        LEFT JOIN user_bank_info b ON b.id = bx.mid
+        LEFT JOIN (
+            SELECT user_order_id, MAX(id) AS mid FROM user_order_installment GROUP BY user_order_id
+        ) ux ON ux.user_order_id = o.id
+        LEFT JOIN user_order_installment ui ON ui.id = ux.mid
         WHERE o.order_no = %s
         LIMIT 1
         """
         return self.fetch_one(self.backend, sql, (order_no,)) or {}
+
+    def _resolve_name(self, user_id: Any, phone: Any) -> str:
+        if user_id is not None:
+            with self._aux_lock:
+                hit = self._name_by_user_id.get(user_id)
+            if hit:
+                return hit
+            # 订单宽表里的 full_name
+            # （已在 preload 写入 _name_by_user_id）
+        return self._backend_name_by_phone(phone)
 
     def _backend_name_by_phone(self, phone: Any) -> str:
         local10 = normalize_mobile_local10(phone)
@@ -927,12 +1056,18 @@ class Migrator:
         with self._aux_lock:
             if local10 in self._name_cache:
                 return self._name_cache[local10]
+        # 用户画像已预热后仍未命中：不再打库（避免拖慢），返回空
+        if self._user_aux_ready:
+            with self._aux_lock:
+                self._name_cache[local10] = ""
+            return ""
         sql = """
         SELECT CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name
         FROM `user` u
-        LEFT JOIN user_personal_info p ON p.id = (
-            SELECT MAX(p2.id) FROM user_personal_info p2 WHERE p2.user_id = u.id
-        )
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_personal_info GROUP BY user_id
+        ) px ON px.user_id = u.id
+        LEFT JOIN user_personal_info p ON p.id = px.mid
         WHERE RIGHT(REPLACE(REPLACE(TRIM(u.mobile), '+', ''), ' ', ''), 10) = %s
         ORDER BY u.id DESC
         LIMIT 1
@@ -949,6 +1084,10 @@ class Migrator:
         with self._aux_lock:
             if user_id in self._emerg_cache:
                 return self._emerg_cache[user_id]
+        if self._user_aux_ready:
+            with self._aux_lock:
+                self._emerg_cache[user_id] = "[]"
+            return "[]"
         sql = """
         SELECT contact_name, contact_number, contact_relationship AS relation
         FROM user_emergency_contact
@@ -987,6 +1126,21 @@ class Migrator:
         with self._aux_lock:
             if user_id in self._cust_cache:
                 return self._cust_cache[user_id]
+        if self._user_aux_ready:
+            empty = json_obj(
+                {
+                    "gender": None,
+                    "address": {"city": "", "detail": "", "provice": "", "village": "", "district": ""},
+                    "company": "",
+                    "marital": None,
+                    "birthday": "",
+                    "education": None,
+                    "profession": None,
+                }
+            )
+            with self._aux_lock:
+                self._cust_cache[user_id] = empty
+            return empty
         sql = """
         SELECT
           DATE_FORMAT(p.date_of_birth, '%%Y-%%m-%%d') AS birthday,
@@ -1000,16 +1154,16 @@ class Migrator:
           wr.occupation AS profession,
           NULLIF(TRIM(wr.company_name), '') AS company
         FROM user_personal_info p
-        LEFT JOIN user_work_related wr ON wr.id = (
-            SELECT MAX(w2.id) FROM user_work_related w2 WHERE w2.user_id = p.user_id
-        )
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_work_related GROUP BY user_id
+        ) wx ON wx.user_id = p.user_id
+        LEFT JOIN user_work_related wr ON wr.id = wx.mid
         WHERE p.id = (
             SELECT MAX(p2.id) FROM user_personal_info p2 WHERE p2.user_id = %s
         )
         LIMIT 1
         """
         row = self.fetch_one(self.backend, sql, (user_id,)) or {}
-        # 对齐样例：{"gender":1,"marital":1,"education":1,"profession":2,"birthday":"...","company":"...","address":{...}}
         info = {
             "gender": as_int(row.get("gender")),
             "address": {
@@ -1032,6 +1186,7 @@ class Migrator:
 
     @staticmethod
     def _split_id_ranges(mi: int, ma: int, n: int) -> List[Tuple[int, int]]:
+        """按 id 数值均分（稀疏主键时负载不均，优先用 _balanced_id_ranges）。"""
         if mi > ma:
             return []
         n = max(1, min(n, ma - mi + 1))
@@ -1044,6 +1199,47 @@ class Migrator:
             out.append((cur, hi))
             cur = hi + 1
         return out
+
+    def _balanced_id_ranges(self, table: str, *, n: int) -> Tuple[int, List[Tuple[int, int]]]:
+        """按行数近似均分主键区间，避免雪花 id 跨度导致 7 个空分片、1 个扛全部。"""
+        meta = self.fetch_one(
+            self.src,
+            f"SELECT MIN(id) AS mi, MAX(id) AS ma, COUNT(*) AS cnt FROM `{table}`",
+        ) or {}
+        mi = meta.get("mi")
+        ma = meta.get("ma")
+        cnt = int(meta.get("cnt") or 0)
+        if mi is None or ma is None or cnt <= 0:
+            return 0, []
+        mi_i, ma_i = int(mi), int(ma)
+        n = max(1, min(n, cnt))
+        if n == 1:
+            return cnt, [(mi_i, ma_i)]
+        cuts: List[int] = [mi_i]
+        for i in range(1, n):
+            offset = (cnt * i) // n
+            # OFFSET 在 ~5 万行可接受；取分界 id
+            row = self.fetch_one(
+                self.src,
+                f"SELECT id FROM `{table}` ORDER BY id LIMIT 1 OFFSET %s",
+                (offset,),
+            )
+            if row and row.get("id") is not None:
+                cuts.append(int(row["id"]))
+        cuts.append(ma_i + 1)  # exclusive end sentinel
+        # 去重并生成闭区间 [lo, hi]
+        ranges: List[Tuple[int, int]] = []
+        for i in range(len(cuts) - 1):
+            lo = cuts[i]
+            hi_excl = cuts[i + 1]
+            if hi_excl <= lo:
+                continue
+            ranges.append((lo, hi_excl - 1))
+        if not ranges:
+            return cnt, [(mi_i, ma_i)]
+        # 合并可能因重复 cut 产生的空洞，保证覆盖到 ma
+        ranges[-1] = (ranges[-1][0], ma_i)
+        return cnt, ranges
 
     def _cases_select_sql(self, *, where: str = "") -> str:
         return f"""
@@ -1076,20 +1272,19 @@ class Migrator:
           cl.name AS level_name
         FROM repayment_plan p
         LEFT JOIN collection_level cl ON cl.id = p.collection_level_id
-        LEFT JOIN collection_assignment a
-          ON a.id = (
-              SELECT a2.id FROM collection_assignment a2
-              WHERE a2.repayment_plan_id = p.id AND a2.assignment_status = 1
-              ORDER BY a2.id DESC
-              LIMIT 1
-          )
-        LEFT JOIN collection_assign_log al
-          ON al.id = (
-              SELECT l2.id FROM collection_assign_log l2
-              WHERE l2.repayment_plan_id = p.id
-              ORDER BY l2.id DESC
-              LIMIT 1
-          )
+        LEFT JOIN (
+            SELECT repayment_plan_id, MAX(id) AS mid
+            FROM collection_assignment
+            WHERE assignment_status = 1
+            GROUP BY repayment_plan_id
+        ) ax ON ax.repayment_plan_id = p.id
+        LEFT JOIN collection_assignment a ON a.id = ax.mid
+        LEFT JOIN (
+            SELECT repayment_plan_id, MAX(id) AS mid
+            FROM collection_assign_log
+            GROUP BY repayment_plan_id
+        ) lx ON lx.repayment_plan_id = p.id
+        LEFT JOIN collection_assign_log al ON al.id = lx.mid
         LEFT JOIN collection_staff st
           ON st.staff_code = COALESCE(a.collector_id, al.current_collector_id)
         LEFT JOIN collection_company cc
@@ -1148,7 +1343,7 @@ class Migrator:
             "status": "CLOSED" if closed else "COLLECTING",
             "term": 7,
             "cust_group": "[]",
-            "name": self._backend_name_by_phone(phone)[:128],
+            "name": self._resolve_name(user_id, phone)[:128],
             "mobile": (self.vt.tokenize(vt_mobile) if vt_mobile else "")[:28],
             "id_number": (self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "")[:28],
             "email": "",
@@ -1185,6 +1380,7 @@ class Migrator:
         }
 
     def _migrate_cases_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
+        log(f"cases w{wid} start id[{lo},{hi}]")
         sql = self._cases_select_sql(where="WHERE p.id BETWEEN %s AND %s")
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
@@ -1193,6 +1389,12 @@ class Migrator:
         try:
             for r in self.stream(conn, sql, (lo, hi)):
                 scanned += 1
+                if scanned == 1 or scanned % 50 == 0:
+                    with self._progress_lock:
+                        log(
+                            f"cases w{wid} scanning scanned={scanned} pending_batch={len(batch)} "
+                            f"upserted={total} elapsed={int(time.time() - t0)}s"
+                        )
                 row = self._build_case_row(r)
                 if not row:
                     continue
@@ -1203,8 +1405,8 @@ class Migrator:
                     batch = []
                     with self._progress_lock:
                         log(
-                            f"cases w{wid} id[{lo},{hi}] upserted+={n} "
-                            f"shard_total={total} scanned={scanned} elapsed={int(time.time() - t0)}s"
+                            f"cases w{wid} upserted+={n} shard_total={total} "
+                            f"scanned={scanned} elapsed={int(time.time() - t0)}s"
                         )
             if batch:
                 n, _ = self.upsert("cases", batch)
@@ -1253,20 +1455,13 @@ class Migrator:
             log(f"cases done: {total} (scanned={scanned}, elapsed={int(time.time() - t0)}s)")
             return
 
-        bounds = self.fetch_one(
-            self.src,
-            "SELECT MIN(id) AS mi, MAX(id) AS ma, COUNT(*) AS cnt FROM repayment_plan",
-        ) or {}
-        mi = bounds.get("mi")
-        ma = bounds.get("ma")
-        cnt = int(bounds.get("cnt") or 0)
-        if mi is None or ma is None or cnt <= 0:
+        cnt, ranges = self._balanced_id_ranges("repayment_plan", n=self.workers)
+        if cnt <= 0 or not ranges:
             log("cases done: 0 (empty repayment_plan)")
             return
-        ranges = self._split_id_ranges(int(mi), int(ma), self.workers)
         log(
-            f"migrate cases: rows~{cnt} id[{mi},{ma}] shards={len(ranges)} "
-            f"workers={self.workers} batch={self.args.batch}"
+            f"migrate cases: rows={cnt} shards={len(ranges)} "
+            f"workers={self.workers} batch={self.args.batch} ranges={ranges}"
         )
         # 预热目标表元数据，避免多线程首次探测竞态
         self.target_columns("cases")
@@ -1314,6 +1509,7 @@ class Migrator:
         }
 
     def _migrate_dispatch_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
+        log(f"dispatch w{wid} start id[{lo},{hi}]")
         sql = """
         SELECT
           l.*,
@@ -1335,6 +1531,12 @@ class Migrator:
         try:
             for r in self.stream(conn, sql, (lo, hi)):
                 scanned += 1
+                if scanned == 1 or scanned % 200 == 0:
+                    with self._progress_lock:
+                        log(
+                            f"dispatch w{wid} scanning scanned={scanned} upserted={total} "
+                            f"elapsed={int(time.time() - t0)}s"
+                        )
                 batch.append(self._build_dispatch_row(r))
                 if len(batch) >= self.args.batch:
                     n, _ = self.upsert("dispatch_logs", batch)
@@ -1342,8 +1544,8 @@ class Migrator:
                     batch = []
                     with self._progress_lock:
                         log(
-                            f"dispatch w{wid} id[{lo},{hi}] upserted+={n} "
-                            f"shard_total={total} scanned={scanned} elapsed={int(time.time() - t0)}s"
+                            f"dispatch w{wid} upserted+={n} shard_total={total} "
+                            f"scanned={scanned} elapsed={int(time.time() - t0)}s"
                         )
             if batch:
                 n, _ = self.upsert("dispatch_logs", batch)
@@ -1388,18 +1590,11 @@ class Migrator:
             log(f"dispatch done: {total}")
             return
 
-        bounds = self.fetch_one(
-            self.src,
-            "SELECT MIN(id) AS mi, MAX(id) AS ma, COUNT(*) AS cnt FROM collection_assign_log",
-        ) or {}
-        mi = bounds.get("mi")
-        ma = bounds.get("ma")
-        cnt = int(bounds.get("cnt") or 0)
-        if mi is None or ma is None or cnt <= 0:
+        cnt, ranges = self._balanced_id_ranges("collection_assign_log", n=self.workers)
+        if cnt <= 0 or not ranges:
             log("dispatch done: 0")
             return
-        ranges = self._split_id_ranges(int(mi), int(ma), self.workers)
-        log(f"migrate dispatch: rows~{cnt} id[{mi},{ma}] shards={len(ranges)} workers={self.workers}")
+        log(f"migrate dispatch: rows={cnt} shards={len(ranges)} workers={self.workers} ranges={ranges}")
         self.target_columns("dispatch_logs")
         self.target_pks("dispatch_logs")
         total = 0
