@@ -16,6 +16,7 @@
 - level_code：T0->D0，T-N->S-N，TN->SN
 - product_id：与 02_sync_user_product_incr.sql 同一套 P*/L* 映射
 - cases 迁移前预加载 backend 已放款 user_order（约 5 万）到内存，按 order_no 取
+- cases/dispatch：按主键区间多线程分片读 + 分批写（--workers）
 - 复杂表（cases / traces / dispatch）按“能迁多少迁多少”策略构造行，
   如果目标库少字段会自动跳过；如果源库列缺失会明确报错
 """
@@ -30,10 +31,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -47,6 +50,7 @@ DEFAULT_TABLES = ("companys", "members", "cases", "dispatch")
 DEFAULT_ENV = "/opt/nigeria-flink-sync/.env"
 DEFAULT_BID = "ng01"
 DEFAULT_BATCH = 1000
+DEFAULT_WORKERS = 8
 DEFAULT_VT_URL = "http://101.47.23.241:9505"
 DEFAULT_PASSWORD = "ng01123456."
 # htpasswd -bnBC 10 "" ng01123456. 预生成；无 bcrypt/htpasswd 时兜底
@@ -431,16 +435,20 @@ class VtClient:
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
         self.cache: Dict[str, str] = {}
+        self._lock = threading.Lock()
 
     def tokenize(self, raw: str) -> str:
         raw = (raw or "").strip()
         if not raw:
             return ""
-        if raw in self.cache:
-            return self.cache[raw]
+        with self._lock:
+            hit = self.cache.get(raw)
+        if hit is not None:
+            return hit
         if self.dry_run:
             token = f"dry_{base64.urlsafe_b64encode(raw.encode()).decode()[:20]}"
-            self.cache[raw] = token
+            with self._lock:
+                self.cache[raw] = token
             return token
 
         # 与 vt-preload / Flink UDF 一致：请求体是 JSON 字符串数组，不是 {"values":[...]}
@@ -464,8 +472,10 @@ class VtClient:
         tokens = data.get("tokens") or []
         if len(tokens) != 1 or not tokens[0]:
             raise RuntimeError(f"VT /v2t 返回异常: {data}")
-        self.cache[raw] = tokens[0]
-        return tokens[0]
+        token = str(tokens[0])
+        with self._lock:
+            self.cache.setdefault(raw, token)
+            return self.cache[raw]
 
 
 class Migrator:
@@ -482,8 +492,14 @@ class Migrator:
         self._adapter: Optional[str] = None
         self._member_password = password_hash()
         self.mysql_retries = int(getattr(args, "mysql_retries", DEFAULT_MYSQL_RETRIES) or DEFAULT_MYSQL_RETRIES)
+        self.workers = max(1, int(getattr(args, "workers", DEFAULT_WORKERS) or DEFAULT_WORKERS))
         # order_no -> user_order 宽字段（disburse_time 非空约 5 万单）
         self._order_cache: Optional[Dict[str, Dict[str, Any]]] = None
+        self._name_cache: Dict[str, str] = {}
+        self._emerg_cache: Dict[Any, str] = {}
+        self._cust_cache: Dict[Any, str] = {}
+        self._aux_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
 
     def _src_cfg(self) -> DbConfig:
         return DbConfig(
@@ -908,6 +924,9 @@ class Migrator:
         local10 = normalize_mobile_local10(phone)
         if not local10:
             return ""
+        with self._aux_lock:
+            if local10 in self._name_cache:
+                return self._name_cache[local10]
         sql = """
         SELECT CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name
         FROM `user` u
@@ -919,11 +938,17 @@ class Migrator:
         LIMIT 1
         """
         row = self.fetch_one(self.backend, sql, (local10,))
-        return ((row or {}).get("full_name") or "").strip()
+        name = ((row or {}).get("full_name") or "").strip()
+        with self._aux_lock:
+            self._name_cache[local10] = name
+        return name
 
     def _emerg_contacts(self, user_id: Any) -> str:
         if not user_id:
             return "[]"
+        with self._aux_lock:
+            if user_id in self._emerg_cache:
+                return self._emerg_cache[user_id]
         sql = """
         SELECT contact_name, contact_number, contact_relationship AS relation
         FROM user_emergency_contact
@@ -950,12 +975,18 @@ class Migrator:
             if rel is not None:
                 item["relation"] = rel
             out.append(item)
-        return ensure_json(out)
+        result = ensure_json(out)
+        with self._aux_lock:
+            self._emerg_cache[user_id] = result
+        return result
 
     def _cust_info(self, user_id: Any) -> str:
         """按 cms.cases.cust_info 样例结构组装客户画像。"""
         if not user_id:
             return "{}"
+        with self._aux_lock:
+            if user_id in self._cust_cache:
+                return self._cust_cache[user_id]
         sql = """
         SELECT
           DATE_FORMAT(p.date_of_birth, '%%Y-%%m-%%d') AS birthday,
@@ -994,12 +1025,28 @@ class Migrator:
             "education": as_int(row.get("education")),
             "profession": as_int(row.get("profession")),
         }
-        return json_obj(info)
+        result = json_obj(info)
+        with self._aux_lock:
+            self._cust_cache[user_id] = result
+        return result
 
-    def migrate_cases(self) -> None:
-        log("migrate cases")
-        self._ensure_order_cache()
-        sql = """
+    @staticmethod
+    def _split_id_ranges(mi: int, ma: int, n: int) -> List[Tuple[int, int]]:
+        if mi > ma:
+            return []
+        n = max(1, min(n, ma - mi + 1))
+        span = ma - mi + 1
+        size = (span + n - 1) // n
+        out: List[Tuple[int, int]] = []
+        cur = mi
+        while cur <= ma:
+            hi = min(ma, cur + size - 1)
+            out.append((cur, hi))
+            cur = hi + 1
+        return out
+
+    def _cases_select_sql(self, *, where: str = "") -> str:
+        return f"""
         SELECT
           p.id,
           p.order_no,
@@ -1047,122 +1094,226 @@ class Migrator:
           ON st.staff_code = COALESCE(a.collector_id, al.current_collector_id)
         LEFT JOIN collection_company cc
           ON cc.id = st.company_id
+        {where}
         ORDER BY p.id
         """
-        if self.args.limit:
-            sql += f" LIMIT {int(self.args.limit)}"
+
+    def _build_case_row(self, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        order_no = str(r.get("order_no") or "").strip()
+        if not order_no:
+            return None
+        bu = self._backend_user_bundle(order_no)
+        user_id = bu.get("user_id")
+        phone = r.get("phone")
+        vt_mobile = to_vt_mobile(phone)
+        case_no = str(r.get("repayment_plan_order_no") or "").strip() or order_no
+        loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
+        unpaid_amount = unsigned_amount(to_fen(bu.get("remaining_repayment")))
+        paid_amount = unsigned_amount(to_fen(bu.get("repaid_amount")))
+        total_amount = unsigned_amount(unpaid_amount + paid_amount)
+        principal = unsigned_amount(to_fen(r.get("principal_due")))
+        fee = unsigned_amount(int(round(loan_amount * 0.35)))
+        penalty_amount = unsigned_amount(to_fen(r.get("overdue_fees")))
+        received_fen = unsigned_amount(to_fen(bu.get("received_amount")))
+        disbursed_amount = received_fen if received_fen > 0 else unsigned_amount(loan_amount - fee)
+        app_code = bu.get("app_code") or r.get("app_id") or 0
+        application_no = f"ng0{to_int(app_code):01d}-{order_no}"[:36]
+        follow_status = (r.get("collection_follow_status") or "").strip().upper()
+        plan_status = to_int(r.get("plan_status"), default=-1)
+        closed = plan_status == 0 or follow_status == "PAID"
+        collection_raw = r.get("assignment_date") or r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at")
+        collection_time = to_ts_seconds(r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at"))
+        if collection_time <= 0:
+            collection_time = int(time.time())
+        collection_date = to_date_str(collection_raw)
+        disbursed_time = to_int(bu.get("disburse_ts"))
+        disbursed_date = to_date_or_none(bu.get("disburse_date"))
+        due_time = to_int(bu.get("due_ts"))
+        due_date = to_date_or_none(bu.get("due_date"))
+        return {
+            "bid": self.bid,
+            "case_no": case_no[:64],
+            "application_no": application_no,
+            "loan_no": build_loan_no(order_no, bu.get("current_period"))[:36],
+            "sn": order_no[:36],
+            "company_id": int(r.get("company_id") or 0) + 10000 if r.get("company_id") else 0,
+            "company_name": (r.get("company_name") or "").strip(),
+            "member_id": 10000 + int(r.get("staff_id") or 0) if r.get("staff_id") else 0,
+            "member_name": str(r.get("collector_id") or r.get("current_collector_id") or "")[:64],
+            "level_code": map_level_code(r.get("level_name")),
+            "product_id": map_product_id(r.get("product_id")),
+            "product_name": str(r.get("product_name") or "")[:128],
+            "app_id": to_int(r.get("app_id")),
+            "app_name": str(r.get("app_name") or "")[:128],
+            "status": "CLOSED" if closed else "COLLECTING",
+            "term": 7,
+            "cust_group": "[]",
+            "name": self._backend_name_by_phone(phone)[:128],
+            "mobile": (self.vt.tokenize(vt_mobile) if vt_mobile else "")[:28],
+            "id_number": (self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "")[:28],
+            "email": "",
+            "bank_code": (bu.get("bank_code") or "").strip()[:128],
+            "bank_account": (self.vt.tokenize((bu.get("bank_account") or "").strip()) if bu.get("bank_account") else "")[:128],
+            "loan_amount": loan_amount,
+            "total_amount": total_amount,
+            "principal": principal,
+            "fee": fee,
+            "interest": 0,
+            "penalty_amount": penalty_amount,
+            "tax_amount": 0,
+            "rollover_amount": 0,
+            "disbursed_amount": disbursed_amount,
+            "disbursed_time": disbursed_time,
+            "disbursed_date": disbursed_date,
+            "paid_amount": paid_amount,
+            "unpaid_amount": unpaid_amount,
+            "overdue_days": to_int(r.get("overdue_days")),
+            "hold_days": hold_days_from(r.get("assignment_date")),
+            "due_time": due_time,
+            "due_date": due_date,
+            "closed_method": "settle" if follow_status == "PAID" else "",
+            "closed_time": to_ts_seconds(r.get("updated_at")) if plan_status == 0 else 0,
+            "closed_date": to_date_or_none(r.get("updated_at")) if plan_status == 0 else None,
+            "collection_time": collection_time,
+            "collection_date": collection_date,
+            "promise_time": 0,
+            "last_trace_id": 0,
+            "contacts": "[]",
+            "emerg_contacts": self._emerg_contacts(user_id),
+            "cust_info": self._cust_info(user_id),
+            "updated_time": to_ts_seconds(r.get("updated_at")),
+        }
+
+    def _migrate_cases_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
+        sql = self._cases_select_sql(where="WHERE p.id BETWEEN %s AND %s")
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
+        scanned = 0
         try:
-            for r in self.stream(conn, sql):
-                order_no = str(r.get("order_no") or "").strip()
-                if not order_no:
+            for r in self.stream(conn, sql, (lo, hi)):
+                scanned += 1
+                row = self._build_case_row(r)
+                if not row:
                     continue
-                bu = self._backend_user_bundle(order_no)
-                user_id = bu.get("user_id")
-                phone = r.get("phone")
-                vt_mobile = to_vt_mobile(phone)
-                case_no = str(r.get("repayment_plan_order_no") or "").strip() or order_no
-                loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
-                unpaid_amount = unsigned_amount(to_fen(bu.get("remaining_repayment")))
-                paid_amount = unsigned_amount(to_fen(bu.get("repaid_amount")))
-                total_amount = unsigned_amount(unpaid_amount + paid_amount)
-                # principal_due 在源库是「本金待还」，不是放款本金
-                principal = unsigned_amount(to_fen(r.get("principal_due")))
-                fee = unsigned_amount(int(round(loan_amount * 0.35)))
-                penalty_amount = unsigned_amount(to_fen(r.get("overdue_fees")))
-                # 放款金额：优先 user_order.received；否则申请额 - 管理费
-                received_fen = unsigned_amount(to_fen(bu.get("received_amount")))
-                disbursed_amount = received_fen if received_fen > 0 else unsigned_amount(loan_amount - fee)
-                app_code = bu.get("app_code") or r.get("app_id") or 0
-                application_no = f"ng0{to_int(app_code):01d}-{order_no}"[:36]
-                follow_status = (r.get("collection_follow_status") or "").strip().upper()
-                plan_status = to_int(r.get("plan_status"), default=-1)
-                closed = plan_status == 0 or follow_status == "PAID"
-                # collection_date/time 在目标表 NOT NULL，无分单时回退计划创建时间
-                collection_raw = r.get("assignment_date") or r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at")
-                collection_time = to_ts_seconds(r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at"))
-                if collection_time <= 0:
-                    collection_time = int(time.time())
-                collection_date = to_date_str(collection_raw)
-                # 放款/到期时间直接用 MySQL DATE/UNIX_TIMESTAMP，避免 Python 时区偏移
-                disbursed_time = to_int(bu.get("disburse_ts"))
-                disbursed_date = to_date_or_none(bu.get("disburse_date"))
-                due_time = to_int(bu.get("due_ts"))
-                due_date = to_date_or_none(bu.get("due_date"))
-                row = {
-                    "bid": self.bid,
-                    "case_no": case_no[:64],
-                    "application_no": application_no,
-                    "loan_no": build_loan_no(order_no, bu.get("current_period"))[:36],
-                    "sn": order_no[:36],
-                    "company_id": int(r.get("company_id") or 0) + 10000 if r.get("company_id") else 0,
-                    "company_name": (r.get("company_name") or "").strip(),
-                    "member_id": 10000 + int(r.get("staff_id") or 0) if r.get("staff_id") else 0,
-                    "member_name": str(r.get("collector_id") or r.get("current_collector_id") or "")[:64],
-                    "level_code": map_level_code(r.get("level_name")),
-                    "product_id": map_product_id(r.get("product_id")),
-                    "product_name": str(r.get("product_name") or "")[:128],
-                    "app_id": to_int(r.get("app_id")),
-                    "app_name": str(r.get("app_name") or "")[:128],
-                    "status": "CLOSED" if closed else "COLLECTING",
-                    "term": 7,
-                    "cust_group": "[]",
-                    "name": self._backend_name_by_phone(phone)[:128],
-                    "mobile": (self.vt.tokenize(vt_mobile) if vt_mobile else "")[:28],
-                    "id_number": (self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "")[:28],
-                    "email": "",
-                    "bank_code": (bu.get("bank_code") or "").strip()[:128],
-                    "bank_account": (self.vt.tokenize((bu.get("bank_account") or "").strip()) if bu.get("bank_account") else "")[:128],
-                    "loan_amount": loan_amount,
-                    "total_amount": total_amount,
-                    "principal": principal,
-                    "fee": fee,
-                    "interest": 0,
-                    "penalty_amount": penalty_amount,
-                    "tax_amount": 0,
-                    "rollover_amount": 0,
-                    "disbursed_amount": disbursed_amount,
-                    "disbursed_time": disbursed_time,
-                    "disbursed_date": disbursed_date,
-                    "paid_amount": paid_amount,
-                    "unpaid_amount": unpaid_amount,
-                    "overdue_days": to_int(r.get("overdue_days")),
-                    "hold_days": hold_days_from(r.get("assignment_date")),
-                    "due_time": due_time,
-                    "due_date": due_date,
-                    "closed_method": "settle" if follow_status == "PAID" else "",
-                    "closed_time": to_ts_seconds(r.get("updated_at")) if plan_status == 0 else 0,
-                    "closed_date": to_date_or_none(r.get("updated_at")) if plan_status == 0 else None,
-                    "collection_time": collection_time,
-                    "collection_date": collection_date,
-                    "promise_time": 0,
-                    "last_trace_id": 0,
-                    "contacts": "[]",
-                    "emerg_contacts": self._emerg_contacts(user_id),
-                    "cust_info": self._cust_info(user_id),
-                    "updated_time": to_ts_seconds(r.get("updated_at")),
-                }
                 batch.append(row)
                 if len(batch) >= self.args.batch:
                     n, _ = self.upsert("cases", batch)
                     total += n
                     batch = []
+                    with self._progress_lock:
+                        log(
+                            f"cases w{wid} id[{lo},{hi}] upserted+={n} "
+                            f"shard_total={total} scanned={scanned} elapsed={int(time.time() - t0)}s"
+                        )
             if batch:
                 n, _ = self.upsert("cases", batch)
                 total += n
         finally:
             conn.close()
-        log(f"cases done: {total}")
+        log(f"cases w{wid} done id[{lo},{hi}] upserted={total} scanned={scanned}")
+        return total, scanned
+
+    def migrate_cases(self) -> None:
+        log("migrate cases")
+        self._ensure_order_cache()
+        t0 = time.time()
+        if self.args.limit:
+            # limit 场景：单连接扫 + 线程池并行 enrich，再分批写
+            sql = self._cases_select_sql() + f" LIMIT {int(self.args.limit)}"
+            log(f"migrate cases: limit={self.args.limit} workers={self.workers}")
+            self.target_columns("cases")
+            self.target_pks("cases")
+            conn = self.src.connect(stream=True, retries=self.mysql_retries)
+            raw_buf: List[Dict[str, Any]] = []
+            total = 0
+            scanned = 0
+            try:
+                with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                    for r in self.stream(conn, sql):
+                        raw_buf.append(r)
+                        scanned += 1
+                        if len(raw_buf) < max(self.args.batch, self.workers * 20):
+                            continue
+                        rows = [x for x in pool.map(self._build_case_row, raw_buf) if x]
+                        raw_buf = []
+                        for i in range(0, len(rows), self.args.batch):
+                            chunk = rows[i : i + self.args.batch]
+                            n, _ = self.upsert("cases", chunk)
+                            total += n
+                        log(f"cases progress upserted={total} scanned={scanned} elapsed={int(time.time() - t0)}s")
+                    if raw_buf:
+                        rows = [x for x in pool.map(self._build_case_row, raw_buf) if x]
+                        for i in range(0, len(rows), self.args.batch):
+                            chunk = rows[i : i + self.args.batch]
+                            n, _ = self.upsert("cases", chunk)
+                            total += n
+            finally:
+                conn.close()
+            log(f"cases done: {total} (scanned={scanned}, elapsed={int(time.time() - t0)}s)")
+            return
+
+        bounds = self.fetch_one(
+            self.src,
+            "SELECT MIN(id) AS mi, MAX(id) AS ma, COUNT(*) AS cnt FROM repayment_plan",
+        ) or {}
+        mi = bounds.get("mi")
+        ma = bounds.get("ma")
+        cnt = int(bounds.get("cnt") or 0)
+        if mi is None or ma is None or cnt <= 0:
+            log("cases done: 0 (empty repayment_plan)")
+            return
+        ranges = self._split_id_ranges(int(mi), int(ma), self.workers)
+        log(
+            f"migrate cases: rows~{cnt} id[{mi},{ma}] shards={len(ranges)} "
+            f"workers={self.workers} batch={self.args.batch}"
+        )
+        # 预热目标表元数据，避免多线程首次探测竞态
+        self.target_columns("cases")
+        self.target_pks("cases")
+        total = 0
+        scanned = 0
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futs = [
+                pool.submit(self._migrate_cases_shard, lo, hi, i + 1, t0)
+                for i, (lo, hi) in enumerate(ranges)
+            ]
+            for fut in as_completed(futs):
+                up, sc = fut.result()
+                total += up
+                scanned += sc
+        log(f"cases done: {total} (scanned={scanned}, elapsed={int(time.time() - t0)}s)")
 
     def migrate_traces(self) -> None:
         # 暂不迁移 case_traces；仅在显式 --table traces 时进入这里并直接跳过
         log("migrate traces: skipped (case_traces 暂不传)")
         return
 
-    def migrate_dispatch(self) -> None:
-        log("migrate dispatch")
+    def _build_dispatch_row(self, r: Dict[str, Any]) -> Dict[str, Any]:
+        paid = 0
+        total_amount = to_fen(r.get("contract_amount"))
+        case_no = (
+            str(r.get("repayment_plan_order_no") or "").strip()
+            or str(r.get("plan_order_no") or r.get("order_no") or "").strip()
+        )
+        return {
+            "bid": self.bid,
+            "case_no": case_no,
+            "total_amount": total_amount,
+            "paid_amount": paid,
+            "level_code": map_level_code(r.get("collection_level_name") or r.get("level_name")),
+            "application_no": "",
+            "executor_id": 0,
+            "executor_name": (r.get("operator_name") or "").strip(),
+            "original_member_id": 10000 + int(r.get("initial_staff_id") or 0) if r.get("initial_staff_id") else 0,
+            "original_member_name": str(r.get("initial_collector_id") or ""),
+            "member_id": 10000 + int(r.get("current_staff_id") or 0) if r.get("current_staff_id") else 0,
+            "member_name": str(r.get("current_collector_id") or ""),
+            "dispatch_time": to_ts_seconds(r.get("created_at")),
+            "dispatch_date": to_date_str(r.get("created_at")),
+        }
+
+    def _migrate_dispatch_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
         sql = """
         SELECT
           l.*,
@@ -1174,53 +1325,96 @@ class Migrator:
         LEFT JOIN repayment_plan p ON p.id = l.repayment_plan_id
         LEFT JOIN collection_staff s1 ON s1.staff_code = l.initial_collector_id
         LEFT JOIN collection_staff s2 ON s2.staff_code = l.current_collector_id
+        WHERE l.id BETWEEN %s AND %s
         ORDER BY l.id
         """
-        if self.args.limit:
-            sql += f" LIMIT {int(self.args.limit)}"
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
+        scanned = 0
         try:
-            for r in self.stream(conn, sql):
-                paid = 0
-                total_amount = to_fen(r.get("contract_amount"))
-                case_no = (
-                    str(r.get("repayment_plan_order_no") or "").strip()
-                    or str(r.get("plan_order_no") or r.get("order_no") or "").strip()
-                )
-                batch.append(
-                    {
-                        "bid": self.bid,
-                        "case_no": case_no,
-                        "total_amount": total_amount,
-                        "paid_amount": paid,
-                        "level_code": map_level_code(
-                            r.get("collection_level_name") or r.get("level_name")
-                        ),
-                        "application_no": "",
-                        "executor_id": 0,
-                        "executor_name": (r.get("operator_name") or "").strip(),
-                        "original_member_id": 10000 + int(r.get("initial_staff_id") or 0) if r.get("initial_staff_id") else 0,
-                        "original_member_name": str(r.get("initial_collector_id") or ""),
-                        "member_id": 10000 + int(r.get("current_staff_id") or 0)
-                        if r.get("current_staff_id")
-                        else 0,
-                        "member_name": str(r.get("current_collector_id") or ""),
-                        "dispatch_time": to_ts_seconds(r.get("created_at")),
-                        "dispatch_date": to_date_str(r.get("created_at")),
-                    }
-                )
+            for r in self.stream(conn, sql, (lo, hi)):
+                scanned += 1
+                batch.append(self._build_dispatch_row(r))
                 if len(batch) >= self.args.batch:
                     n, _ = self.upsert("dispatch_logs", batch)
                     total += n
                     batch = []
+                    with self._progress_lock:
+                        log(
+                            f"dispatch w{wid} id[{lo},{hi}] upserted+={n} "
+                            f"shard_total={total} scanned={scanned} elapsed={int(time.time() - t0)}s"
+                        )
             if batch:
                 n, _ = self.upsert("dispatch_logs", batch)
                 total += n
         finally:
             conn.close()
-        log(f"dispatch done: {total}")
+        log(f"dispatch w{wid} done id[{lo},{hi}] upserted={total} scanned={scanned}")
+        return total, scanned
+
+    def migrate_dispatch(self) -> None:
+        log("migrate dispatch")
+        t0 = time.time()
+        if self.args.limit:
+            sql = """
+            SELECT
+              l.*,
+              p.repayment_plan_order_no,
+              p.order_no AS plan_order_no,
+              s1.id AS initial_staff_id,
+              s2.id AS current_staff_id
+            FROM collection_assign_log l
+            LEFT JOIN repayment_plan p ON p.id = l.repayment_plan_id
+            LEFT JOIN collection_staff s1 ON s1.staff_code = l.initial_collector_id
+            LEFT JOIN collection_staff s2 ON s2.staff_code = l.current_collector_id
+            ORDER BY l.id
+            """ + f" LIMIT {int(self.args.limit)}"
+            conn = self.src.connect(stream=True, retries=self.mysql_retries)
+            batch: List[Dict[str, Any]] = []
+            total = 0
+            try:
+                for r in self.stream(conn, sql):
+                    batch.append(self._build_dispatch_row(r))
+                    if len(batch) >= self.args.batch:
+                        n, _ = self.upsert("dispatch_logs", batch)
+                        total += n
+                        batch = []
+                if batch:
+                    n, _ = self.upsert("dispatch_logs", batch)
+                    total += n
+            finally:
+                conn.close()
+            log(f"dispatch done: {total}")
+            return
+
+        bounds = self.fetch_one(
+            self.src,
+            "SELECT MIN(id) AS mi, MAX(id) AS ma, COUNT(*) AS cnt FROM collection_assign_log",
+        ) or {}
+        mi = bounds.get("mi")
+        ma = bounds.get("ma")
+        cnt = int(bounds.get("cnt") or 0)
+        if mi is None or ma is None or cnt <= 0:
+            log("dispatch done: 0")
+            return
+        ranges = self._split_id_ranges(int(mi), int(ma), self.workers)
+        log(f"migrate dispatch: rows~{cnt} id[{mi},{ma}] shards={len(ranges)} workers={self.workers}")
+        self.target_columns("dispatch_logs")
+        self.target_pks("dispatch_logs")
+        total = 0
+        scanned = 0
+        with ThreadPoolExecutor(max_workers=len(ranges)) as pool:
+            futs = [
+                pool.submit(self._migrate_dispatch_shard, lo, hi, i + 1, t0)
+                for i, (lo, hi) in enumerate(ranges)
+            ]
+            for fut in as_completed(futs):
+                up, sc = fut.result()
+                total += up
+                scanned += sc
+        log(f"dispatch done: {total} (scanned={scanned}, elapsed={int(time.time() - t0)}s)")
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1234,6 +1428,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="只读源库，不写目标；VT 用占位 token")
     p.add_argument("--limit", type=int, default=0, help="限制处理行数")
     p.add_argument("--batch", type=int, default=DEFAULT_BATCH, help="批量写入行数")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="cases/dispatch 分片并发数，默认 8",
+    )
     p.add_argument("--bid", default=DEFAULT_BID, help="业务线，默认 ng01")
     p.add_argument("--verify", action="store_true", help="仅做源/目标行数比对")
     p.add_argument(
