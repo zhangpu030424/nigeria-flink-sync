@@ -39,7 +39,7 @@ from pymysql.cursors import DictCursor, SSDictCursor
 TABLE_KEYS = ("companys", "members", "cases", "traces", "dispatch")
 # case_traces 暂不迁移：--table all 默认跳过 traces
 DEFAULT_TABLES = ("companys", "members", "cases", "dispatch")
-DEFAULT_ENV = "/opt/ng-flink-sync/.env"
+DEFAULT_ENV = "/opt/nigeria-flink-sync/.env"
 DEFAULT_BID = "ng01"
 DEFAULT_BATCH = 1000
 DEFAULT_VT_URL = "http://101.47.23.241:9505"
@@ -352,10 +352,10 @@ class Migrator:
 
     def _tgt_cfg(self) -> DbConfig:
         return DbConfig(
-            host=env_first("TARGET_MYSQL_HOST", default="127.0.0.1") or "127.0.0.1",
-            port=int(env_first("TARGET_MYSQL_PORT", default="3306") or "3306"),
-            user=env_first("TARGET_MYSQL_USER", default="root") or "root",
-            password=env_first("TARGET_MYSQL_PASSWORD", default="") or "",
+            host=env_first("COLLECTION_TARGET_MYSQL_HOST", "TARGET_MYSQL_HOST", default="127.0.0.1") or "127.0.0.1",
+            port=int(env_first("COLLECTION_TARGET_MYSQL_PORT", "TARGET_MYSQL_PORT", default="3306") or "3306"),
+            user=env_first("COLLECTION_TARGET_MYSQL_USER", "TARGET_MYSQL_USER", default="root") or "root",
+            password=env_first("COLLECTION_TARGET_MYSQL_PASSWORD", "TARGET_MYSQL_PASSWORD", default="") or "",
             database=env_first("COLLECTION_TARGET_MYSQL_DATABASE", "TARGET_MYSQL_DATABASE", default="cms") or "cms",
         )
 
