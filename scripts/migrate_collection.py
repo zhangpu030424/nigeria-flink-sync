@@ -658,7 +658,13 @@ class Migrator:
           o.app_code,
           o.user_id,
           o.disburse_time,
+          o.order_time,
           o.last_repayment_time,
+          CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) AS received_amount,
+          DATE(COALESCE(o.disburse_time, o.order_time)) AS disburse_date,
+          UNIX_TIMESTAMP(COALESCE(o.disburse_time, o.order_time)) AS disburse_ts,
+          DATE(o.last_repayment_time) AS due_date,
+          UNIX_TIMESTAMP(o.last_repayment_time) AS due_ts,
           p.bvn,
           b.bank_code,
           b.bank_account,
@@ -794,11 +800,13 @@ class Migrator:
                 unpaid_amount = unsigned_amount(to_fen(r.get("amount_due")))
                 paid_amount = unsigned_amount(to_fen(r.get("repaid_amount")))
                 total_amount = unsigned_amount(unpaid_amount + paid_amount)
+                # principal_due 在源库是「本金待还」，不是放款本金
                 principal = unsigned_amount(to_fen(r.get("principal_due")))
                 fee = unsigned_amount(int(round(loan_amount * 0.35)))
                 penalty_amount = unsigned_amount(to_fen(r.get("overdue_fees")))
-                # 目标列 bigint unsigned；principal < fee 时压成 0
-                disbursed_amount = unsigned_amount(principal - fee)
+                # 放款金额：优先 user_order.received；否则申请额 - 管理费
+                received_fen = unsigned_amount(to_fen(bu.get("received_amount")))
+                disbursed_amount = received_fen if received_fen > 0 else unsigned_amount(loan_amount - fee)
                 app_code = bu.get("app_code") or r.get("app_id") or 0
                 application_no = f"ng0{to_int(app_code):01d}-{order_no}"[:36]
                 follow_status = (r.get("collection_follow_status") or "").strip().upper()
@@ -810,6 +818,11 @@ class Migrator:
                 if collection_time <= 0:
                     collection_time = int(time.time())
                 collection_date = to_date_str(collection_raw)
+                # 放款/到期时间直接用 MySQL DATE/UNIX_TIMESTAMP，避免 Python 时区偏移
+                disbursed_time = to_int(bu.get("disburse_ts"))
+                disbursed_date = to_date_or_none(bu.get("disburse_date"))
+                due_time = to_int(bu.get("due_ts"))
+                due_date = to_date_or_none(bu.get("due_date"))
                 row = {
                     "bid": self.bid,
                     "case_no": case_no,
@@ -843,14 +856,14 @@ class Migrator:
                     "tax_amount": 0,
                     "rollover_amount": 0,
                     "disbursed_amount": disbursed_amount,
-                    "disbursed_time": to_ts_seconds(bu.get("disburse_time")),
-                    "disbursed_date": to_date_or_none(bu.get("disburse_time")),
+                    "disbursed_time": disbursed_time,
+                    "disbursed_date": disbursed_date,
                     "paid_amount": paid_amount,
                     "unpaid_amount": unpaid_amount,
                     "overdue_days": to_int(r.get("overdue_days")),
                     "hold_days": hold_days_from(r.get("assignment_date")),
-                    "due_time": to_ts_seconds(bu.get("last_repayment_time")),
-                    "due_date": to_date_or_none(bu.get("last_repayment_time")),
+                    "due_time": due_time,
+                    "due_date": due_date,
                     "closed_method": "settle" if follow_status == "PAID" else "",
                     "closed_time": to_ts_seconds(r.get("updated_at")) if plan_status == 0 else 0,
                     "closed_date": to_date_or_none(r.get("updated_at")) if plan_status == 0 else None,
