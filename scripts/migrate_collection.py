@@ -437,45 +437,76 @@ class VtClient:
         self.cache: Dict[str, str] = {}
         self._lock = threading.Lock()
 
+    def _v2t_url(self) -> str:
+        path = urllib.parse.urlparse(self.base_url).path.rstrip("/") + "/v2t"
+        return f"{urllib.parse.urlparse(self.base_url).scheme}://{urllib.parse.urlparse(self.base_url).netloc}{path}"
+
     def tokenize(self, raw: str) -> str:
         raw = (raw or "").strip()
         if not raw:
             return ""
-        with self._lock:
-            hit = self.cache.get(raw)
-        if hit is not None:
-            return hit
-        if self.dry_run:
-            token = f"dry_{base64.urlsafe_b64encode(raw.encode()).decode()[:20]}"
-            with self._lock:
-                self.cache[raw] = token
-            return token
+        got = self.tokenize_many([raw])
+        return got[0] if got else ""
 
-        # 与 vt-preload / Flink UDF 一致：请求体是 JSON 字符串数组，不是 {"values":[...]}
-        path = urllib.parse.urlparse(self.base_url).path.rstrip("/") + "/v2t"
-        url = f"{urllib.parse.urlparse(self.base_url).scheme}://{urllib.parse.urlparse(self.base_url).netloc}{path}"
-        body = json.dumps([raw], ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-            raise RuntimeError(f"VT /v2t 调用失败: HTTP {e.code}: {detail}") from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"VT /v2t 调用失败: {e}") from e
-        tokens = data.get("tokens") or []
-        if len(tokens) != 1 or not tokens[0]:
-            raise RuntimeError(f"VT /v2t 返回异常: {data}")
-        token = str(tokens[0])
+    def tokenize_many(self, values: Sequence[str]) -> List[str]:
+        """批量 /v2t；已缓存的不重复请求。返回与输入等长。"""
+        cleaned = [(v or "").strip() for v in values]
+        out: List[str] = [""] * len(cleaned)
+        miss_idx: List[int] = []
+        miss_vals: List[str] = []
         with self._lock:
-            self.cache.setdefault(raw, token)
-            return self.cache[raw]
+            for i, raw in enumerate(cleaned):
+                if not raw:
+                    continue
+                hit = self.cache.get(raw)
+                if hit is not None:
+                    out[i] = hit
+                else:
+                    miss_idx.append(i)
+                    miss_vals.append(raw)
+        if not miss_vals:
+            return out
+
+        if self.dry_run:
+            with self._lock:
+                for i, raw in zip(miss_idx, miss_vals):
+                    token = f"dry_{base64.urlsafe_b64encode(raw.encode()).decode()[:20]}"
+                    self.cache[raw] = token
+                    out[i] = token
+            return out
+
+        # VT 一次最多送一批，避免 body 过大
+        url = self._v2t_url()
+        batch_size = 200
+        for start in range(0, len(miss_vals), batch_size):
+            chunk_vals = miss_vals[start : start + batch_size]
+            chunk_idx = miss_idx[start : start + batch_size]
+            body = json.dumps(chunk_vals, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", errors="replace")[:500]
+                raise RuntimeError(f"VT /v2t 调用失败: HTTP {e.code}: {detail}") from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(f"VT /v2t 调用失败: {e}") from e
+            tokens = data.get("tokens") or []
+            if len(tokens) != len(chunk_vals):
+                raise RuntimeError(f"VT /v2t 返回数量不匹配: in={len(chunk_vals)} out={len(tokens)} data={data}")
+            with self._lock:
+                for i, raw, tok in zip(chunk_idx, chunk_vals, tokens):
+                    if not tok:
+                        raise RuntimeError(f"VT /v2t 返回空 token: raw={raw} data={data}")
+                    token = str(tok)
+                    self.cache.setdefault(raw, token)
+                    out[i] = self.cache[raw]
+        return out
 
 
 class Migrator:
@@ -931,27 +962,22 @@ class Migrator:
             f"names={len(self._name_by_user_id)} phones={len(self._name_cache)} "
             f"cust={len(self._cust_cache)}"
         )
-        log("preload emergency contacts for disbursed users ...")
-        emerg_sql = """
-        SELECT
-          e.user_id,
-          e.contact_name,
-          e.contact_number,
-          e.contact_relationship AS relation,
-          e.id
-        FROM user_emergency_contact e
-        INNER JOIN (
-            SELECT DISTINCT user_id
-            FROM user_order
-            WHERE disburse_time IS NOT NULL
-              AND UNIX_TIMESTAMP(disburse_time) > 0
-        ) d ON d.user_id = e.user_id
-        ORDER BY e.user_id ASC, e.id DESC
-        """
+        log(f"preload emergency contacts for {len(user_ids)} users (chunked + batch VT) ...")
         by_user: Dict[Any, List[Dict[str, Any]]] = {}
-        conn = self.backend.connect(stream=True, retries=self.mysql_retries)
-        try:
-            for r in self.stream(conn, emerg_sql):
+        uid_list = list(user_ids)
+        chunk_size = 500
+        t0 = time.time()
+        for i in range(0, len(uid_list), chunk_size):
+            chunk = uid_list[i : i + chunk_size]
+            placeholders = ",".join(["%s"] * len(chunk))
+            emerg_sql = f"""
+            SELECT user_id, contact_name, contact_number, contact_relationship AS relation, id
+            FROM user_emergency_contact
+            WHERE user_id IN ({placeholders})
+            ORDER BY user_id ASC, id DESC
+            """
+            rows = self.fetch_all(self.backend, emerg_sql, chunk)
+            for r in rows:
                 uid = r.get("user_id")
                 if uid is None:
                     continue
@@ -959,13 +985,37 @@ class Migrator:
                 if len(bucket) >= 10:
                     continue
                 bucket.append(r)
-        finally:
-            conn.close()
+            if i == 0 or (i // chunk_size) % 5 == 0:
+                log(
+                    f"emerg sql progress: users={min(i + chunk_size, len(uid_list))}/{len(uid_list)} "
+                    f"rows_kept={sum(len(v) for v in by_user.values())} "
+                    f"elapsed={int(time.time() - t0)}s"
+                )
+
+        # 先收集手机号，批量 VT，再拼 JSON
+        unique_mobiles: List[str] = []
+        seen_m: set = set()
+        for uid, rows in by_user.items():
+            for r in rows:
+                vm = to_vt_mobile(r.get("contact_number"))
+                r["_vt_mobile"] = vm
+                if vm and vm not in seen_m:
+                    seen_m.add(vm)
+                    unique_mobiles.append(vm)
+        log(f"emerg VT batch: unique_mobiles={len(unique_mobiles)}")
+        for j in range(0, len(unique_mobiles), 1000):
+            part = unique_mobiles[j : j + 1000]
+            self.vt.tokenize_many(part)
+            log(
+                f"emerg VT progress: {min(j + 1000, len(unique_mobiles))}/{len(unique_mobiles)} "
+                f"elapsed={int(time.time() - t0)}s"
+            )
+
         for uid, rows in by_user.items():
             out = []
             seen = set()
             for r in rows:
-                vt_mobile = to_vt_mobile(r.get("contact_number"))
+                vt_mobile = r.get("_vt_mobile") or ""
                 if not vt_mobile:
                     continue
                 key = ((r.get("contact_name") or "").strip(), vt_mobile)
@@ -975,7 +1025,7 @@ class Migrator:
                 rel = RELATION_MAP.get(int(r.get("relation") or 0))
                 item = {
                     "name": (r.get("contact_name") or "").strip(),
-                    "mobile": self.vt.tokenize(vt_mobile),
+                    "mobile": self.vt.tokenize(vt_mobile),  # 已在 cache
                 }
                 if rel is not None:
                     item["relation"] = rel
@@ -986,7 +1036,7 @@ class Migrator:
             if uid not in self._emerg_cache:
                 self._emerg_cache[uid] = "[]"
         self._user_aux_ready = True
-        log(f"emerg cache ready: users={len(self._emerg_cache)}")
+        log(f"emerg cache ready: users={len(self._emerg_cache)} elapsed={int(time.time() - t0)}s")
 
     def _backend_user_bundle(self, order_no: str) -> Dict[str, Any]:
         order_no = (order_no or "").strip()
