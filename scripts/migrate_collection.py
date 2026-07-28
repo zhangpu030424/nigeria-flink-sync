@@ -16,6 +16,7 @@
 - level_code：T0->D0，T-N->S-N，TN->SN
 - product_id：与 02_sync_user_product_incr.sql 同一套 P*/L* 映射
 - cases 迁移前预加载已放款 user_order + 对应用户姓名/画像/紧急联系人到内存
+- VT：先查 backend.vt_token_cache(status=1)，未命中再批量 /v2t
 - cases/dispatch：按主键区间多线程分片读 + 分批写（--workers）
 - 复杂表（cases / traces / dispatch）按“能迁多少迁多少”策略构造行，
   如果目标库少字段会自动跳过；如果源库列缺失会明确报错
@@ -431,56 +432,128 @@ class DB:
 
 
 class VtClient:
-    def __init__(self, base_url: str, *, dry_run: bool) -> None:
+    """先查 nigeria_backend.vt_token_cache，未命中再批量 POST /v2t。"""
+
+    VT_MOBILE = 1
+    VT_GAID = 2
+    VT_BANK = 3
+    VT_ID_NUMBER = 4
+    VT_EMERGENCY = 5
+    VT_ID2 = 6
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        dry_run: bool,
+        db: Optional["DB"] = None,
+        mysql_retries: int = DEFAULT_MYSQL_RETRIES,
+        http_batch_size: int = 2000,
+        db_chunk_size: int = 500,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
+        self.db = db
+        self.mysql_retries = mysql_retries
+        self.http_batch_size = max(1, http_batch_size)
+        self.db_chunk_size = max(1, db_chunk_size)
+        # raw_value -> token（明文唯一）
         self.cache: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     def _v2t_url(self) -> str:
         path = urllib.parse.urlparse(self.base_url).path.rstrip("/") + "/v2t"
-        return f"{urllib.parse.urlparse(self.base_url).scheme}://{urllib.parse.urlparse(self.base_url).netloc}{path}"
+        return (
+            f"{urllib.parse.urlparse(self.base_url).scheme}://"
+            f"{urllib.parse.urlparse(self.base_url).netloc}{path}"
+        )
 
-    def tokenize(self, raw: str) -> str:
+    def tokenize(self, raw: str, *, vt_type: int = VT_MOBILE) -> str:
         raw = (raw or "").strip()
         if not raw:
             return ""
-        got = self.tokenize_many([raw])
-        return got[0] if got else ""
+        return self.resolve([(vt_type, raw)]).get(raw, "")
 
-    def tokenize_many(self, values: Sequence[str]) -> List[str]:
-        """批量 /v2t；已缓存的不重复请求。返回与输入等长。"""
+    def tokenize_many(self, values: Sequence[str], *, vt_type: int = VT_MOBILE) -> List[str]:
         cleaned = [(v or "").strip() for v in values]
-        out: List[str] = [""] * len(cleaned)
-        miss_idx: List[int] = []
-        miss_vals: List[str] = []
+        resolved = self.resolve([(vt_type, v) for v in cleaned if v])
+        return [resolved.get(v, "") if v else "" for v in cleaned]
+
+    def resolve(self, pairs: Sequence[Tuple[int, str]]) -> Dict[str, str]:
+        """批量解析：内存 -> vt_token_cache -> /v2t。返回 raw->token。"""
+        # vt_type -> unique raws
+        by_type: Dict[int, List[str]] = {}
+        seen: set = set()
+        for vt_type, raw in pairs:
+            raw = (raw or "").strip()
+            if not raw:
+                continue
+            key = (int(vt_type), raw)
+            if key in seen:
+                continue
+            seen.add(key)
+            by_type.setdefault(int(vt_type), []).append(raw)
+
+        need: List[Tuple[int, str]] = []
+        out: Dict[str, str] = {}
         with self._lock:
-            for i, raw in enumerate(cleaned):
-                if not raw:
-                    continue
-                hit = self.cache.get(raw)
-                if hit is not None:
-                    out[i] = hit
-                else:
-                    miss_idx.append(i)
-                    miss_vals.append(raw)
-        if not miss_vals:
+            for vt_type, raws in by_type.items():
+                for raw in raws:
+                    hit = self.cache.get(raw)
+                    if hit is not None:
+                        out[raw] = hit
+                    else:
+                        need.append((vt_type, raw))
+
+        if not need:
             return out
 
+        # 按类型查 vt_token_cache（手机类 1/5 互通）
+        still: List[Tuple[int, str]] = []
+        if self.db is not None and not self.dry_run:
+            grouped: Dict[str, List[str]] = {}
+            for vt_type, raw in need:
+                if vt_type in (self.VT_MOBILE, self.VT_EMERGENCY):
+                    grouped.setdefault("phone", []).append(raw)
+                else:
+                    grouped.setdefault(str(vt_type), []).append(raw)
+            # 去重
+            for k, vals in list(grouped.items()):
+                uniq = list(dict.fromkeys(vals))
+                grouped[k] = uniq
+
+            found = 0
+            for gkey, raws in grouped.items():
+                for i in range(0, len(raws), self.db_chunk_size):
+                    chunk = raws[i : i + self.db_chunk_size]
+                    rows = self._lookup_token_cache(gkey, chunk)
+                    with self._lock:
+                        for raw, token in rows.items():
+                            self.cache.setdefault(raw, token)
+                            out[raw] = self.cache[raw]
+                    found += len(rows)
+            log(f"VT vt_token_cache hit={found} miss_before_http={sum(1 for _, r in need if r not in out)}")
+
+        for vt_type, raw in need:
+            if raw not in out:
+                still.append((vt_type, raw))
+
+        if not still:
+            return out
+
+        miss_raws = list(dict.fromkeys(raw for _, raw in still))
         if self.dry_run:
             with self._lock:
-                for i, raw in zip(miss_idx, miss_vals):
+                for raw in miss_raws:
                     token = f"dry_{base64.urlsafe_b64encode(raw.encode()).decode()[:20]}"
                     self.cache[raw] = token
-                    out[i] = token
+                    out[raw] = token
             return out
 
-        # VT 一次最多送一批，避免 body 过大
+        log(f"VT /v2t batch miss={len(miss_raws)} batch_size={self.http_batch_size}")
         url = self._v2t_url()
-        batch_size = 200
-        for start in range(0, len(miss_vals), batch_size):
-            chunk_vals = miss_vals[start : start + batch_size]
-            chunk_idx = miss_idx[start : start + batch_size]
+        for start in range(0, len(miss_raws), self.http_batch_size):
+            chunk_vals = miss_raws[start : start + self.http_batch_size]
             body = json.dumps(chunk_vals, ensure_ascii=False).encode("utf-8")
             req = urllib.request.Request(
                 url,
@@ -489,7 +562,7 @@ class VtClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=120) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", errors="replace")[:500]
@@ -498,15 +571,59 @@ class VtClient:
                 raise RuntimeError(f"VT /v2t 调用失败: {e}") from e
             tokens = data.get("tokens") or []
             if len(tokens) != len(chunk_vals):
-                raise RuntimeError(f"VT /v2t 返回数量不匹配: in={len(chunk_vals)} out={len(tokens)} data={data}")
+                raise RuntimeError(
+                    f"VT /v2t 返回数量不匹配: in={len(chunk_vals)} out={len(tokens)}"
+                )
             with self._lock:
-                for i, raw, tok in zip(chunk_idx, chunk_vals, tokens):
+                for raw, tok in zip(chunk_vals, tokens):
                     if not tok:
-                        raise RuntimeError(f"VT /v2t 返回空 token: raw={raw} data={data}")
+                        raise RuntimeError(f"VT /v2t 返回空 token: raw={raw}")
                     token = str(tok)
                     self.cache.setdefault(raw, token)
-                    out[i] = self.cache[raw]
+                    out[raw] = self.cache[raw]
+            log(
+                f"VT /v2t progress: {min(start + self.http_batch_size, len(miss_raws))}/{len(miss_raws)}"
+            )
         return out
+
+    def _lookup_token_cache(self, group_key: str, raws: List[str]) -> Dict[str, str]:
+        if not self.db or not raws:
+            return {}
+        placeholders = ",".join(["%s"] * len(raws))
+        if group_key == "phone":
+            sql = (
+                f"SELECT raw_value, token FROM vt_token_cache "
+                f"WHERE status = 1 AND vt_type IN (1, 5) AND raw_value IN ({placeholders}) "
+                f"AND token IS NOT NULL AND token <> ''"
+            )
+            params: Sequence[Any] = raws
+        else:
+            vt_type = int(group_key)
+            sql = (
+                f"SELECT raw_value, token FROM vt_token_cache "
+                f"WHERE status = 1 AND vt_type = %s AND raw_value IN ({placeholders}) "
+                f"AND token IS NOT NULL AND token <> ''"
+            )
+            params = (vt_type, *raws)
+
+        def _do():
+            conn = self.db.connect(retries=self.mysql_retries)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    rows = cur.fetchall()
+                found: Dict[str, str] = {}
+                for r in rows:
+                    raw = (r.get("raw_value") or "").strip()
+                    tok = (r.get("token") or "").strip()
+                    if raw and tok and raw not in found:
+                        found[raw] = tok
+                return found
+            finally:
+                conn.close()
+
+        return mysql_retry("vt_token_cache lookup", _do, retries=self.mysql_retries)
+
 
 
 class Migrator:
@@ -516,7 +633,13 @@ class Migrator:
         self.src = DB(self._src_cfg(), readonly=True)
         self.tgt = DB(self._tgt_cfg(), readonly=False)
         self.backend = DB(self._backend_cfg(), readonly=True)
-        self.vt = VtClient(args.vt_base_url, dry_run=args.dry_run)
+        self.vt = VtClient(
+            args.vt_base_url,
+            dry_run=args.dry_run,
+            db=self.backend,
+            mysql_retries=int(getattr(args, "mysql_retries", DEFAULT_MYSQL_RETRIES) or DEFAULT_MYSQL_RETRIES),
+            http_batch_size=int(env_first("COLLECTION_VT_HTTP_BATCH", "VT_PRELOAD_HTTP_BATCH", default="2000") or "2000"),
+        )
         self._target_columns: Dict[str, List[str]] = {}
         self._target_pks: Dict[str, List[str]] = {}
         self._source_tables: Optional[set[str]] = None
@@ -992,7 +1115,7 @@ class Migrator:
                     f"elapsed={int(time.time() - t0)}s"
                 )
 
-        # 先收集手机号，批量 VT，再拼 JSON
+        # 先收集手机号：vt_token_cache -> 批量 /v2t，再拼 JSON
         unique_mobiles: List[str] = []
         seen_m: set = set()
         for uid, rows in by_user.items():
@@ -1002,14 +1125,9 @@ class Migrator:
                 if vm and vm not in seen_m:
                     seen_m.add(vm)
                     unique_mobiles.append(vm)
-        log(f"emerg VT batch: unique_mobiles={len(unique_mobiles)}")
-        for j in range(0, len(unique_mobiles), 1000):
-            part = unique_mobiles[j : j + 1000]
-            self.vt.tokenize_many(part)
-            log(
-                f"emerg VT progress: {min(j + 1000, len(unique_mobiles))}/{len(unique_mobiles)} "
-                f"elapsed={int(time.time() - t0)}s"
-            )
+        log(f"emerg VT resolve: unique_mobiles={len(unique_mobiles)}")
+        self.vt.tokenize_many(unique_mobiles, vt_type=VtClient.VT_EMERGENCY)
+        log(f"emerg VT resolve done elapsed={int(time.time() - t0)}s")
 
         for uid, rows in by_user.items():
             out = []
@@ -1025,7 +1143,7 @@ class Migrator:
                 rel = RELATION_MAP.get(int(r.get("relation") or 0))
                 item = {
                     "name": (r.get("contact_name") or "").strip(),
-                    "mobile": self.vt.tokenize(vt_mobile),  # 已在 cache
+                    "mobile": self.vt.tokenize(vt_mobile, vt_type=VtClient.VT_EMERGENCY),
                 }
                 if rel is not None:
                     item["relation"] = rel
@@ -1037,6 +1155,34 @@ class Migrator:
                 self._emerg_cache[uid] = "[]"
         self._user_aux_ready = True
         log(f"emerg cache ready: users={len(self._emerg_cache)} elapsed={int(time.time() - t0)}s")
+        self._prewarm_vt_from_orders_and_plans()
+
+    def _prewarm_vt_from_orders_and_plans(self) -> None:
+        """把订单 BVN/银行卡/手机 + repayment_plan 手机一次性走 cache+/v2t。"""
+        pairs: List[Tuple[int, str]] = []
+        if self._order_cache:
+            for r in self._order_cache.values():
+                bvn = (r.get("bvn") or "").strip()
+                if bvn:
+                    pairs.append((VtClient.VT_ID_NUMBER, bvn))
+                bank = (r.get("bank_account") or "").strip()
+                if bank:
+                    pairs.append((VtClient.VT_BANK, bank))
+                m = to_vt_mobile(r.get("user_mobile10") or "")
+                if m:
+                    pairs.append((VtClient.VT_MOBILE, m))
+        log("preload repayment_plan phones for VT ...")
+        phone_rows = self.fetch_all(
+            self.src,
+            "SELECT DISTINCT phone FROM repayment_plan WHERE phone IS NOT NULL AND TRIM(phone) <> ''",
+        )
+        for pr in phone_rows:
+            m = to_vt_mobile(pr.get("phone"))
+            if m:
+                pairs.append((VtClient.VT_MOBILE, m))
+        log(f"VT prewarm candidates={len(pairs)}")
+        self.vt.resolve(pairs)
+        log(f"VT prewarm done: memory_tokens={len(self.vt.cache)}")
 
     def _backend_user_bundle(self, order_no: str) -> Dict[str, Any]:
         order_no = (order_no or "").strip()
@@ -1159,7 +1305,7 @@ class Migrator:
             rel = RELATION_MAP.get(int(r.get("relation") or 0))
             item = {
                 "name": (r.get("contact_name") or "").strip(),
-                "mobile": self.vt.tokenize(vt_mobile),
+                "mobile": self.vt.tokenize(vt_mobile, vt_type=VtClient.VT_EMERGENCY),
             }
             if rel is not None:
                 item["relation"] = rel
@@ -1394,11 +1540,19 @@ class Migrator:
             "term": 7,
             "cust_group": "[]",
             "name": self._resolve_name(user_id, phone)[:128],
-            "mobile": (self.vt.tokenize(vt_mobile) if vt_mobile else "")[:28],
-            "id_number": (self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "")[:28],
+            "mobile": (self.vt.tokenize(vt_mobile, vt_type=VtClient.VT_MOBILE) if vt_mobile else "")[:28],
+            "id_number": (
+                self.vt.tokenize((bu.get("bvn") or "").strip(), vt_type=VtClient.VT_ID_NUMBER)
+                if bu.get("bvn")
+                else ""
+            )[:28],
             "email": "",
             "bank_code": (bu.get("bank_code") or "").strip()[:128],
-            "bank_account": (self.vt.tokenize((bu.get("bank_account") or "").strip()) if bu.get("bank_account") else "")[:128],
+            "bank_account": (
+                self.vt.tokenize((bu.get("bank_account") or "").strip(), vt_type=VtClient.VT_BANK)
+                if bu.get("bank_account")
+                else ""
+            )[:128],
             "loan_amount": loan_amount,
             "total_amount": total_amount,
             "principal": principal,
