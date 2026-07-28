@@ -786,7 +786,7 @@ class Migrator:
                     "product_ids": None,
                     "app_ids": None,
                     "term": None,
-                    "cust_group": "",
+                    "cust_group": "[]",
                     "risk_level": "",
                     "disabled_time": to_ts_seconds(r.get("updated_at")) if status in (0, 2) else 0,
                     "dispatch": 1 if status == 1 else 0,
