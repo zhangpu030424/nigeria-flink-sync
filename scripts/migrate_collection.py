@@ -645,7 +645,7 @@ class Migrator:
             SELECT MAX(b2.id) FROM user_bank_info b2 WHERE b2.user_id = o.user_id AND b2.deleted = 0
         )
         LEFT JOIN user_order_installment ui ON ui.id = (
-            SELECT MAX(ui2.id) FROM user_order_installment ui2 WHERE ui2.order_no = o.order_no
+            SELECT MAX(ui2.id) FROM user_order_installment ui2 WHERE ui2.user_order_id = o.id
         )
         WHERE o.order_no = %s
         LIMIT 1
