@@ -1,10 +1,12 @@
--- 增量 id_mapping：多源 CDC 触发 + 轻量 pair Lookup + ARRAY/UNNEST 双向展开
+-- 增量 id_mapping：多源 CDC 触发 + 轻量 pair Lookup + VT 解析 + 双向边展开
 -- CDC: user, user_order, user_bank_info, user_personal_info, device_ids
 -- 前置: ./scripts/deploy-source-ddl.sh（含 id_mapping_pair_by_*）
+-- VT 规则（与宽表/application 一致）:
+--   mobile / id_number / bank_account / gaid_idfa → vt_token_cache，miss 调 vt_tokenize
+--   device_uuid → 原始 UUID（不做 VT）
 -- 设计要点：
 --   1) 不再 CDC 宽表 id_mapping_sync_staging
---   2) 每个触发源只 Lookup 一次，再用 ARRAY+UNNEST 展开边（避免 UNION 重复打维表）
---   3) 点查键裸列；VT miss 用 vt_tokenize；目标 UPSERT 幂等
+--   2) 每个触发源只 Lookup 一次；先 Calc 解析 VT，再 ARRAY+UNNEST（禁止把 vt_tokenize 塞进 ARRAY）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -253,67 +255,137 @@ CREATE TABLE IF NOT EXISTS sink_id_mapping (
     'connection.max-retry-timeout' = '${FLINK_JDBC_RETRY_TIMEOUT}'
 );
 
+-- 先 Lookup + VT 解析（ScalarFunction），再 ARRAY 展开；ARRAY 内只有已解析的 STRING
+CREATE TEMPORARY VIEW v_idmap_user_tok AS
+SELECT
+    CAST(p.app_code AS INT) AS app_id,
+    p.event_time AS event_time,
+    CASE
+        WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
+        WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
+        ELSE vt_tokenize(TRIM(p.mobile_norm))
+    END AS mobile_t,
+    CASE
+        WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING)
+        ELSE TRIM(p.device_uuid)
+    END AS device_t,
+    CASE
+        WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
+        ELSE vt_tokenize(TRIM(p.bvn_raw))
+    END AS id_number_t,
+    CASE
+        WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
+        ELSE vt_tokenize(TRIM(p.bank_account_raw))
+    END AS bank_t
+FROM cdc_user AS t
+INNER JOIN dim_idmap_by_user FOR SYSTEM_TIME AS OF t.proc_time AS p
+    ON p.user_id = t.id;
+
+CREATE TEMPORARY VIEW v_idmap_order_tok AS
+SELECT
+    CAST(p.app_code AS INT) AS app_id,
+    p.event_time AS event_time,
+    CASE
+        WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
+        WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
+        ELSE vt_tokenize(TRIM(p.mobile_norm))
+    END AS mobile_t,
+    CASE
+        WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING)
+        ELSE TRIM(p.device_uuid)
+    END AS device_t,
+    CASE
+        WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
+        ELSE vt_tokenize(TRIM(p.bvn_raw))
+    END AS id_number_t,
+    CASE
+        WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
+        ELSE vt_tokenize(TRIM(p.gaid_idfa_raw))
+    END AS gaid_t,
+    CASE
+        WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
+        ELSE vt_tokenize(TRIM(p.bank_account_raw))
+    END AS bank_t
+FROM cdc_user_order AS t
+INNER JOIN dim_idmap_by_order FOR SYSTEM_TIME AS OF t.proc_time AS p
+    ON p.order_id = t.id;
+
+CREATE TEMPORARY VIEW v_idmap_bank_tok AS
+SELECT
+    CAST(p.app_code AS INT) AS app_id,
+    p.event_time AS event_time,
+    CASE
+        WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
+        WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
+        ELSE vt_tokenize(TRIM(p.mobile_norm))
+    END AS mobile_t,
+    CASE
+        WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
+        ELSE vt_tokenize(TRIM(p.bank_account_raw))
+    END AS bank_t
+FROM cdc_user_bank_info AS t
+INNER JOIN dim_idmap_by_bank FOR SYSTEM_TIME AS OF t.proc_time AS p
+    ON p.user_id = t.user_id
+WHERE t.user_id IS NOT NULL;
+
+CREATE TEMPORARY VIEW v_idmap_idnum_tok AS
+SELECT
+    CAST(p.app_code AS INT) AS app_id,
+    p.event_time AS event_time,
+    CASE
+        WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
+        WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
+        ELSE vt_tokenize(TRIM(p.mobile_norm))
+    END AS mobile_t,
+    CASE
+        WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
+        ELSE vt_tokenize(TRIM(p.bvn_raw))
+    END AS id_number_t
+FROM cdc_user_personal_info AS t
+INNER JOIN dim_idmap_by_id_number FOR SYSTEM_TIME AS OF t.proc_time AS p
+    ON p.user_id = t.user_id
+WHERE t.user_id IS NOT NULL;
+
+CREATE TEMPORARY VIEW v_idmap_device_tok AS
+SELECT
+    CAST(p.app_code AS INT) AS app_id,
+    p.event_time AS event_time,
+    CASE
+        WHEN t.device_uuid IS NULL OR TRIM(t.device_uuid) = '' THEN CAST(NULL AS STRING)
+        ELSE TRIM(t.device_uuid)
+    END AS device_t,
+    CASE
+        WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
+        WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
+        ELSE vt_tokenize(TRIM(p.gaid_idfa_raw))
+    END AS gaid_t
+FROM cdc_device_ids AS t
+INNER JOIN dim_idmap_by_device FOR SYSTEM_TIME AS OF t.proc_time AS p
+    ON p.device_uuid = t.device_uuid
+WHERE t.device_uuid IS NOT NULL AND TRIM(t.device_uuid) <> '';
+
 INSERT INTO sink_id_mapping
 SELECT e.id, x.app_id, e.mapping_id, e.type, x.event_time
 FROM (
     SELECT
-        CAST(p.app_code AS INT) AS app_id,
-        p.event_time AS event_time,
+        app_id,
+        event_time,
         ARRAY[
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CAST('device_uuid' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CAST('id_number' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CAST('bank_account' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            )
+            ROW(mobile_t, device_t, CAST('device_uuid' AS STRING)),
+            ROW(device_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(mobile_t, id_number_t, CAST('id_number' AS STRING)),
+            ROW(id_number_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(mobile_t, bank_t, CAST('bank_account' AS STRING)),
+            ROW(bank_t, mobile_t, CAST('mobile' AS STRING))
         ] AS edges
-    FROM cdc_user AS t
-    INNER JOIN dim_idmap_by_user FOR SYSTEM_TIME AS OF t.proc_time AS p
-        ON p.user_id = t.id
+    FROM v_idmap_user_tok
 ) AS x
 CROSS JOIN UNNEST(x.edges) AS e(id, mapping_id, type)
 WHERE e.id IS NOT NULL AND TRIM(e.id) <> ''
@@ -325,95 +397,21 @@ UNION ALL
 SELECT e.id, x.app_id, e.mapping_id, e.type, x.event_time
 FROM (
     SELECT
-        CAST(p.app_code AS INT) AS app_id,
-        p.event_time AS event_time,
+        app_id,
+        event_time,
         ARRAY[
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CAST('gaid_idfa' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CAST('bank_account' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CAST('id_number' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CAST('device_uuid' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CAST('gaid_idfa' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CASE WHEN p.device_uuid IS NULL OR TRIM(p.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(p.device_uuid) END,
-                CAST('device_uuid' AS STRING)
-            )
+            ROW(mobile_t, gaid_t, CAST('gaid_idfa' AS STRING)),
+            ROW(gaid_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(mobile_t, bank_t, CAST('bank_account' AS STRING)),
+            ROW(bank_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(mobile_t, id_number_t, CAST('id_number' AS STRING)),
+            ROW(id_number_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(mobile_t, device_t, CAST('device_uuid' AS STRING)),
+            ROW(device_t, mobile_t, CAST('mobile' AS STRING)),
+            ROW(device_t, gaid_t, CAST('gaid_idfa' AS STRING)),
+            ROW(gaid_t, device_t, CAST('device_uuid' AS STRING))
         ] AS edges
-    FROM cdc_user_order AS t
-    INNER JOIN dim_idmap_by_order FOR SYSTEM_TIME AS OF t.proc_time AS p
-        ON p.order_id = t.id
+    FROM v_idmap_order_tok
 ) AS x
 CROSS JOIN UNNEST(x.edges) AS e(id, mapping_id, type)
 WHERE e.id IS NOT NULL AND TRIM(e.id) <> ''
@@ -425,32 +423,13 @@ UNION ALL
 SELECT e.id, x.app_id, e.mapping_id, e.type, x.event_time
 FROM (
     SELECT
-        CAST(p.app_code AS INT) AS app_id,
-        p.event_time AS event_time,
+        app_id,
+        event_time,
         ARRAY[
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CAST('bank_account' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bank_account_raw IS NULL OR TRIM(p.bank_account_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.bank_account_token IS NOT NULL AND TRIM(p.bank_account_token) <> '' THEN p.bank_account_token
-                     ELSE vt_tokenize(TRIM(p.bank_account_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            )
+            ROW(mobile_t, bank_t, CAST('bank_account' AS STRING)),
+            ROW(bank_t, mobile_t, CAST('mobile' AS STRING))
         ] AS edges
-    FROM cdc_user_bank_info AS t
-    INNER JOIN dim_idmap_by_bank FOR SYSTEM_TIME AS OF t.proc_time AS p
-        ON p.user_id = t.user_id
-    WHERE t.user_id IS NOT NULL
+    FROM v_idmap_bank_tok
 ) AS x
 CROSS JOIN UNNEST(x.edges) AS e(id, mapping_id, type)
 WHERE e.id IS NOT NULL AND TRIM(e.id) <> ''
@@ -462,32 +441,13 @@ UNION ALL
 SELECT e.id, x.app_id, e.mapping_id, e.type, x.event_time
 FROM (
     SELECT
-        CAST(p.app_code AS INT) AS app_id,
-        p.event_time AS event_time,
+        app_id,
+        event_time,
         ARRAY[
-            ROW(
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CAST('id_number' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.bvn_raw IS NULL OR TRIM(p.bvn_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.id_number_token IS NOT NULL AND TRIM(p.id_number_token) <> '' THEN p.id_number_token
-                     ELSE vt_tokenize(TRIM(p.bvn_raw)) END,
-                CASE WHEN p.mobile_token IS NOT NULL AND TRIM(p.mobile_token) <> '' THEN p.mobile_token
-                     WHEN p.mobile_norm IS NULL OR TRIM(p.mobile_norm) = '' THEN CAST(NULL AS STRING)
-                     ELSE vt_tokenize(TRIM(p.mobile_norm)) END,
-                CAST('mobile' AS STRING)
-            )
+            ROW(mobile_t, id_number_t, CAST('id_number' AS STRING)),
+            ROW(id_number_t, mobile_t, CAST('mobile' AS STRING))
         ] AS edges
-    FROM cdc_user_personal_info AS t
-    INNER JOIN dim_idmap_by_id_number FOR SYSTEM_TIME AS OF t.proc_time AS p
-        ON p.user_id = t.user_id
-    WHERE t.user_id IS NOT NULL
+    FROM v_idmap_idnum_tok
 ) AS x
 CROSS JOIN UNNEST(x.edges) AS e(id, mapping_id, type)
 WHERE e.id IS NOT NULL AND TRIM(e.id) <> ''
@@ -499,28 +459,13 @@ UNION ALL
 SELECT e.id, x.app_id, e.mapping_id, e.type, x.event_time
 FROM (
     SELECT
-        CAST(p.app_code AS INT) AS app_id,
-        p.event_time AS event_time,
+        app_id,
+        event_time,
         ARRAY[
-            ROW(
-                CASE WHEN t.device_uuid IS NULL OR TRIM(t.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(t.device_uuid) END,
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CAST('gaid_idfa' AS STRING)
-            ),
-            ROW(
-                CASE WHEN p.gaid_idfa_raw IS NULL OR TRIM(p.gaid_idfa_raw) = '' THEN CAST(NULL AS STRING)
-                     WHEN p.gaid_idfa_token IS NOT NULL AND TRIM(p.gaid_idfa_token) <> '' THEN p.gaid_idfa_token
-                     ELSE vt_tokenize(TRIM(p.gaid_idfa_raw)) END,
-                CASE WHEN t.device_uuid IS NULL OR TRIM(t.device_uuid) = '' THEN CAST(NULL AS STRING) ELSE TRIM(t.device_uuid) END,
-                CAST('device_uuid' AS STRING)
-            )
+            ROW(device_t, gaid_t, CAST('gaid_idfa' AS STRING)),
+            ROW(gaid_t, device_t, CAST('device_uuid' AS STRING))
         ] AS edges
-    FROM cdc_device_ids AS t
-    INNER JOIN dim_idmap_by_device FOR SYSTEM_TIME AS OF t.proc_time AS p
-        ON p.device_uuid = t.device_uuid
-    WHERE t.device_uuid IS NOT NULL AND TRIM(t.device_uuid) <> ''
+    FROM v_idmap_device_tok
 ) AS x
 CROSS JOIN UNNEST(x.edges) AS e(id, mapping_id, type)
 WHERE e.id IS NOT NULL AND TRIM(e.id) <> ''
