@@ -7,10 +7,15 @@
 2. 目标库 UPSERT，可重跑
 3. 运行时探测目标表列，避免因字段轻微差异直接失败
 4. 支持 dry-run / verify / limit / batch
+5. MySQL 断连（2013/2006/2003）自动重试
 
 说明：
 - 需求来自 README_migrate_collection.md 与飞书文档
 - 当前主源库为 nigeria_admin；用户补充画像来自 nigeria_backend
+- cases/dispatch 的 case_no = repayment_plan.repayment_plan_order_no
+- level_code：T0->D0，T-N->S-N，TN->SN
+- product_id：与 02_sync_user_product_incr.sql 同一套 P*/L* 映射
+- cases 迁移前预加载 backend 已放款 user_order（约 5 万）到内存，按 order_no 取
 - 复杂表（cases / traces / dispatch）按“能迁多少迁多少”策略构造行，
   如果目标库少字段会自动跳过；如果源库列缺失会明确报错
 """
@@ -46,6 +51,9 @@ DEFAULT_VT_URL = "http://101.47.23.241:9505"
 DEFAULT_PASSWORD = "ng01123456."
 # htpasswd -bnBC 10 "" ng01123456. 预生成；无 bcrypt/htpasswd 时兜底
 DEFAULT_PASSWORD_HASH = "$2y$10$j6w2VR3rPMu69vTjHxfss.N5AVpj5e4fn0Yx.Ec1.mxLsuDIJeET6"
+DEFAULT_MYSQL_RETRIES = 5
+# 2003 连不上 / 2006 Gone away / 2013 Lost connection / 2014 Commands out of sync
+MYSQL_RETRY_ERRNOS = {2003, 2006, 2013, 2014}
 # 源 user_emergency_contact.contact_relationship:
 #   0 Cousin / 1 Colleague / 2 Friend / 3 Wife/Husband /
 #   4 Sister/Brother / 5 Other / 6 parents
@@ -60,8 +68,91 @@ RELATION_MAP = {
     5: 7,  # Other -> 其他
     6: 1,  # parents -> 父母
 }
+# 与 02_sync_user_product_incr.sql 一致
+PRODUCT_ID_MAP = {
+    "P1": "648",
+    "P2": "6481",
+    "P3": "6482",
+    "P4": "6483",
+    "P5": "6484",
+    "P6": "6485",
+    "L1": "649",
+    "L2": "650",
+    "L3": "651",
+    "L4": "652",
+    "L5": "653",
+    "L6": "654",
+    "L7": "6551",
+    "L8": "6561",
+    "L9": "6571",
+    "L10": "6581",
+    "L11": "6591",
+    "L12": "6601",
+    "L13": "6611",
+    "L14": "6621",
+    "L15": "6631",
+    "L16": "6641",
+    "L17": "6651",
+    "L18": "6661",
+}
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%F %T')}] {msg}", flush=True)
+
+
+def map_level_code(raw: Any) -> str:
+    """催收等级：T0->D0，T-N->S-N，TN->SN；已是 S/D 前缀则原样。"""
+    s = ("" if raw is None else str(raw)).strip()
+    if not s:
+        return ""
+    upper = s.upper()
+    if upper == "T0":
+        return "D0"
+    m = re.fullmatch(r"T-(\d+)", upper)
+    if m:
+        return f"S-{m.group(1)}"
+    m = re.fullmatch(r"T(\d+)", upper)
+    if m:
+        return f"S{m.group(1)}"
+    return s[:32]
+
+
+def map_product_id(raw: Any) -> str:
+    """产品 ID：与 Flink user_product 同步同一套映射；未命中则原样。"""
+    s = ("" if raw is None else str(raw)).strip()
+    if not s:
+        return ""
+    return PRODUCT_ID_MAP.get(s.upper(), s)[:64]
+
+
+def is_retryable_mysql(exc: BaseException) -> bool:
+    if isinstance(exc, pymysql.err.OperationalError):
+        code = exc.args[0] if exc.args else None
+        return code in MYSQL_RETRY_ERRNOS
+    if isinstance(exc, pymysql.err.InterfaceError):
+        # 连接已断时常表现为 InterfaceError(0, '')
+        return True
+    return False
+
+
+def mysql_retry(op_name: str, fn, *, retries: int = DEFAULT_MYSQL_RETRIES):
+    last: Optional[BaseException] = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except (pymysql.MySQLError, OSError) as e:
+            last = e
+            if not is_retryable_mysql(e) and not isinstance(e, OSError):
+                raise
+            if attempt >= retries:
+                break
+            sleep_s = min(2**attempt, 60)
+            code = e.args[0] if getattr(e, "args", None) else type(e).__name__
+            log(f"MySQL {code} on {op_name}, retry {attempt}/{retries} after {sleep_s}s")
+            time.sleep(sleep_s)
+    assert last is not None
+    raise last
 
 
 def load_dotenv(path: str) -> None:
@@ -309,24 +400,30 @@ class DB:
         self.cfg = cfg
         self.readonly = readonly
 
-    def connect(self, *, stream: bool = False):
-        conn = pymysql.connect(
-            host=self.cfg.host,
-            port=self.cfg.port,
-            user=self.cfg.user,
-            password=self.cfg.password,
-            database=self.cfg.database,
-            charset="utf8mb4",
-            autocommit=False,
-            cursorclass=SSDictCursor if stream else DictCursor,
-            read_timeout=3600,
-            write_timeout=3600,
-        )
-        with conn.cursor() as cur:
-            cur.execute("SET NAMES utf8mb4")
-            if self.readonly:
-                cur.execute("SET SESSION TRANSACTION READ ONLY")
-        return conn
+    def connect(self, *, stream: bool = False, retries: int = DEFAULT_MYSQL_RETRIES):
+        label = f"{self.cfg.host}:{self.cfg.port}/{self.cfg.database}"
+
+        def _open():
+            conn = pymysql.connect(
+                host=self.cfg.host,
+                port=self.cfg.port,
+                user=self.cfg.user,
+                password=self.cfg.password,
+                database=self.cfg.database,
+                charset="utf8mb4",
+                autocommit=False,
+                cursorclass=SSDictCursor if stream else DictCursor,
+                read_timeout=3600,
+                write_timeout=3600,
+                connect_timeout=30,
+            )
+            with conn.cursor() as cur:
+                cur.execute("SET NAMES utf8mb4")
+                if self.readonly:
+                    cur.execute("SET SESSION TRANSACTION READ ONLY")
+            return conn
+
+        return mysql_retry(f"connect {label}", _open, retries=retries)
 
 
 class VtClient:
@@ -384,6 +481,9 @@ class Migrator:
         self._source_tables: Optional[set[str]] = None
         self._adapter: Optional[str] = None
         self._member_password = password_hash()
+        self.mysql_retries = int(getattr(args, "mysql_retries", DEFAULT_MYSQL_RETRIES) or DEFAULT_MYSQL_RETRIES)
+        # order_no -> user_order 宽字段（disburse_time 非空约 5 万单）
+        self._order_cache: Optional[Dict[str, Dict[str, Any]]] = None
 
     def _src_cfg(self) -> DbConfig:
         return DbConfig(
@@ -489,13 +589,16 @@ class Migrator:
                     yield row
 
     def fetch_all(self, db: DB, sql: str, params: Sequence[Any] = ()) -> List[Dict[str, Any]]:
-        conn = db.connect()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                return list(cur.fetchall())
-        finally:
-            conn.close()
+        def _do():
+            conn = db.connect(retries=self.mysql_retries)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return list(cur.fetchall())
+            finally:
+                conn.close()
+
+        return mysql_retry("fetch_all", _do, retries=self.mysql_retries)
 
     def fetch_one(self, db: DB, sql: str, params: Sequence[Any] = ()) -> Optional[Dict[str, Any]]:
         rows = self.fetch_all(db, sql, params)
@@ -524,14 +627,25 @@ class Migrator:
             f"ON DUPLICATE KEY UPDATE {update_sql}"
         )
         vals = [tuple(r.get(c) for c in cols) for r in rows]
-        conn = self.tgt.connect()
-        try:
-            with conn.cursor() as cur:
-                cur.executemany(sql, vals)
-            conn.commit()
-            return len(rows), cur.rowcount
-        finally:
-            conn.close()
+
+        def _do():
+            conn = self.tgt.connect(retries=self.mysql_retries)
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(sql, vals)
+                    rowcount = cur.rowcount
+                conn.commit()
+                return len(rows), rowcount
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise
+            finally:
+                conn.close()
+
+        return mysql_retry(f"upsert {table}", _do, retries=self.mysql_retries)
 
     def run(self) -> None:
         if self.args.verify:
@@ -539,8 +653,30 @@ class Migrator:
             return
 
         for key in parse_tables(self.args.table):
-            fn = getattr(self, f"migrate_{key}")
-            fn()
+            self._run_table(key)
+
+    def _run_table(self, key: str) -> None:
+        fn = getattr(self, f"migrate_{key}")
+        last: Optional[BaseException] = None
+        for attempt in range(1, self.mysql_retries + 1):
+            try:
+                fn()
+                return
+            except (pymysql.MySQLError, OSError) as e:
+                last = e
+                if not is_retryable_mysql(e) and not isinstance(e, OSError):
+                    raise
+                if attempt >= self.mysql_retries:
+                    break
+                sleep_s = min(2**attempt, 60)
+                code = e.args[0] if getattr(e, "args", None) else type(e).__name__
+                log(
+                    f"{key}: MySQL {code}，整表重跑 {attempt}/{self.mysql_retries} "
+                    f"(UPSERT 可重入)，{sleep_s}s 后重试"
+                )
+                time.sleep(sleep_s)
+        assert last is not None
+        raise last
 
     def verify_counts(self) -> None:
         mappings = {
@@ -584,7 +720,7 @@ class Migrator:
         if self.args.limit:
             sql += f" LIMIT {int(self.args.limit)}"
         rows_out: List[Dict[str, Any]] = []
-        conn = self.src.connect(stream=True)
+        conn = self.src.connect(stream=True, retries=self.mysql_retries)
         total = 0
         try:
             for row in self.stream(conn, sql):
@@ -645,7 +781,7 @@ class Migrator:
                     "password": self._member_password,
                     "role": "leader" if staff_type == 1 else "collector",
                     "type": "manual",
-                    "level_code": (r.get("level_name") or "").strip() or None,
+                    "level_code": map_level_code(r.get("level_name")) or None,
                     "level_range": None,
                     "product_ids": None,
                     "app_ids": None,
@@ -669,7 +805,71 @@ class Migrator:
             total += n
         log(f"members done: {total}")
 
+    def _ensure_order_cache(self) -> None:
+        """一次性把已放款订单（disburse_time 非空）灌进内存，避免 cases 逐单查 backend。"""
+        if self._order_cache is not None:
+            return
+        log("preload backend user_order (disburse_time IS NOT NULL) ...")
+        sql = """
+        SELECT
+          o.order_no,
+          o.app_code,
+          o.user_id,
+          o.disburse_time,
+          o.order_time,
+          o.last_repayment_time,
+          CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)) AS received_amount,
+          CAST(NULLIF(TRIM(o.repaid_amount), '') AS DECIMAL(20, 2)) AS repaid_amount,
+          CAST(NULLIF(TRIM(o.remaining_repayment), '') AS DECIMAL(20, 2)) AS remaining_repayment,
+          DATE(COALESCE(o.disburse_time, o.order_time)) AS disburse_date,
+          UNIX_TIMESTAMP(COALESCE(o.disburse_time, o.order_time)) AS disburse_ts,
+          DATE(o.last_repayment_time) AS due_date,
+          UNIX_TIMESTAMP(o.last_repayment_time) AS due_ts,
+          p.bvn,
+          b.bank_code,
+          b.bank_account,
+          ui.current_period
+        FROM user_order o
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_personal_info GROUP BY user_id
+        ) px ON px.user_id = o.user_id
+        LEFT JOIN user_personal_info p ON p.id = px.mid
+        LEFT JOIN (
+            SELECT user_id, MAX(id) AS mid FROM user_bank_info WHERE deleted = 0 GROUP BY user_id
+        ) bx ON bx.user_id = o.user_id
+        LEFT JOIN user_bank_info b ON b.id = bx.mid
+        LEFT JOIN (
+            SELECT user_order_id, MAX(id) AS mid FROM user_order_installment GROUP BY user_order_id
+        ) ux ON ux.user_order_id = o.id
+        LEFT JOIN user_order_installment ui ON ui.id = ux.mid
+        WHERE o.disburse_time IS NOT NULL
+          AND UNIX_TIMESTAMP(o.disburse_time) > 0
+        """
+        cache: Dict[str, Dict[str, Any]] = {}
+        conn = self.backend.connect(stream=True, retries=self.mysql_retries)
+        try:
+            for r in self.stream(conn, sql):
+                ono = str(r.get("order_no") or "").strip()
+                if ono:
+                    cache[ono] = r
+        finally:
+            conn.close()
+        self._order_cache = cache
+        log(f"order cache ready: {len(cache)} rows")
+
     def _backend_user_bundle(self, order_no: str) -> Dict[str, Any]:
+        order_no = (order_no or "").strip()
+        if not order_no:
+            return {}
+        self._ensure_order_cache()
+        assert self._order_cache is not None
+        hit = self._order_cache.get(order_no)
+        if hit is not None:
+            return hit
+        # 未放款 / 缓存外：回退单次查询
+        return self._fetch_backend_user_bundle(order_no)
+
+    def _fetch_backend_user_bundle(self, order_no: str) -> Dict[str, Any]:
         sql = """
         SELECT
           o.order_no,
@@ -798,10 +998,12 @@ class Migrator:
 
     def migrate_cases(self) -> None:
         log("migrate cases")
+        self._ensure_order_cache()
         sql = """
         SELECT
           p.id,
           p.order_no,
+          p.repayment_plan_order_no,
           p.app_id,
           p.app_name,
           p.product_id,
@@ -849,7 +1051,7 @@ class Migrator:
         """
         if self.args.limit:
             sql += f" LIMIT {int(self.args.limit)}"
-        conn = self.src.connect(stream=True)
+        conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
         try:
@@ -861,7 +1063,7 @@ class Migrator:
                 user_id = bu.get("user_id")
                 phone = r.get("phone")
                 vt_mobile = to_vt_mobile(phone)
-                case_no = str(10000 + int(r.get("id") or 0))
+                case_no = str(r.get("repayment_plan_order_no") or "").strip() or order_no
                 loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
                 unpaid_amount = unsigned_amount(to_fen(bu.get("remaining_repayment")))
                 paid_amount = unsigned_amount(to_fen(bu.get("repaid_amount")))
@@ -891,7 +1093,7 @@ class Migrator:
                 due_date = to_date_or_none(bu.get("due_date"))
                 row = {
                     "bid": self.bid,
-                    "case_no": case_no,
+                    "case_no": case_no[:64],
                     "application_no": application_no,
                     "loan_no": build_loan_no(order_no, bu.get("current_period"))[:36],
                     "sn": order_no[:36],
@@ -899,8 +1101,8 @@ class Migrator:
                     "company_name": (r.get("company_name") or "").strip(),
                     "member_id": 10000 + int(r.get("staff_id") or 0) if r.get("staff_id") else 0,
                     "member_name": str(r.get("collector_id") or r.get("current_collector_id") or "")[:64],
-                    "level_code": (r.get("level_name") or "").strip()[:32],
-                    "product_id": str(r.get("product_id") or "")[:64],
+                    "level_code": map_level_code(r.get("level_name")),
+                    "product_id": map_product_id(r.get("product_id")),
                     "product_name": str(r.get("product_name") or "")[:128],
                     "app_id": to_int(r.get("app_id")),
                     "app_name": str(r.get("app_name") or "")[:128],
@@ -964,31 +1166,38 @@ class Migrator:
         sql = """
         SELECT
           l.*,
+          p.repayment_plan_order_no,
+          p.order_no AS plan_order_no,
           s1.id AS initial_staff_id,
           s2.id AS current_staff_id
         FROM collection_assign_log l
+        LEFT JOIN repayment_plan p ON p.id = l.repayment_plan_id
         LEFT JOIN collection_staff s1 ON s1.staff_code = l.initial_collector_id
         LEFT JOIN collection_staff s2 ON s2.staff_code = l.current_collector_id
         ORDER BY l.id
         """
         if self.args.limit:
             sql += f" LIMIT {int(self.args.limit)}"
-        conn = self.src.connect(stream=True)
+        conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
         try:
             for r in self.stream(conn, sql):
                 paid = 0
                 total_amount = to_fen(r.get("contract_amount"))
+                case_no = (
+                    str(r.get("repayment_plan_order_no") or "").strip()
+                    or str(r.get("plan_order_no") or r.get("order_no") or "").strip()
+                )
                 batch.append(
                     {
                         "bid": self.bid,
-                        "case_no": str(10000 + int(r.get("repayment_plan_id") or 0))
-                        if r.get("repayment_plan_id")
-                        else str(r.get("order_no") or ""),
+                        "case_no": case_no,
                         "total_amount": total_amount,
                         "paid_amount": paid,
-                        "level_code": (r.get("collection_level_name") or r.get("level_name") or "").strip(),
+                        "level_code": map_level_code(
+                            r.get("collection_level_name") or r.get("level_name")
+                        ),
                         "application_no": "",
                         "executor_id": 0,
                         "executor_name": (r.get("operator_name") or "").strip(),
@@ -1027,6 +1236,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--batch", type=int, default=DEFAULT_BATCH, help="批量写入行数")
     p.add_argument("--bid", default=DEFAULT_BID, help="业务线，默认 ng01")
     p.add_argument("--verify", action="store_true", help="仅做源/目标行数比对")
+    p.add_argument(
+        "--mysql-retries",
+        type=int,
+        default=DEFAULT_MYSQL_RETRIES,
+        help="MySQL 断连(2013/2006/2003)重试次数，默认 5",
+    )
     p.add_argument("--vt-base-url", default=env_first("VT_BASE_URL", default=DEFAULT_VT_URL) or DEFAULT_VT_URL)
     return p
 
