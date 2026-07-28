@@ -231,13 +231,30 @@ def password_hash() -> str:
     override = os.environ.get("COLLECTION_DEFAULT_PASSWORD_HASH", "").strip()
     if override:
         return override
+
+    # 优先纯 Python bcrypt，避免机器上没有 htpasswd
+    try:
+        import bcrypt  # type: ignore
+
+        hashed = bcrypt.hashpw(DEFAULT_PASSWORD.encode("utf-8"), bcrypt.gensalt(rounds=10))
+        return hashed.decode("utf-8")
+    except Exception:
+        pass
+
     cmd = ["htpasswd", "-bnBC", "10", "", DEFAULT_PASSWORD]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "生成默认 bcrypt hash 失败；请安装 htpasswd，或预先设置 COLLECTION_DEFAULT_PASSWORD_HASH"
-        )
-    return proc.stdout.strip().lstrip(":")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return proc.stdout.strip().lstrip(":")
+
+    raise RuntimeError(
+        "生成默认 bcrypt hash 失败；请任选其一："
+        "1) pip3 install bcrypt  "
+        "2) apt-get install -y apache2-utils  "
+        "3) 预先设置 COLLECTION_DEFAULT_PASSWORD_HASH"
+    )
 
 
 @dataclass
