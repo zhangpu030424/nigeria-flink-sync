@@ -40,6 +40,11 @@ SOURCE_LOOKUP_CHECK_VIEWS=(
   loan_installment_ids_by_user_order_lookup
   loan_installment_id_by_order_no_period_lookup
   loan_incr_bundle_lookup
+  id_mapping_pair_by_user
+  id_mapping_pair_by_order
+  id_mapping_pair_by_bank
+  id_mapping_pair_by_id_number
+  id_mapping_pair_by_device
 )
 
 source_lookup_views_all_exist() {

@@ -16,7 +16,7 @@
 #   HEALTH_CP_FAIL_WINDOW=5          # 最近 N 次 checkpoint 里失败数达到阈值则告警
 #   HEALTH_CP_FAIL_THRESHOLD=3
 #   HEALTH_IDLE_MINUTES=30           # sink 读入条数连续 N 分钟无增长则告警（可排除表）
-#   HEALTH_IDLE_EXCLUDE=id_mapping   # 逗号分隔 job 短名，默认排除 id_mapping（宽表无刷新时常空闲）
+#   HEALTH_IDLE_EXCLUDE=             # 逗号分隔 job 短名；id_mapping 已多源 CDC，默认不再排除
 #   HEALTH_EXPECTED_SINKS=sink_user,sink_user_info,sink_user_bankcard,sink_user_product,sink_application,sink_loan,sink_id_mapping
 #   HEALTH_ALERT_COOLDOWN_SEC=1800   # 同类告警冷却，避免刷屏
 #
@@ -62,7 +62,7 @@ mkdir -p "$LOG_DIR" "$STATE_DIR"
 CP_FAIL_WINDOW="${HEALTH_CP_FAIL_WINDOW:-5}"
 CP_FAIL_THRESHOLD="${HEALTH_CP_FAIL_THRESHOLD:-3}"
 IDLE_MINUTES="${HEALTH_IDLE_MINUTES:-30}"
-IDLE_EXCLUDE="${HEALTH_IDLE_EXCLUDE:-id_mapping}"
+IDLE_EXCLUDE="${HEALTH_IDLE_EXCLUDE:-}"
 EXPECTED_SINKS="${HEALTH_EXPECTED_SINKS:-sink_user,sink_user_info,sink_user_bankcard,sink_user_product,sink_application,sink_loan,sink_id_mapping}"
 ALERT_COOLDOWN_SEC="${HEALTH_ALERT_COOLDOWN_SEC:-1800}"
 ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-}"
