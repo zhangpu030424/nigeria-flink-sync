@@ -1,12 +1,8 @@
--- 增量 id_mapping：多源 CDC 触发 + 轻量 pair Lookup + VT 解析 + 双向边展开
+-- 增量 id_mapping：多源 CDC + 3 路 Lookup（user/order/device）+ VT + 双向展开
 -- CDC: user, user_order, user_bank_info, user_personal_info, device_ids
+-- Lookup: id_mapping_pair_by_user（user/bank/personal 共用）/ by_order / by_device
+-- VT: mobile/id_number/bank/gaid → cache + vt_tokenize；device_uuid 原文
 -- 前置: ./scripts/deploy-source-ddl.sh（含 id_mapping_pair_by_*）
--- VT 规则（与宽表/application 一致）:
---   mobile / id_number / bank_account / gaid_idfa → vt_token_cache，miss 调 vt_tokenize
---   device_uuid → 原始 UUID（不做 VT）
--- 设计要点：
---   1) 不再 CDC 宽表 id_mapping_sync_staging
---   2) 每个触发源只 Lookup 一次；先 Calc 解析 VT，再 ARRAY+UNNEST（禁止把 vt_tokenize 塞进 ARRAY）
 CREATE TEMPORARY FUNCTION vt_tokenize AS 'com.nigeria.flink.udf.VtTokenizeFunction';
 
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
@@ -153,7 +149,7 @@ CREATE TABLE IF NOT EXISTS dim_idmap_by_user (
     'table-name' = 'id_mapping_pair_by_user',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
+    'lookup.cache.max-rows' = '500000',
     'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
@@ -177,44 +173,6 @@ CREATE TABLE IF NOT EXISTS dim_idmap_by_order (
     'table-name' = 'id_mapping_pair_by_order',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '200000',
-    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
-);
-
-CREATE TABLE IF NOT EXISTS dim_idmap_by_bank (
-    user_id BIGINT,
-    app_code BIGINT,
-    mobile_norm STRING,
-    mobile_token STRING,
-    bank_account_raw STRING,
-    bank_account_token STRING,
-    event_time BIGINT,
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'id_mapping_pair_by_bank',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '300000',
-    'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
-);
-
-CREATE TABLE IF NOT EXISTS dim_idmap_by_id_number (
-    user_id BIGINT,
-    app_code BIGINT,
-    mobile_norm STRING,
-    mobile_token STRING,
-    bvn_raw STRING,
-    id_number_token STRING,
-    event_time BIGINT,
-    PRIMARY KEY (user_id) NOT ENFORCED
-) WITH (
-    'connector' = 'jdbc',
-    'url' = 'jdbc:mysql://${SOURCE_MYSQL_HOST}:${SOURCE_MYSQL_PORT}/${SOURCE_MYSQL_DATABASE}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Africa/Lagos&tinyInt1isBit=false',
-    'table-name' = 'id_mapping_pair_by_id_number',
-    'username' = '${SOURCE_MYSQL_USER}',
-    'password' = '${SOURCE_MYSQL_PASSWORD}',
     'lookup.cache.max-rows' = '300000',
     'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
@@ -232,7 +190,7 @@ CREATE TABLE IF NOT EXISTS dim_idmap_by_device (
     'table-name' = 'id_mapping_pair_by_device',
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
-    'lookup.cache.max-rows' = '200000',
+    'lookup.cache.max-rows' = '300000',
     'lookup.cache.ttl' = '${LOOKUP_CACHE_TTL}'
 );
 
@@ -330,7 +288,7 @@ SELECT
         ELSE vt_tokenize(TRIM(p.bank_account_raw))
     END AS bank_t
 FROM cdc_user_bank_info AS t
-INNER JOIN dim_idmap_by_bank FOR SYSTEM_TIME AS OF t.proc_time AS p
+INNER JOIN dim_idmap_by_user FOR SYSTEM_TIME AS OF t.proc_time AS p
     ON p.user_id = t.user_id
 WHERE t.user_id IS NOT NULL;
 
@@ -349,7 +307,7 @@ SELECT
         ELSE vt_tokenize(TRIM(p.bvn_raw))
     END AS id_number_t
 FROM cdc_user_personal_info AS t
-INNER JOIN dim_idmap_by_id_number FOR SYSTEM_TIME AS OF t.proc_time AS p
+INNER JOIN dim_idmap_by_user FOR SYSTEM_TIME AS OF t.proc_time AS p
     ON p.user_id = t.user_id
 WHERE t.user_id IS NOT NULL;
 

@@ -765,217 +765,190 @@ FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
 WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
 
--- ========== id_mapping 增量：按触发源拆开的轻量 pair 点查（Flink 侧双向展开）==========
--- 禁止在点查键上 CAST；每次只取本源相关 token，避免「用户全历史边」大 JSON
+-- ========== id_mapping 增量 Lookup（点查优化）==========
+-- 原则:
+--   1) 点查键裸列：user_id=u.id / order_id=o.id / device_uuid=d.device_uuid（禁止 CAST）
+--   2) mobile_norm 只算一次再 JOIN vt_token_cache（避免重复 CASE）
+--   3) user/bank/personal 共用 id_mapping_pair_by_user（Flink 少开 Lookup 连接）
+--   4) VT：mobile/id_number/bank/gaid 走 cache，miss 由 Flink vt_tokenize；device_uuid 原文
 
-CREATE OR REPLACE ALGORITHM=MERGE VIEW id_mapping_pair_by_user AS
-SELECT u.id AS user_id,
-       CAST(u.app_code AS SIGNED) AS app_code,
-       CAST((CASE
-                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                 ELSE CONCAT('+234', TRIM(u.mobile))
-           END) AS CHAR) AS mobile_norm,
+CREATE OR REPLACE VIEW id_mapping_pair_by_user AS
+SELECT x.user_id,
+       x.app_code,
+       x.mobile_norm,
        CAST(vt_m.token AS CHAR) AS mobile_token,
-       CAST(TRIM(u.device_id) AS CHAR) AS device_uuid,
-       CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
+       x.device_uuid,
+       x.bvn_raw,
        CAST(vt_id.token AS CHAR) AS id_number_token,
-       CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
+       x.bank_account_raw,
        CAST(vt_ba.token AS CHAR) AS bank_account_token,
-       CAST(UNIX_TIMESTAMP(COALESCE(u.update_time, u.create_time)) * 1000 AS SIGNED) AS event_time
-FROM `user` u
-         LEFT JOIN user_personal_info p
-                   ON p.id = (
-                       SELECT MAX(p2.id)
-                       FROM user_personal_info p2
-                       WHERE p2.user_id = u.id
-                         AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
-                   )
-         LEFT JOIN user_bank_info ub
-                   ON ub.id = (
-                       SELECT MAX(b2.id)
-                       FROM user_bank_info b2
-                       WHERE b2.user_id = u.id
-                         AND b2.deleted = 0 AND b2.is_default = 1
-                         AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
-                   )
+       x.event_time
+FROM (
+         SELECT u.id AS user_id,
+                CAST(u.app_code AS SIGNED) AS app_code,
+                CAST((CASE
+                          WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                          WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                          WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                          WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                          ELSE CONCAT('+234', TRIM(u.mobile))
+                    END) AS CHAR) AS mobile_norm,
+                CAST(TRIM(u.device_id) AS CHAR) AS device_uuid,
+                CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
+                CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
+                CAST(UNIX_TIMESTAMP(COALESCE(u.update_time, u.create_time)) * 1000 AS SIGNED) AS event_time
+         FROM `user` u
+                  LEFT JOIN user_personal_info p
+                            ON p.id = (
+                                SELECT MAX(p2.id)
+                                FROM user_personal_info p2
+                                WHERE p2.user_id = u.id
+                                  AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
+                            )
+                  LEFT JOIN user_bank_info ub
+                            ON ub.id = (
+                                SELECT MAX(b2.id)
+                                FROM user_bank_info b2
+                                WHERE b2.user_id = u.id
+                                  AND b2.deleted = 0 AND b2.is_default = 1
+                                  AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
+                            )
+     ) x
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 1 AND vt_m.status = 1
-                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
-                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                           ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = x.mobile_norm COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_id
                    ON vt_id.vt_type = 4 AND vt_id.status = 1
-                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+                       AND x.bvn_raw IS NOT NULL AND TRIM(x.bvn_raw) <> ''
+                       AND vt_id.raw_value COLLATE utf8mb4_bin = x.bvn_raw COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 3 AND vt_ba.status = 1
-                       AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin;
+                       AND x.bank_account_raw IS NOT NULL AND TRIM(x.bank_account_raw) <> ''
+                       AND vt_ba.raw_value COLLATE utf8mb4_bin = x.bank_account_raw COLLATE utf8mb4_bin;
 
--- 仅订单侧 id 关系所需 token（比 application_incr_bundle 轻）
+-- 订单侧：裸 o.id；mobile 复用 user 规范化；gaid 优先 user 字段，缺再补 device_ids
 CREATE OR REPLACE VIEW id_mapping_pair_by_order AS
-SELECT o.id AS order_id,
-       CAST(o.app_code AS SIGNED) AS app_code,
-       CAST((CASE
-                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                 ELSE CONCAT('+234', TRIM(u.mobile))
-           END) AS CHAR) AS mobile_norm,
+SELECT x.order_id,
+       x.app_code,
+       x.mobile_norm,
        CAST(vt_m.token AS CHAR) AS mobile_token,
-       CAST(COALESCE(u.device_id, '') AS CHAR) AS device_uuid,
-       CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
+       x.device_uuid,
+       x.bvn_raw,
        CAST(vt_id.token AS CHAR) AS id_number_token,
-       CAST(TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''), NULLIF(TRIM(u.idfa), ''), NULLIF(TRIM(di.aaid), ''))) AS CHAR) AS gaid_idfa_raw,
+       x.gaid_idfa_raw,
        CAST(vt_g.token AS CHAR) AS gaid_idfa_token,
-       CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
+       x.bank_account_raw,
        CAST(vt_ba.token AS CHAR) AS bank_account_token,
-       CAST(UNIX_TIMESTAMP(o.order_time) * 1000 AS SIGNED) AS event_time
-FROM user_order o
-         INNER JOIN `user` u ON u.id = o.user_id
-         LEFT JOIN user_personal_info p
-                   ON p.id = (
-                       SELECT MAX(p2.id)
-                       FROM user_personal_info p2
-                       WHERE p2.user_id = o.user_id
-                         AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
-                   )
-         LEFT JOIN user_bank_info ub
-                   ON ub.id = (
-                       SELECT MAX(b2.id)
-                       FROM user_bank_info b2
-                       WHERE b2.user_id = o.user_id
-                         AND b2.deleted = 0 AND b2.is_default = 1
-                         AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
-                   )
-         LEFT JOIN device_ids di
-                   ON di.id = (
-                       SELECT MAX(d2.id)
-                       FROM device_ids d2
-                       WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
-                         AND d2.device_uuid = u.device_id
-                   )
+       x.event_time
+FROM (
+         SELECT o.id AS order_id,
+                CAST(o.app_code AS SIGNED) AS app_code,
+                CAST((CASE
+                          WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
+                          WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
+                          WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
+                          WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
+                          ELSE CONCAT('+234', TRIM(u.mobile))
+                    END) AS CHAR) AS mobile_norm,
+                CAST(COALESCE(NULLIF(TRIM(u.device_id), ''), '') AS CHAR) AS device_uuid,
+                CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
+                CAST(TRIM(COALESCE(
+                        NULLIF(TRIM(u.gps_adid), ''),
+                        NULLIF(TRIM(u.idfa), ''),
+                        NULLIF(TRIM(di.aaid), ''),
+                        NULLIF(TRIM(di.idfa), '')
+                    )) AS CHAR) AS gaid_idfa_raw,
+                CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
+                CAST(UNIX_TIMESTAMP(o.order_time) * 1000 AS SIGNED) AS event_time
+         FROM user_order o
+                  INNER JOIN `user` u ON u.id = o.user_id
+                  LEFT JOIN user_personal_info p
+                            ON p.id = (
+                                SELECT MAX(p2.id)
+                                FROM user_personal_info p2
+                                WHERE p2.user_id = o.user_id
+                                  AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
+                            )
+                  LEFT JOIN user_bank_info ub
+                            ON ub.id = (
+                                SELECT MAX(b2.id)
+                                FROM user_bank_info b2
+                                WHERE b2.user_id = o.user_id
+                                  AND b2.deleted = 0 AND b2.is_default = 1
+                                  AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
+                            )
+                  LEFT JOIN device_ids di
+                            ON di.id = (
+                                SELECT MAX(d2.id)
+                                FROM device_ids d2
+                                WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
+                                  AND d2.device_uuid = u.device_id
+                            )
+         WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
+     ) x
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 1 AND vt_m.status = 1
-                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
-                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                           ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin
+                       AND vt_m.raw_value COLLATE utf8mb4_bin = x.mobile_norm COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_id
                    ON vt_id.vt_type = 4 AND vt_id.status = 1
-                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin
+                       AND x.bvn_raw IS NOT NULL AND TRIM(x.bvn_raw) <> ''
+                       AND vt_id.raw_value COLLATE utf8mb4_bin = x.bvn_raw COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_g
                    ON vt_g.vt_type = 2 AND vt_g.status = 1
-                       AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(NULLIF(TRIM(u.gps_adid), ''),
-                                                                              NULLIF(TRIM(u.idfa), ''),
-                                                                              NULLIF(TRIM(di.aaid), ''))) COLLATE utf8mb4_bin
+                       AND x.gaid_idfa_raw IS NOT NULL AND TRIM(x.gaid_idfa_raw) <> ''
+                       AND vt_g.raw_value COLLATE utf8mb4_bin = x.gaid_idfa_raw COLLATE utf8mb4_bin
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 3 AND vt_ba.status = 1
-                       AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
-WHERE o.id IS NOT NULL
-  AND o.app_code IN (567, 568, 569, 571, 572, 573);
+                       AND x.bank_account_raw IS NOT NULL AND TRIM(x.bank_account_raw) <> ''
+                       AND vt_ba.raw_value COLLATE utf8mb4_bin = x.bank_account_raw COLLATE utf8mb4_bin;
 
-CREATE OR REPLACE ALGORITHM=MERGE VIEW id_mapping_pair_by_bank AS
-SELECT u.id AS user_id,
-       CAST(u.app_code AS SIGNED) AS app_code,
-       CAST((CASE
-                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                 ELSE CONCAT('+234', TRIM(u.mobile))
-           END) AS CHAR) AS mobile_norm,
-       CAST(vt_m.token AS CHAR) AS mobile_token,
-       CAST(TRIM(ub.bank_account) AS CHAR) AS bank_account_raw,
-       CAST(vt_ba.token AS CHAR) AS bank_account_token,
-       CAST(UNIX_TIMESTAMP(COALESCE(u.update_time, u.create_time)) * 1000 AS SIGNED) AS event_time
-FROM `user` u
-         LEFT JOIN user_bank_info ub
-                   ON ub.id = (
-                       SELECT MAX(b2.id)
-                       FROM user_bank_info b2
-                       WHERE b2.user_id = u.id
-                         AND b2.deleted = 0 AND b2.is_default = 1
-                         AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
-                   )
-         LEFT JOIN vt_token_cache vt_m
-                   ON vt_m.vt_type = 1 AND vt_m.status = 1
-                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
-                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                           ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin
-         LEFT JOIN vt_token_cache vt_ba
-                   ON vt_ba.vt_type = 3 AND vt_ba.status = 1
-                       AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin;
+-- 兼容旧名：bank / id_number 触发也走 by_user（部署清单仍校验存在）
+CREATE OR REPLACE VIEW id_mapping_pair_by_bank AS
+SELECT user_id,
+       app_code,
+       mobile_norm,
+       mobile_token,
+       bank_account_raw,
+       bank_account_token,
+       event_time
+FROM id_mapping_pair_by_user;
 
-CREATE OR REPLACE ALGORITHM=MERGE VIEW id_mapping_pair_by_id_number AS
-SELECT u.id AS user_id,
-       CAST(u.app_code AS SIGNED) AS app_code,
-       CAST((CASE
-                 WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                 WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                 WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                 WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                 ELSE CONCAT('+234', TRIM(u.mobile))
-           END) AS CHAR) AS mobile_norm,
-       CAST(vt_m.token AS CHAR) AS mobile_token,
-       CAST(TRIM(p.bvn) AS CHAR) AS bvn_raw,
-       CAST(vt_id.token AS CHAR) AS id_number_token,
-       CAST(UNIX_TIMESTAMP(COALESCE(u.update_time, u.create_time)) * 1000 AS SIGNED) AS event_time
-FROM `user` u
-         LEFT JOIN user_personal_info p
-                   ON p.id = (
-                       SELECT MAX(p2.id)
-                       FROM user_personal_info p2
-                       WHERE p2.user_id = u.id
-                         AND p2.bvn IS NOT NULL AND TRIM(p2.bvn) <> ''
-                   )
-         LEFT JOIN vt_token_cache vt_m
-                   ON vt_m.vt_type = 1 AND vt_m.status = 1
-                       AND vt_m.raw_value COLLATE utf8mb4_bin = (CASE
-                           WHEN u.mobile IS NULL OR TRIM(u.mobile) = '' THEN NULL
-                           WHEN TRIM(u.mobile) LIKE '+%' THEN TRIM(u.mobile)
-                           WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
-                           WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
-                           ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin
-         LEFT JOIN vt_token_cache vt_id
-                   ON vt_id.vt_type = 4 AND vt_id.status = 1
-                       AND vt_id.raw_value COLLATE utf8mb4_bin = TRIM(p.bvn) COLLATE utf8mb4_bin;
+CREATE OR REPLACE VIEW id_mapping_pair_by_id_number AS
+SELECT user_id,
+       app_code,
+       mobile_norm,
+       mobile_token,
+       bvn_raw,
+       id_number_token,
+       event_time
+FROM id_mapping_pair_by_user;
 
+-- device：先按 device_uuid 取最新 device_ids 行，再挂一个 user（裸 device_uuid 点查）
 CREATE OR REPLACE VIEW id_mapping_pair_by_device AS
-SELECT d.device_uuid AS device_uuid,
-       CAST(u.app_code AS SIGNED) AS app_code,
-       CAST(TRIM(COALESCE(NULLIF(TRIM(d.aaid), ''), NULLIF(TRIM(d.idfa), ''))) AS CHAR) AS gaid_idfa_raw,
+SELECT x.device_uuid,
+       x.app_code,
+       x.gaid_idfa_raw,
        CAST(vt_g.token AS CHAR) AS gaid_idfa_token,
-       CAST(UNIX_TIMESTAMP(COALESCE(d.update_time, d.create_time)) * 1000 AS SIGNED) AS event_time
-FROM device_ids d
-         INNER JOIN `user` u ON u.id = (
-             SELECT MAX(u2.id)
-             FROM `user` u2
-             WHERE u2.device_id = d.device_uuid
-         )
+       x.event_time
+FROM (
+         SELECT d.device_uuid AS device_uuid,
+                CAST(u.app_code AS SIGNED) AS app_code,
+                CAST(TRIM(COALESCE(NULLIF(TRIM(d.aaid), ''), NULLIF(TRIM(d.idfa), ''))) AS CHAR) AS gaid_idfa_raw,
+                CAST(UNIX_TIMESTAMP(COALESCE(d.update_time, d.create_time)) * 1000 AS SIGNED) AS event_time
+         FROM device_ids d
+                  INNER JOIN `user` u ON u.id = (
+                      SELECT MAX(u2.id)
+                      FROM `user` u2
+                      WHERE u2.device_id = d.device_uuid
+                  )
+         WHERE d.device_uuid IS NOT NULL AND TRIM(d.device_uuid) <> ''
+           AND d.id = (
+               SELECT MAX(d2.id)
+               FROM device_ids d2
+               WHERE d2.device_uuid = d.device_uuid
+           )
+     ) x
          LEFT JOIN vt_token_cache vt_g
                    ON vt_g.vt_type = 2 AND vt_g.status = 1
-                       AND vt_g.raw_value COLLATE utf8mb4_bin = TRIM(COALESCE(
-                           NULLIF(TRIM(d.aaid), ''),
-                           NULLIF(TRIM(d.idfa), '')
-                       )) COLLATE utf8mb4_bin
-WHERE d.device_uuid IS NOT NULL AND TRIM(d.device_uuid) <> ''
-  AND d.id = (
-      SELECT MAX(d2.id)
-      FROM device_ids d2
-      WHERE d2.device_uuid = d.device_uuid
-  );
+                       AND x.gaid_idfa_raw IS NOT NULL AND TRIM(x.gaid_idfa_raw) <> ''
+                       AND vt_g.raw_value COLLATE utf8mb4_bin = x.gaid_idfa_raw COLLATE utf8mb4_bin;
