@@ -133,6 +133,27 @@ def to_date_str(value: Any) -> str:
     return s[:10]
 
 
+def to_date_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        return value.date().isoformat()
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s:
+        return None
+    return s[:10]
+
+
+def unsigned_amount(*values: int) -> int:
+    """目标金额列为 bigint unsigned，禁止负数。"""
+    total = 0
+    for v in values:
+        total += int(v or 0)
+    return total if total > 0 else 0
+
+
 def digits_only(value: Any) -> str:
     return re.sub(r"\D+", "", "" if value is None else str(value))
 
@@ -722,6 +743,7 @@ class Migrator:
           p.overdue_days,
           p.status AS plan_status,
           p.collection_follow_status,
+          p.created_at AS plan_created_at,
           p.updated_at,
           a.collector_id,
           a.assignment_date,
@@ -768,44 +790,50 @@ class Migrator:
                 phone = r.get("phone")
                 vt_mobile = to_vt_mobile(phone)
                 case_no = str(10000 + int(r.get("id") or 0))
-                loan_amount = to_fen(r.get("contract_amount"))
-                unpaid_amount = to_fen(r.get("amount_due"))
-                paid_amount = to_fen(r.get("repaid_amount"))
-                total_amount = unpaid_amount + paid_amount
-                principal = to_fen(r.get("principal_due"))
-                fee = int(round(loan_amount * 0.35))
-                penalty_amount = to_fen(r.get("overdue_fees"))
-                disbursed_amount = principal - fee
+                loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
+                unpaid_amount = unsigned_amount(to_fen(r.get("amount_due")))
+                paid_amount = unsigned_amount(to_fen(r.get("repaid_amount")))
+                total_amount = unsigned_amount(unpaid_amount + paid_amount)
+                principal = unsigned_amount(to_fen(r.get("principal_due")))
+                fee = unsigned_amount(int(round(loan_amount * 0.35)))
+                penalty_amount = unsigned_amount(to_fen(r.get("overdue_fees")))
+                # 目标列 bigint unsigned；principal < fee 时压成 0
+                disbursed_amount = unsigned_amount(principal - fee)
                 app_code = bu.get("app_code") or r.get("app_id") or 0
-                application_no = f"ng0{to_int(app_code):01d}-{order_no}"
+                application_no = f"ng0{to_int(app_code):01d}-{order_no}"[:36]
                 follow_status = (r.get("collection_follow_status") or "").strip().upper()
                 plan_status = to_int(r.get("plan_status"), default=-1)
                 closed = plan_status == 0 or follow_status == "PAID"
+                # collection_date/time 在目标表 NOT NULL，无分单时回退计划创建时间
+                collection_raw = r.get("assignment_date") or r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at")
+                collection_time = to_ts_seconds(r.get("assignment_created_at") or r.get("plan_created_at") or r.get("updated_at"))
+                if collection_time <= 0:
+                    collection_time = int(time.time())
+                collection_date = to_date_str(collection_raw)
                 row = {
                     "bid": self.bid,
                     "case_no": case_no,
                     "application_no": application_no,
-                    "loan_no": build_loan_no(order_no, bu.get("current_period")),
-                    "sn": order_no,
+                    "loan_no": build_loan_no(order_no, bu.get("current_period"))[:36],
+                    "sn": order_no[:36],
                     "company_id": int(r.get("company_id") or 0) + 10000 if r.get("company_id") else 0,
                     "company_name": (r.get("company_name") or "").strip(),
                     "member_id": 10000 + int(r.get("staff_id") or 0) if r.get("staff_id") else 0,
-                    "member_name": str(r.get("collector_id") or r.get("current_collector_id") or ""),
-                    "level_code": (r.get("level_name") or "").strip(),
-                    "product_id": str(r.get("product_id") or ""),
-                    "product_name": str(r.get("product_name") or ""),
+                    "member_name": str(r.get("collector_id") or r.get("current_collector_id") or "")[:64],
+                    "level_code": (r.get("level_name") or "").strip()[:32],
+                    "product_id": str(r.get("product_id") or "")[:64],
+                    "product_name": str(r.get("product_name") or "")[:128],
                     "app_id": to_int(r.get("app_id")),
-                    "app_name": str(r.get("app_name") or ""),
-                    "status": "closed" if closed else "collecting",
+                    "app_name": str(r.get("app_name") or "")[:128],
+                    "status": "CLOSED" if closed else "COLLECTING",
                     "term": 7,
                     "cust_group": "",
-                    "risk_level": "",
-                    "name": self._backend_name_by_phone(phone),
-                    "mobile": self.vt.tokenize(vt_mobile) if vt_mobile else "",
-                    "id_number": self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "",
+                    "name": self._backend_name_by_phone(phone)[:128],
+                    "mobile": (self.vt.tokenize(vt_mobile) if vt_mobile else "")[:28],
+                    "id_number": (self.vt.tokenize((bu.get("bvn") or "").strip()) if bu.get("bvn") else "")[:28],
                     "email": "",
-                    "bank_code": (bu.get("bank_code") or "").strip(),
-                    "bank_account": self.vt.tokenize((bu.get("bank_account") or "").strip()) if bu.get("bank_account") else "",
+                    "bank_code": (bu.get("bank_code") or "").strip()[:128],
+                    "bank_account": (self.vt.tokenize((bu.get("bank_account") or "").strip()) if bu.get("bank_account") else "")[:128],
                     "loan_amount": loan_amount,
                     "total_amount": total_amount,
                     "principal": principal,
@@ -816,18 +844,18 @@ class Migrator:
                     "rollover_amount": 0,
                     "disbursed_amount": disbursed_amount,
                     "disbursed_time": to_ts_seconds(bu.get("disburse_time")),
-                    "disbursed_date": to_date_str(bu.get("disburse_time")),
+                    "disbursed_date": to_date_or_none(bu.get("disburse_time")),
                     "paid_amount": paid_amount,
                     "unpaid_amount": unpaid_amount,
                     "overdue_days": to_int(r.get("overdue_days")),
                     "hold_days": hold_days_from(r.get("assignment_date")),
                     "due_time": to_ts_seconds(bu.get("last_repayment_time")),
-                    "due_date": to_date_str(bu.get("last_repayment_time")),
+                    "due_date": to_date_or_none(bu.get("last_repayment_time")),
                     "closed_method": "settle" if follow_status == "PAID" else "",
                     "closed_time": to_ts_seconds(r.get("updated_at")) if plan_status == 0 else 0,
-                    "closed_date": to_date_str(r.get("updated_at")) if plan_status == 0 else "1970-01-01",
-                    "collection_time": to_ts_seconds(r.get("assignment_created_at")),
-                    "collection_date": to_date_str(r.get("assignment_date")),
+                    "closed_date": to_date_or_none(r.get("updated_at")) if plan_status == 0 else None,
+                    "collection_time": collection_time,
+                    "collection_date": collection_date,
                     "promise_time": 0,
                     "last_trace_id": 0,
                     "contacts": "[]",
