@@ -67,8 +67,8 @@ sync_jobs_print_plan() {
 # 按 Job 解析并行度
 # 增量默认（约 30 slot 上跑齐 7 Job）：
 #   user / user_product / user_bankcard / id_mapping → FLINK_PARALLELISM_INCR_LIGHT(2)
-#   user_info → 建议 FLINK_PARALLELISM_INCR_USER_INFO=4
-#   application / loan → FLINK_PARALLELISM_INCR_HEAVY(8)
+#   user_info → FLINK_PARALLELISM_INCR_USER_INFO 或 4
+#   application → FLINK_PARALLELISM_INCR_HEAVY(8)；loan 默认 4（bundle Lookup 后）
 # 可用 FLINK_PARALLELISM_INCR_<JOB>（大写，如 FLINK_PARALLELISM_INCR_APPLICATION=8）覆盖
 # 用法: sync_job_parallelism user_info incr
 sync_job_parallelism() {
@@ -111,13 +111,19 @@ sync_job_parallelism() {
       echo "${FLINK_PARALLELISM_USER_INFO}"
       return 0
     fi
+    echo "${FLINK_PARALLELISM_INCR_USER_INFO:-4}"
+    return 0
   fi
 
   case "$job_key" in
-    application|loan)
+    application)
       echo "${FLINK_PARALLELISM_INCR_HEAVY:-8}"
       ;;
-    user|user_product|user_bankcard|user_info|id_mapping)
+    loan)
+      # 未设 FLINK_PARALLELISM_INCR_LOAN 时默认 4（勿回退 HEAVY=8）
+      echo 4
+      ;;
+    user|user_product|user_bankcard|id_mapping)
       echo "${FLINK_PARALLELISM_INCR_LIGHT:-2}"
       ;;
     *)
