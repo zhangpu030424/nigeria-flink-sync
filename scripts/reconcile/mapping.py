@@ -206,7 +206,7 @@ def expected_user_product(row: dict, offset: int) -> dict:
     credit = _as_int(row.get("credit_amount_minor"), 0)
     unpaid = _as_int(row.get("unpaid_amount_minor"), 0)
     pid = str(row.get("product_id") or "").strip()
-    schemes = '[{"schemeId":"PROD-001-D7","amountRange":[%d]}]' % credit
+    schemes = '[{"schemeId":"%s","amountRange":[%d]}]' % (PRODUCT_SCHEME_ID, credit)
     return {
         "group_user_id": _as_int(row.get("user_id")) + offset,
         "product_id": pid,

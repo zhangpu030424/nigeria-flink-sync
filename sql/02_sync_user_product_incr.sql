@@ -102,7 +102,7 @@ SELECT
         ELSE TRIM(t.product_id)
     END,
     CONCAT(
-        '[{"schemeId":"PROD-001-D7","amountRange":[',
+        '[{"schemeId":"PROD-002-D7","amountRange":[',
         CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(p.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS STRING),
         ']}]'
     ),

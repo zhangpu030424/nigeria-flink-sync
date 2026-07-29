@@ -49,7 +49,7 @@ SELECT
     user_id + 100000000,
     product_id,
     CONCAT(
-        '[{"schemeId":"PROD-001-D7","amountRange":[',
+        '[{"schemeId":"PROD-002-D7","amountRange":[',
         CAST(credit_amount_minor AS STRING),
         ']}]'
     ),
