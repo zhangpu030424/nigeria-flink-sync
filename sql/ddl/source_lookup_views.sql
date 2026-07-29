@@ -528,14 +528,18 @@ FROM user_bank_info b
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin;
 
 
+-- 额度取源表 user_product.amount_max（同 user+product 取最新一条）
 CREATE OR REPLACE VIEW user_product_latest_lookup AS
 SELECT CAST(user_id AS SIGNED) AS user_id,
        CAST(product_id AS CHAR) AS product_id,
        CAST(amount_max AS CHAR) AS amount_max
 FROM (
          SELECT user_id, product_id, amount_max,
-                ROW_NUMBER() OVER (PARTITION BY user_id, product_id ORDER BY order_time DESC) AS rn
-         FROM user_order
+                ROW_NUMBER() OVER (
+                    PARTITION BY user_id, product_id
+                    ORDER BY product_add_time DESC, id DESC
+                ) AS rn
+         FROM user_product
          WHERE user_id IS NOT NULL AND product_id IS NOT NULL AND TRIM(product_id) <> ''
      ) t
 WHERE rn = 1;

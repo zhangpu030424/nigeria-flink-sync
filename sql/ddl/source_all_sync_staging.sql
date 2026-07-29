@@ -277,7 +277,7 @@ FROM `user` u
 
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 
--- ---------- 4. user_product_sync_staging（按映射 v3：user_order 取最新 product）----------
+-- ---------- 4. user_product_sync_staging（源表 user_product.amount_max，同 user+product 取最新）----------
 -- product_id：P1→648，P2~P6→6481..6485；L1~L6→649..654；L7~L18→6551..6661（见 product_id_map）
 DROP TABLE IF EXISTS user_product_sync_staging;
 
@@ -287,11 +287,14 @@ SELECT t.user_id,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS credit_amount_minor,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(t.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS unpaid_amount_minor
 FROM (
-         SELECT o.user_id,
-                TRIM(o.product_id) AS product_id,
-                o.amount_max,
-                ROW_NUMBER() OVER (PARTITION BY o.user_id, TRIM(o.product_id) ORDER BY o.order_time DESC) AS rn
-         FROM user_order o
+         SELECT up.user_id,
+                TRIM(up.product_id) AS product_id,
+                up.amount_max,
+                ROW_NUMBER() OVER (
+                    PARTITION BY up.user_id, TRIM(up.product_id)
+                    ORDER BY up.product_add_time DESC, up.id DESC
+                ) AS rn
+         FROM user_product up
      ) t
          LEFT JOIN product_id_map m ON m.src = t.product_id
 WHERE t.rn = 1;

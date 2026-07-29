@@ -1,4 +1,4 @@
--- 增量 user_product：CDC user_order 触发 + Lookup 取 user+product 最新一单
+-- 增量 user_product：CDC 源表 user_product 触发 + Lookup 取 user+product 最新 amount_max
 SET 'parallelism.default' = '${FLINK_PARALLELISM}';
 SET 'table.exec.mini-batch.enabled' = 'true';
 SET 'table.exec.mini-batch.allow-latency' = '200ms';
@@ -9,7 +9,7 @@ SET 'execution.checkpointing.min-pause' = '120s';
 SET 'execution.checkpointing.tolerable-failed-checkpoints' = '10';
 SET 'execution.checkpointing.unaligned' = 'true';
 
-CREATE TABLE IF NOT EXISTS cdc_user_order (
+CREATE TABLE IF NOT EXISTS cdc_user_product (
     id BIGINT,
     user_id BIGINT,
     product_id STRING,
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS cdc_user_order (
     'username' = '${SOURCE_MYSQL_USER}',
     'password' = '${SOURCE_MYSQL_PASSWORD}',
     'database-name' = '${SOURCE_MYSQL_DATABASE}',
-    'table-name' = 'user_order',
+    'table-name' = 'user_product',
     'server-time-zone' = 'Africa/Lagos',
     'server-id' = '${CDC_SERVER_ID_USER_PRODUCT}',
     'scan.startup.mode' = '${CDC_STARTUP_MODE}',
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS dim_user_product_latest (
 
 CREATE TEMPORARY VIEW v_user_product_triggers AS
 SELECT user_id, product_id, proc_time
-FROM cdc_user_order
+FROM cdc_user_product
 WHERE user_id IS NOT NULL
   AND product_id IS NOT NULL
   AND TRIM(product_id) <> '';
