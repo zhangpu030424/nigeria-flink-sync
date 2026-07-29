@@ -449,7 +449,7 @@ class VtClient:
         db: Optional["DB"] = None,
         mysql_retries: int = DEFAULT_MYSQL_RETRIES,
         http_batch_size: int = 2000,
-        db_chunk_size: int = 500,
+        db_chunk_size: int = 2000,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.dry_run = dry_run
@@ -481,7 +481,6 @@ class VtClient:
 
     def resolve(self, pairs: Sequence[Tuple[int, str]]) -> Dict[str, str]:
         """批量解析：内存 -> vt_token_cache -> /v2t。返回 raw->token。"""
-        # vt_type -> unique raws
         by_type: Dict[int, List[str]] = {}
         seen: set = set()
         for vt_type, raw in pairs:
@@ -505,55 +504,80 @@ class VtClient:
                     else:
                         need.append((vt_type, raw))
 
-        if not need:
+        # 同一明文只查一次库
+        need_raws = list(dict.fromkeys(raw for _, raw in need))
+        log(
+            f"VT resolve: input_pairs={len(pairs)} need_db={len(need_raws)} "
+            f"memory_hit={len(out)} chunk={self.db_chunk_size}"
+        )
+
+        if not need_raws:
             return out
 
-        # 按类型查 vt_token_cache（手机类 1/5 互通）
-        still: List[Tuple[int, str]] = []
         if self.db is not None and not self.dry_run:
             grouped: Dict[str, List[str]] = {}
+            raw_to_types: Dict[str, set] = {}
             for vt_type, raw in need:
-                if vt_type in (self.VT_MOBILE, self.VT_EMERGENCY):
+                if raw in out:
+                    continue
+                raw_to_types.setdefault(raw, set()).add(vt_type)
+            for raw, types in raw_to_types.items():
+                if types & {self.VT_MOBILE, self.VT_EMERGENCY}:
                     grouped.setdefault("phone", []).append(raw)
-                else:
-                    grouped.setdefault(str(vt_type), []).append(raw)
-            # 去重
+                for t in types:
+                    if t not in (self.VT_MOBILE, self.VT_EMERGENCY):
+                        grouped.setdefault(str(t), []).append(raw)
             for k, vals in list(grouped.items()):
-                uniq = list(dict.fromkeys(vals))
-                grouped[k] = uniq
+                grouped[k] = list(dict.fromkeys(vals))
 
+            total_lookup = sum(len(v) for v in grouped.values())
+            done_lookup = 0
             found = 0
-            for gkey, raws in grouped.items():
-                for i in range(0, len(raws), self.db_chunk_size):
-                    chunk = raws[i : i + self.db_chunk_size]
-                    rows = self._lookup_token_cache(gkey, chunk)
-                    with self._lock:
-                        for raw, token in rows.items():
-                            self.cache.setdefault(raw, token)
-                            out[raw] = self.cache[raw]
-                    found += len(rows)
-            log(f"VT vt_token_cache hit={found} miss_before_http={sum(1 for _, r in need if r not in out)}")
+            t0 = time.time()
 
-        for vt_type, raw in need:
-            if raw not in out:
-                still.append((vt_type, raw))
+            def _lookup_all():
+                nonlocal done_lookup, found
+                assert self.db is not None
+                conn = self.db.connect(retries=self.mysql_retries)
+                try:
+                    with conn.cursor() as cur:
+                        for gkey, raws in grouped.items():
+                            for i in range(0, len(raws), self.db_chunk_size):
+                                chunk = raws[i : i + self.db_chunk_size]
+                                rows = self._lookup_token_cache_on_cursor(cur, gkey, chunk)
+                                with self._lock:
+                                    for raw, token in rows.items():
+                                        self.cache.setdefault(raw, token)
+                                        out[raw] = self.cache[raw]
+                                found += len(rows)
+                                done_lookup += len(chunk)
+                                log(
+                                    f"VT cache lookup progress: {done_lookup}/{total_lookup} "
+                                    f"hit={found} elapsed={int(time.time() - t0)}s"
+                                )
+                finally:
+                    conn.close()
 
-        if not still:
+            mysql_retry("vt_token_cache lookup-all", _lookup_all, retries=self.mysql_retries)
+            miss_n = sum(1 for r in need_raws if r not in out)
+            log(f"VT vt_token_cache hit={found} miss_before_http={miss_n} elapsed={int(time.time() - t0)}s")
+
+        still_raws = [r for r in need_raws if r not in out]
+        if not still_raws:
             return out
 
-        miss_raws = list(dict.fromkeys(raw for _, raw in still))
         if self.dry_run:
             with self._lock:
-                for raw in miss_raws:
+                for raw in still_raws:
                     token = f"dry_{base64.urlsafe_b64encode(raw.encode()).decode()[:20]}"
                     self.cache[raw] = token
                     out[raw] = token
             return out
 
-        log(f"VT /v2t batch miss={len(miss_raws)} batch_size={self.http_batch_size}")
+        log(f"VT /v2t batch miss={len(still_raws)} batch_size={self.http_batch_size}")
         url = self._v2t_url()
-        for start in range(0, len(miss_raws), self.http_batch_size):
-            chunk_vals = miss_raws[start : start + self.http_batch_size]
+        for start in range(0, len(still_raws), self.http_batch_size):
+            chunk_vals = still_raws[start : start + self.http_batch_size]
             body = json.dumps(chunk_vals, ensure_ascii=False).encode("utf-8")
             req = urllib.request.Request(
                 url,
@@ -582,12 +606,12 @@ class VtClient:
                     self.cache.setdefault(raw, token)
                     out[raw] = self.cache[raw]
             log(
-                f"VT /v2t progress: {min(start + self.http_batch_size, len(miss_raws))}/{len(miss_raws)}"
+                f"VT /v2t progress: {min(start + self.http_batch_size, len(still_raws))}/{len(still_raws)}"
             )
         return out
 
-    def _lookup_token_cache(self, group_key: str, raws: List[str]) -> Dict[str, str]:
-        if not self.db or not raws:
+    def _lookup_token_cache_on_cursor(self, cur, group_key: str, raws: List[str]) -> Dict[str, str]:
+        if not raws:
             return {}
         placeholders = ",".join(["%s"] * len(raws))
         if group_key == "phone":
@@ -605,25 +629,14 @@ class VtClient:
                 f"AND token IS NOT NULL AND token <> ''"
             )
             params = (vt_type, *raws)
-
-        def _do():
-            conn = self.db.connect(retries=self.mysql_retries)
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(sql, params)
-                    rows = cur.fetchall()
-                found: Dict[str, str] = {}
-                for r in rows:
-                    raw = (r.get("raw_value") or "").strip()
-                    tok = (r.get("token") or "").strip()
-                    if raw and tok and raw not in found:
-                        found[raw] = tok
-                return found
-            finally:
-                conn.close()
-
-        return mysql_retry("vt_token_cache lookup", _do, retries=self.mysql_retries)
-
+        cur.execute(sql, params)
+        found: Dict[str, str] = {}
+        for r in cur.fetchall():
+            raw = (r.get("raw_value") or "").strip()
+            tok = (r.get("token") or "").strip()
+            if raw and tok and raw not in found:
+                found[raw] = tok
+        return found
 
 
 class Migrator:
@@ -998,7 +1011,7 @@ class Migrator:
           DATE(o.last_repayment_time) AS due_date,
           UNIX_TIMESTAMP(o.last_repayment_time) AS due_ts,
           p.bvn,
-          b.bank_code,
+          b.bank_name,
           b.bank_account,
           ui.current_period,
           CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name,
@@ -1213,7 +1226,7 @@ class Migrator:
           DATE(o.last_repayment_time) AS due_date,
           UNIX_TIMESTAMP(o.last_repayment_time) AS due_ts,
           p.bvn,
-          b.bank_code,
+          b.bank_name,
           b.bank_account,
           ui.current_period,
           CONCAT_WS(' ', NULLIF(TRIM(p.first_name), ''), NULLIF(TRIM(p.sur_name), '')) AS full_name
@@ -1547,7 +1560,7 @@ class Migrator:
                 else ""
             )[:28],
             "email": "",
-            "bank_code": (bu.get("bank_code") or "").strip()[:128],
+            "bank_code": (bu.get("bank_name") or "").strip()[:128],
             "bank_account": (
                 self.vt.tokenize((bu.get("bank_account") or "").strip(), vt_type=VtClient.VT_BANK)
                 if bu.get("bank_account")
