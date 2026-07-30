@@ -25,6 +25,10 @@ SELECT CAST(i.id AS SIGNED),
                WHEN ur_cb.callback_time IS NOT NULL
                    AND UNIX_TIMESTAMP(ur_cb.callback_time) > 0
                    THEN UNIX_TIMESTAMP(ur_cb.callback_time) * 1000
+               WHEN o.risk_order_status IN (20, 30, 50)
+                   AND o.settled_time IS NOT NULL
+                   AND UNIX_TIMESTAMP(o.settled_time) > 0
+                   THEN UNIX_TIMESTAMP(o.settled_time) * 1000
                ELSE NULL
                END AS SIGNED
        ) AS paid_time_ms,

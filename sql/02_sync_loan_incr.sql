@@ -210,6 +210,10 @@ SELECT
     CASE
         WHEN b.callback_time IS NOT NULL AND UNIX_TIMESTAMP(CAST(b.callback_time AS STRING)) > 0
             THEN CAST(UNIX_TIMESTAMP(CAST(b.callback_time AS STRING)) * 1000 AS BIGINT)
+        WHEN CAST(b.risk_order_status AS INT) IN (20, 30, 50)
+            AND b.settled_time IS NOT NULL
+            AND UNIX_TIMESTAMP(CAST(b.settled_time AS STRING)) > 0
+            THEN CAST(UNIX_TIMESTAMP(CAST(b.settled_time AS STRING)) * 1000 AS BIGINT)
         ELSE CAST(NULL AS BIGINT)
     END,
     CASE WHEN b.settled_time IS NULL THEN CAST(NULL AS DATE) ELSE CAST(b.settled_time AS DATE) END,
