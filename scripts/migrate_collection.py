@@ -658,7 +658,7 @@ class Migrator:
         self.backend = DB(self._backend_cfg(), readonly=True)
         self.vt = VtClient(
             args.vt_base_url,
-            dry_run=args.dry_run,img_v3_02149_2fbacb64-7485-4b82-bc9f-99a4ba1c213g.jpg
+            dry_run=args.dry_run,
             db=self.backend,
             mysql_retries=int(getattr(args, "mysql_retries", DEFAULT_MYSQL_RETRIES) or DEFAULT_MYSQL_RETRIES),
             http_batch_size=int(env_first("COLLECTION_VT_HTTP_BATCH", "VT_PRELOAD_HTTP_BATCH", default="2000") or "2000"),
