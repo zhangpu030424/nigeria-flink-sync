@@ -328,12 +328,12 @@ def as_str(value: Any) -> str:
     return str(value).strip()
 
 
-def to_fen(value: Any) -> int:
-    """源金额为主单位，目标统一按分写入。"""
+def to_yuan(value: Any) -> int:
+    """源库金额单位为元，写入目标库仍用元（四舍五入取整）。"""
     if value in (None, ""):
         return 0
     try:
-        return int(round(float(value) * 100))
+        return int(round(float(value)))
     except (TypeError, ValueError):
         return 0
 
@@ -658,7 +658,7 @@ class Migrator:
         self.backend = DB(self._backend_cfg(), readonly=True)
         self.vt = VtClient(
             args.vt_base_url,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run,img_v3_02149_2fbacb64-7485-4b82-bc9f-99a4ba1c213g.jpg
             db=self.backend,
             mysql_retries=int(getattr(args, "mysql_retries", DEFAULT_MYSQL_RETRIES) or DEFAULT_MYSQL_RETRIES),
             http_batch_size=int(env_first("COLLECTION_VT_HTTP_BATCH", "VT_PRELOAD_HTTP_BATCH", default="2000") or "2000"),
@@ -1522,15 +1522,15 @@ class Migrator:
         phone = r.get("phone")
         vt_mobile = to_vt_mobile(phone)
         case_no = str(r.get("repayment_plan_order_no") or "").strip() or order_no
-        loan_amount = unsigned_amount(to_fen(r.get("contract_amount")))
-        unpaid_amount = unsigned_amount(to_fen(bu.get("remaining_repayment")))
-        paid_amount = unsigned_amount(to_fen(bu.get("repaid_amount")))
+        loan_amount = unsigned_amount(to_yuan(r.get("contract_amount")))
+        unpaid_amount = unsigned_amount(to_yuan(bu.get("remaining_repayment")))
+        paid_amount = unsigned_amount(to_yuan(bu.get("repaid_amount")))
         total_amount = unsigned_amount(unpaid_amount + paid_amount)
-        principal = unsigned_amount(to_fen(r.get("principal_due")))
+        principal = unsigned_amount(to_yuan(r.get("principal_due")))
         fee = unsigned_amount(int(round(loan_amount * 0.35)))
-        penalty_amount = unsigned_amount(to_fen(r.get("overdue_fees")))
-        received_fen = unsigned_amount(to_fen(bu.get("received_amount")))
-        disbursed_amount = received_fen if received_fen > 0 else unsigned_amount(loan_amount - fee)
+        penalty_amount = unsigned_amount(to_yuan(r.get("overdue_fees")))
+        received_amount = unsigned_amount(to_yuan(bu.get("received_amount")))
+        disbursed_amount = received_amount if received_amount > 0 else unsigned_amount(loan_amount - fee)
         app_code = bu.get("app_code") or r.get("app_id") or 0
         application_no = f"ng0{to_int(app_code):01d}-{order_no}"[:36]
         follow_status = (r.get("collection_follow_status") or "").strip().upper()
@@ -1714,7 +1714,7 @@ class Migrator:
 
     def _build_dispatch_row(self, r: Dict[str, Any]) -> Dict[str, Any]:
         paid = 0
-        total_amount = to_fen(r.get("contract_amount"))
+        total_amount = to_yuan(r.get("contract_amount"))
         case_no = (
             str(r.get("repayment_plan_order_no") or "").strip()
             or str(r.get("plan_order_no") or r.get("order_no") or "").strip()
