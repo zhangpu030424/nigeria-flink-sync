@@ -131,6 +131,16 @@ def map_product_id(raw: Any) -> str:
     return PRODUCT_ID_MAP.get(s.upper(), s)[:64]
 
 
+def map_case_cust_group(customer_type: Any) -> str:
+    """repayment_plan.customer_type: 1=新客(new), 2=老客(old)；其它/空 → ''（列 NOT NULL）。"""
+    t = as_int(customer_type)
+    if t == 1:
+        return "new"
+    if t == 2:
+        return "old"
+    return ""
+
+
 def is_retryable_mysql(exc: BaseException) -> bool:
     if isinstance(exc, pymysql.err.OperationalError):
         code = exc.args[0] if exc.args else None
@@ -971,8 +981,8 @@ class Migrator:
                     "product_ids": None,
                     "app_ids": None,
                     "term": None,
-                    "cust_group": "[]",
-                    "risk_level": "[]",
+                    "cust_group": None,
+                    "risk_level": None,
                     "disabled_time": to_ts_seconds(r.get("updated_at")) if status in (0, 2) else 0,
                     "dispatch": 1 if status == 1 else 0,
                     "authorize": 0,
@@ -1468,6 +1478,7 @@ class Migrator:
           p.overdue_fees,
           p.overdue_days,
           p.status AS plan_status,
+          p.customer_type,
           p.collection_follow_status,
           p.created_at AS plan_created_at,
           p.updated_at,
@@ -1551,7 +1562,7 @@ class Migrator:
             "app_name": str(r.get("app_name") or "")[:128],
             "status": "CLOSED" if closed else "COLLECTING",
             "term": 7,
-            "cust_group": "[]",
+            "cust_group": map_case_cust_group(r.get("customer_type")),
             "name": self._resolve_name(user_id, phone)[:128],
             "mobile": (self.vt.tokenize(vt_mobile, vt_type=VtClient.VT_MOBILE) if vt_mobile else "")[:28],
             "id_number": (

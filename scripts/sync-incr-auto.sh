@@ -154,11 +154,13 @@ for job in "${SYNC_ENABLED_JOBS[@]}"; do
   echo "# 增量 Job: ${job}  mode=${job_mode}"
   echo "########################################"
   export CDC_STARTUP_MODE="$job_mode"
-  if [[ "$first" -eq 1 ]]; then
+  # --keep-jobs 时首个 Job 也必须带 --keep-other-jobs，否则 sync-job-auto 仍会 cancel 全部
+  if [[ "$first" -eq 1 && "$CANCEL_JOBS" -eq 1 ]]; then
     ./scripts/sync-job-auto.sh "$job" --incr-only --bulk-start-ms "$SHARED_MS"
     first=0
   else
     ./scripts/sync-job-auto.sh "$job" --incr-only --bulk-start-ms "$SHARED_MS" --keep-other-jobs
+    first=0
   fi
 done
 
