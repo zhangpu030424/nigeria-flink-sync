@@ -6,7 +6,7 @@
 SELECT 'disbursed_6apps' AS metric, COUNT(*) AS cnt
 FROM user_order o
 WHERE o.disburse_time IS NOT NULL
-  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.app_code IN (567, 568, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
 UNION ALL
 SELECT 'in_loan_staging_6apps', COUNT(*)
@@ -14,14 +14,14 @@ FROM user_order o
 INNER JOIN loan_sync_staging l
     ON l.application_no = CONCAT('ng0', TRIM(CAST(o.app_code AS CHAR)), '-', o.order_no)
 WHERE o.disburse_time IS NOT NULL
-  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.app_code IN (567, 568, 571, 572, 573)
 UNION ALL
 SELECT 'disbursed_missing_loan_staging_6apps', COUNT(*)
 FROM user_order o
 LEFT JOIN loan_sync_staging l
     ON l.application_no = CONCAT('ng0', TRIM(CAST(o.app_code AS CHAR)), '-', o.order_no)
 WHERE o.disburse_time IS NOT NULL
-  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.app_code IN (567, 568, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
   AND l.application_no IS NULL;
 
@@ -40,7 +40,7 @@ FROM user_order o
 LEFT JOIN loan_sync_staging l
     ON l.application_no = CONCAT('ng0', TRIM(CAST(o.app_code AS CHAR)), '-', o.order_no)
 WHERE o.disburse_time IS NOT NULL
-  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.app_code IN (567, 568, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
   AND l.application_no IS NULL
 GROUP BY likely_reason
@@ -49,4 +49,4 @@ ORDER BY cnt DESC;
 -- ========== 2. 源库「应有 loan」= 在 loan_sync_staging 的已放款 6 app 数（应对标目标 loan 数）==========
 SELECT COUNT(DISTINCT l.application_no) AS source_loan_staging_app_cnt
 FROM loan_sync_staging l
-WHERE l.application_no REGEXP '^ng0(567|568|569|571|572|573)-';
+WHERE l.application_no REGEXP '^ng0(567|568|571|572|573)-';

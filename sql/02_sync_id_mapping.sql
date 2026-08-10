@@ -46,4 +46,5 @@ CREATE TABLE IF NOT EXISTS sink_id_mapping (
 
 INSERT INTO sink_id_mapping
 SELECT id, CAST(app_id AS INT), mapping_id, type, event_time
-FROM src_id_mapping_staging;
+FROM src_id_mapping_staging
+WHERE CAST(app_id AS INT) IN (567, 568, 571, 572, 573);

@@ -5,7 +5,7 @@
 设计对齐旧仓库 reconcile_tables.py：
   - 阶段：load-target / plan / apply / all
   - 目标切片：user_id/group_user_id > USER_ID_OFFSET（默认 1亿）
-  - app 范围默认：567,568,569,571,572,573
+  - app 范围默认：567,568,571,572,573（不含 569）
   - 期望行直接查源表（user / user_order / …），映射对齐 Flink SQL；不读 *_sync_staging 宽表
   - VT 未命中（token 空）→ 跳过并记日志
   - insert=INSERT；update=按主键 UPDATE

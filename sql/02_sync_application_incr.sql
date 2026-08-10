@@ -463,6 +463,7 @@ FROM (
 ) AS e
 WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''
   AND e.bank_account_token IS NOT NULL AND TRIM(e.bank_account_token) <> ''
+  AND e.app_id IN (567, 568, 571, 572, 573)
   AND (
       e.bvn_raw IS NULL OR TRIM(e.bvn_raw) = ''
       OR (e.id_number_token IS NOT NULL AND TRIM(e.id_number_token) <> '')

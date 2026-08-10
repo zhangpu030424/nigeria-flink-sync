@@ -53,7 +53,8 @@ FROM `user` u
                            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
                            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
                            ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin;
+                       END) COLLATE utf8mb4_bin
+WHERE u.app_code IN (567, 568, 571, 572, 573);
 
 ALTER TABLE user_sync_staging ADD PRIMARY KEY (id);
 
@@ -68,6 +69,9 @@ SELECT b.id,
        vt_b.token AS bank_account_token,
        b.is_default
 FROM user_bank_info b
+         INNER JOIN `user` u
+                    ON u.id = b.user_id
+                        AND u.app_code IN (567, 568, 571, 572, 573)
          LEFT JOIN vt_token_cache vt_b
                    ON vt_b.vt_type = 3 AND vt_b.status = 1
                        AND vt_b.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin
@@ -273,7 +277,8 @@ FROM `user` u
                                    END
                                ) COLLATE utf8mb4_bin
     GROUP BY ec.user_id
-) ec ON ec.user_id = u.id;
+) ec ON ec.user_id = u.id
+WHERE u.app_code IN (567, 568, 571, 572, 573);
 
 ALTER TABLE user_info_sync_staging ADD PRIMARY KEY (user_id);
 
@@ -296,6 +301,9 @@ FROM (
                 ) AS rn
          FROM user_product up
      ) t
+         INNER JOIN `user` u
+                    ON u.id = t.user_id
+                        AND u.app_code IN (567, 568, 571, 572, 573)
          LEFT JOIN product_id_map m ON m.src = t.product_id
 WHERE t.rn = 1;
 
@@ -511,6 +519,7 @@ FROM (
     GROUP BY user_order_id
 ) inst ON inst.user_order_id = o.id
          WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
+           AND o.app_code IN (567, 568, 571, 572, 573)
      ) base;
 
 ALTER TABLE application_sync_staging ADD PRIMARY KEY (id);
@@ -613,6 +622,7 @@ FROM user_order_installment i
     AND ur_cb.current_period = i.current_period
 WHERE o.order_no IS NOT NULL
   AND TRIM(o.order_no) <> ''
+  AND o.app_code IN (567, 568, 571, 572, 573)
   AND o.risk_order_status IS NOT NULL
   AND o.risk_order_status NOT IN (0, 2, 4, 6, 8);
 

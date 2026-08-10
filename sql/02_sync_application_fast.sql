@@ -111,6 +111,7 @@ SELECT
 FROM src_application_staging
 WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> ''
   AND bank_account_token IS NOT NULL AND TRIM(bank_account_token) <> ''
+  AND CAST(app_code AS INT) IN (567, 568, 571, 572, 573)
   AND (
       bvn_raw IS NULL OR TRIM(bvn_raw) = ''
       OR (id_number_token IS NOT NULL AND TRIM(id_number_token) <> '')

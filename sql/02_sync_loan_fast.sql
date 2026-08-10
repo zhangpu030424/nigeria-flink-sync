@@ -64,4 +64,9 @@ SELECT
     paid_off_date,
     GREATEST(COALESCE(created_time_ms, CAST(0 AS BIGINT)), CAST(0 AS BIGINT)),
     CAST(risk_status AS TINYINT)
-FROM src_loan_staging;
+FROM src_loan_staging
+WHERE application_no LIKE 'ng0567-%'
+   OR application_no LIKE 'ng0568-%'
+   OR application_no LIKE 'ng0571-%'
+   OR application_no LIKE 'ng0572-%'
+   OR application_no LIKE 'ng0573-%';

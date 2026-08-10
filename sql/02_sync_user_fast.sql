@@ -111,4 +111,5 @@ SELECT
     campaign_tracker,
     adgroup_tracker
 FROM src_user_staging
-WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> '';
+WHERE mobile_token IS NOT NULL AND TRIM(mobile_token) <> ''
+  AND CAST(app_code AS INT) IN (567, 568, 571, 572, 573);

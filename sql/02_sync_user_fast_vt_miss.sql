@@ -134,4 +134,5 @@ FROM (
       AND s.mobile_norm IS NOT NULL
       AND TRIM(s.mobile_norm) <> ''
 ) e
-WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> '';
+WHERE e.mobile_token IS NOT NULL AND TRIM(e.mobile_token) <> ''
+  AND e.app_id IN (567, 568, 571, 572, 573);

@@ -1,5 +1,6 @@
 -- 增量 Job JDBC Lookup 视图（唯一入口，由 deploy-source-ddl.sh 部署）
 -- 废弃视图清理: sql/ddl/drop_legacy_views.sql
+-- 本迁移 app 白名单（排除 569）: 567,568,571,572,573
 
 -- ========== application / loan ==========
 
@@ -457,7 +458,8 @@ FROM `user` u
                        FROM device_network dn2
                        WHERE dn2.device_uuid = u.device_id
                          AND dn2.ip IS NOT NULL AND dn2.ip <> ''
-                   );
+                   )
+WHERE u.app_code IN (567, 568, 571, 572, 573);
 
 -- ========== user / user_bankcard / user_product ==========
 
@@ -501,7 +503,8 @@ FROM user u
                            WHEN TRIM(u.mobile) LIKE '234%' THEN CONCAT('+', TRIM(u.mobile))
                            WHEN TRIM(u.mobile) LIKE '0%' THEN CONCAT('+234', SUBSTRING(TRIM(u.mobile), 2))
                            ELSE CONCAT('+234', TRIM(u.mobile))
-                       END) COLLATE utf8mb4_bin;
+                       END) COLLATE utf8mb4_bin
+WHERE u.app_code IN (567, 568, 571, 572, 573);
 
 CREATE OR REPLACE VIEW user_bankcard_id_by_account_lookup AS
 SELECT TRIM(bank_account) AS bank_account,
@@ -523,6 +526,9 @@ SELECT b.id AS id,
        CAST(b.is_default AS SIGNED) AS is_default,
        CAST(b.deleted AS SIGNED) AS deleted
 FROM user_bank_info b
+         INNER JOIN `user` u
+                    ON u.id = b.user_id
+                        AND u.app_code IN (567, 568, 571, 572, 573)
          LEFT JOIN vt_token_cache vt
                    ON vt.vt_type = 3 AND vt.status = 1
                        AND vt.raw_value COLLATE utf8mb4_bin = TRIM(b.bank_account) COLLATE utf8mb4_bin;
@@ -530,9 +536,9 @@ FROM user_bank_info b
 
 -- 额度取源表 user_product.amount_max（同 user+product 取最新一条）
 CREATE OR REPLACE VIEW user_product_latest_lookup AS
-SELECT CAST(user_id AS SIGNED) AS user_id,
-       CAST(product_id AS CHAR) AS product_id,
-       CAST(amount_max AS CHAR) AS amount_max
+SELECT CAST(up.user_id AS SIGNED) AS user_id,
+       CAST(up.product_id AS CHAR) AS product_id,
+       CAST(up.amount_max AS CHAR) AS amount_max
 FROM (
          SELECT user_id, product_id, amount_max,
                 ROW_NUMBER() OVER (
@@ -541,8 +547,11 @@ FROM (
                 ) AS rn
          FROM user_product
          WHERE user_id IS NOT NULL AND product_id IS NOT NULL AND TRIM(product_id) <> ''
-     ) t
-WHERE rn = 1;
+     ) up
+         INNER JOIN `user` u
+                    ON u.id = up.user_id
+                        AND u.app_code IN (567, 568, 571, 572, 573)
+WHERE up.rn = 1;
 
 -- ========== application 增量（30s SLA：单次 bundle Lookup + 无双流 Join）==========
 -- 注意：Flink JDBC Lookup 是 WHERE pk=? 点查。禁止 JOIN 带 ROW_NUMBER/全表聚合的子视图，
@@ -555,7 +564,7 @@ SELECT order_no AS order_no,
        CAST(MAX(id) AS SIGNED) AS order_id
 FROM user_order
 WHERE order_no IS NOT NULL AND TRIM(order_no) <> ''
-  AND app_code IN (567, 568, 569, 571, 572, 573)
+  AND app_code IN (567, 568, 571, 572, 573)
 GROUP BY order_no;
 
 CREATE OR REPLACE VIEW application_latest_order_by_user_lookup AS
@@ -563,7 +572,7 @@ SELECT user_id AS user_id,
        CAST(MAX(id) AS SIGNED) AS order_id
 FROM user_order
 WHERE user_id IS NOT NULL
-  AND app_code IN (567, 568, 569, 571, 572, 573)
+  AND app_code IN (567, 568, 571, 572, 573)
 GROUP BY user_id;
 
 CREATE OR REPLACE VIEW application_latest_order_by_device_lookup AS
@@ -572,7 +581,7 @@ SELECT u.device_id AS device_uuid,
 FROM `user` u
          INNER JOIN user_order o ON o.user_id = u.id
 WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
-  AND o.app_code IN (567, 568, 569, 571, 572, 573)
+  AND o.app_code IN (567, 568, 571, 572, 573)
 GROUP BY u.device_id;
 
 -- 按 order.id 点查友好：禁止 SELECT 列表子查询（会强制 TEMPTABLE 全表物化）
@@ -716,7 +725,7 @@ FROM user_order o
          LEFT JOIN vt_token_cache vt_ba
                    ON vt_ba.vt_type = 3 AND vt_ba.status = 1
                        AND vt_ba.raw_value COLLATE utf8mb4_bin = TRIM(ub.bank_account) COLLATE utf8mb4_bin
-WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
+WHERE o.app_code IN (567, 568, 571, 572, 573)
   AND o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
 
 -- ========== loan 增量：去掉 CDC 双流 Join ==========
@@ -767,7 +776,8 @@ SELECT i.id                                                         AS installme
        ) AS DATETIME(3))                                            AS callback_time
 FROM user_order_installment i
          INNER JOIN user_order o ON o.id = i.user_order_id
-WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '';
+WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''
+  AND o.app_code IN (567, 568, 571, 572, 573);
 
 -- ========== id_mapping 增量 Lookup（点查优化）==========
 -- 原则:
@@ -817,6 +827,7 @@ FROM (
                                   AND b2.deleted = 0 AND b2.is_default = 1
                                   AND b2.bank_account IS NOT NULL AND TRIM(b2.bank_account) <> ''
                             )
+         WHERE u.app_code IN (567, 568, 571, 572, 573)
      ) x
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 1 AND vt_m.status = 1
@@ -888,7 +899,7 @@ FROM (
                                 WHERE u.device_id IS NOT NULL AND TRIM(u.device_id) <> ''
                                   AND d2.device_uuid = u.device_id
                             )
-         WHERE o.app_code IN (567, 568, 569, 571, 572, 573)
+         WHERE o.app_code IN (567, 568, 571, 572, 573)
      ) x
          LEFT JOIN vt_token_cache vt_m
                    ON vt_m.vt_type = 1 AND vt_m.status = 1
@@ -944,6 +955,7 @@ FROM (
                       SELECT MAX(u2.id)
                       FROM `user` u2
                       WHERE u2.device_id = d.device_uuid
+                        AND u2.app_code IN (567, 568, 571, 572, 573)
                   )
          WHERE d.device_uuid IS NOT NULL AND TRIM(d.device_uuid) <> ''
            AND d.id = (

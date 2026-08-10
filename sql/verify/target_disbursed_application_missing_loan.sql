@@ -5,7 +5,7 @@
 SELECT COUNT(*) AS missing_loan_cnt
 FROM application a
 LEFT JOIN loan l ON l.application_no = a.application_no
-WHERE a.app_id IN (567, 568, 569, 571, 572, 573)
+WHERE a.app_id IN (567, 568, 571, 572, 573)
   AND a.disbursed_time > 0
   AND l.application_no IS NULL;
 
@@ -18,7 +18,7 @@ SELECT a.app_id,
        FROM_UNIXTIME(MAX(a.created_time) / 1000) AS max_created
 FROM application a
 LEFT JOIN loan l ON l.application_no = a.application_no
-WHERE a.app_id IN (567, 568, 569, 571, 572, 573)
+WHERE a.app_id IN (567, 568, 571, 572, 573)
   AND a.disbursed_time > 0
   AND l.application_no IS NULL
 GROUP BY a.app_id
@@ -29,7 +29,7 @@ ORDER BY missing_cnt DESC;
 SELECT COUNT(*) AS loan_exists_by_sn_but_not_application_no
 FROM application a
 LEFT JOIN loan l ON l.application_no = a.application_no
-WHERE a.app_id IN (567, 568, 569, 571, 572, 573)
+WHERE a.app_id IN (567, 568, 571, 572, 573)
   AND a.disbursed_time > 0
   AND l.application_no IS NULL
   AND EXISTS (
@@ -46,7 +46,7 @@ SELECT a.application_no,
        FROM_UNIXTIME(a.created_time / 1000) AS created_at
 FROM application a
 LEFT JOIN loan l ON l.application_no = a.application_no
-WHERE a.app_id IN (567, 568, 569, 571, 572, 573)
+WHERE a.app_id IN (567, 568, 571, 572, 573)
   AND a.disbursed_time > 0
   AND l.application_no IS NULL
 ORDER BY a.disbursed_time DESC
@@ -55,9 +55,9 @@ LIMIT 20;
 -- ========== 4. 对照：6 app 已有 loan 的数量 ==========
 SELECT COUNT(DISTINCT l.application_no) AS loan_app_cnt
 FROM loan l
-WHERE l.application_no REGEXP '^ng0(567|568|569|571|572|573)-';
+WHERE l.application_no REGEXP '^ng0(567|568|571|572|573)-';
 
 SELECT COUNT(*) AS disbursed_app_cnt
 FROM application a
-WHERE a.app_id IN (567, 568, 569, 571, 572, 573)
+WHERE a.app_id IN (567, 568, 571, 572, 573)
   AND a.disbursed_time > 0;

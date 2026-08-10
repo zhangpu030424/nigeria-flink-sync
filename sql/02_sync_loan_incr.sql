@@ -243,5 +243,6 @@ FROM v_loan_triggers AS t
 INNER JOIN dim_loan_bundle FOR SYSTEM_TIME AS OF t.proc_time AS b
     ON b.installment_id = t.installment_id
 WHERE b.order_no IS NOT NULL AND TRIM(b.order_no) <> ''
+  AND CAST(b.app_code AS INT) IN (567, 568, 571, 572, 573)
   AND b.risk_order_status IS NOT NULL
   AND CAST(b.risk_order_status AS INT) NOT IN (0, 2, 4, 6, 8);
