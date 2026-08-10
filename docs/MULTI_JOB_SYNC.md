@@ -100,12 +100,14 @@ VT 表全量两阶段：先有 token → 无 token 运行时 `/v2t` → 增量 L
 
 | 表 | 宽表（源） | 目标（迁移切片） | 监控模式 |
 |----|-----------|------------------|----------|
-| user | `DISTINCT(mobile_token,app_code)` 有 token | `user_id > USER_ID_OFFSET` | **absolute**（目标≈宽表） |
-| user_info | 宽表行数 | `user_id > offset` | absolute |
-| user_bankcard | `DISTINCT(user_id,bank_account_token)` | `group_user_id > offset` | absolute |
-| user_product / application | 宽表行数 | `group_user_id > offset` | absolute |
-| loan | 宽表行数（app 567/568/571/572/573，LIKE 前缀） | 同上且 `EXISTS application(group_user_id > offset)` | absolute |
-| id_mapping | 宽表行数 | 全表 | **baseline_delta**（基线+宽表≈总数） |
+| user | `DISTINCT(mobile_token,app_code)` 有 token | `user_id > offset` 且 `app_id IN (567,568,571,572,573)` | **absolute**（目标≈宽表） |
+| user_info | 宽表行数 | `user_id > offset` 且关联 `user.app_id` 白名单 | absolute |
+| user_bankcard | `DISTINCT(user_id,bank_account_token)` | `group_user_id > offset` 且关联 `user.app_id` 白名单 | absolute |
+| user_product / application | 宽表行数 | offset + app 白名单（application 用 `app_id`） | absolute |
+| loan | 宽表行数（app 567/568/571/572/573，LIKE 前缀） | 同上且 `EXISTS application(... app 白名单)` | absolute |
+| id_mapping | 宽表行数 | `app_id` 白名单（不含 569） | **baseline_delta**（基线+宽表≈总数） |
+
+**说明：** 目标侧排除 569 只改监控计数，**不删除**目标库已有 569 数据。
 
 **为何不用「全表总数 = 基线 + 宽表」：** 目标库常有存量，且 UPSERT 主键重叠时只 UPDATE 不增行（如 `user` 的 `(mobile,app_id,closed_time)`）。迁移表改为只数本迁移写入的行，直接与宽表对比。
 
