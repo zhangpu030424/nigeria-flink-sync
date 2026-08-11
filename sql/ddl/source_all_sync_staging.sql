@@ -355,7 +355,12 @@ SELECT base.id,
        base.loan_amount_minor,
        base.principal_minor,
        base.total_amount_minor,
-       base.disbursed_amount_minor,
+       -- status < 20 时 disbursed_amount 置 0（risk_order_status 映射后 risk_status < 20）
+       CASE
+           WHEN base.risk_order_status IN (10, 11, 20, 30, 40, 50)
+               THEN base.disbursed_amount_minor
+           ELSE 0
+           END AS disbursed_amount_minor,
        CASE base.risk_order_status
            WHEN 2 THEN 3
            WHEN 4 THEN 5

@@ -397,7 +397,8 @@ SELECT
     e.loan_amount_minor,
     e.principal_minor,
     e.total_amount_minor,
-    e.disbursed_amount_minor,
+    -- status < 20（待审/审核中/拒绝/取消/放款中/放款失败等）disbursed_amount 置 0
+    CASE WHEN e.risk_status < 20 THEN CAST(0 AS BIGINT) ELSE e.disbursed_amount_minor END,
     e.created_time_ms,
     e.created_time_ms,
     e.reviewed_time_ms,

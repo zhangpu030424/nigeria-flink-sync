@@ -623,7 +623,14 @@ SELECT o.id AS id,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.amount_max), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS loan_amount_minor,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS principal_minor,
        CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.repayment), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS total_amount_minor,
-       CAST(COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0) AS SIGNED) AS disbursed_amount_minor,
+       -- status < 20 时 disbursed_amount 置 0（与 risk_status 映射一致：仅 10/11/20/30/40/50 → >=20）
+       CAST(
+               CASE
+                   WHEN CAST(o.risk_order_status AS SIGNED) IN (10, 11, 20, 30, 40, 50)
+                       THEN COALESCE(ROUND(CAST(NULLIF(TRIM(o.received), '') AS DECIMAL(20, 2)), 0), 0)
+                   ELSE 0
+                   END AS SIGNED
+       ) AS disbursed_amount_minor,
        CAST(
                CASE CAST(o.risk_order_status AS SIGNED)
                    WHEN 2 THEN 3
