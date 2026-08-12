@@ -6,8 +6,9 @@
 1. 源库只读
 2. 目标库 UPSERT，可重跑
 3. 运行时探测目标表列，避免因字段轻微差异直接失败
-4. 支持 dry-run / verify / limit / batch
+4. 支持 dry-run / verify / limit / batch / app_id 白名单与排除
 5. MySQL 断连（2013/2006/2003）自动重试
+6. 默认排除 app 569（监控包）；companys/members 无 app_id，仍全量迁
 
 说明：
 - 需求来自 README_migrate_collection.md 与飞书文档
@@ -57,6 +58,8 @@ DEFAULT_PASSWORD = "ng01123456."
 # htpasswd -bnBC 10 "" ng01123456. 预生成；无 bcrypt/htpasswd 时兜底
 DEFAULT_PASSWORD_HASH = "$2y$10$j6w2VR3rPMu69vTjHxfss.N5AVpj5e4fn0Yx.Ec1.mxLsuDIJeET6"
 DEFAULT_MYSQL_RETRIES = 5
+# 与 Flink / reconcile 一致：569 为监控包，催收 cases/dispatch 默认不迁
+DEFAULT_EXCLUDE_APP_IDS = (569,)
 # 2003 连不上 / 2006 Gone away / 2013 Lost connection / 2014 Commands out of sync
 MYSQL_RETRY_ERRNOS = {2003, 2006, 2013, 2014}
 # 源 user_emergency_contact.contact_relationship:
@@ -191,6 +194,25 @@ def env_first(*keys: str, default: Optional[str] = None) -> Optional[str]:
         if v not in (None, ""):
             return v
     return default
+
+
+def parse_int_ids(raw: Optional[str]) -> List[int]:
+    if raw is None:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    out: List[int] = []
+    seen = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        n = int(part)
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
 
 
 def parse_tables(raw: str) -> List[str]:
@@ -679,6 +701,16 @@ class Migrator:
         self._user_aux_ready = False
         self._aux_lock = threading.Lock()
         self._progress_lock = threading.Lock()
+        self.include_app_ids = parse_int_ids(getattr(args, "app_ids", None))
+        exclude_raw = getattr(args, "exclude_app_ids", None)
+        if exclude_raw is None:
+            self.exclude_app_ids = list(DEFAULT_EXCLUDE_APP_IDS)
+        else:
+            self.exclude_app_ids = parse_int_ids(exclude_raw)
+        if self.include_app_ids and self.exclude_app_ids:
+            self.include_app_ids = [
+                x for x in self.include_app_ids if x not in set(self.exclude_app_ids)
+            ]
 
     def _src_cfg(self) -> DbConfig:
         return DbConfig(
@@ -842,7 +874,37 @@ class Migrator:
 
         return mysql_retry(f"upsert {table}", _do, retries=self.mysql_retries)
 
+    def _app_and(self, col: str) -> Tuple[str, Tuple[Any, ...]]:
+        """生成 app_id 过滤片段，形如 ' AND CAST(col AS UNSIGNED) NOT IN (%s)'。"""
+        clauses: List[str] = []
+        params: List[Any] = []
+        if self.include_app_ids:
+            ph = ",".join(["%s"] * len(self.include_app_ids))
+            clauses.append(f"CAST({col} AS UNSIGNED) IN ({ph})")
+            params.extend(self.include_app_ids)
+        if self.exclude_app_ids:
+            ph = ",".join(["%s"] * len(self.exclude_app_ids))
+            clauses.append(f"CAST({col} AS UNSIGNED) NOT IN ({ph})")
+            params.extend(self.exclude_app_ids)
+        if not clauses:
+            return "", ()
+        return " AND " + " AND ".join(clauses), tuple(params)
+
+    def _with_app_filter(self, where: str, col: str) -> Tuple[str, Tuple[Any, ...]]:
+        extra, params = self._app_and(col)
+        if not extra:
+            return where, ()
+        if not (where or "").strip():
+            return "WHERE " + extra[5:], params
+        return where + extra, params
+
+    def _log_app_filter(self) -> None:
+        inc = ",".join(str(x) for x in self.include_app_ids) or "(all)"
+        exc = ",".join(str(x) for x in self.exclude_app_ids) or "(none)"
+        log(f"app filter: include={inc} exclude={exc} (companys/members 不受限)")
+
     def run(self) -> None:
+        self._log_app_filter()
         if self.args.verify:
             self.verify_counts()
             return
@@ -895,7 +957,25 @@ class Migrator:
                 s = mappings[key]
                 t = target_map[key]
                 with src_conn.cursor() as cur:
-                    cur.execute(f"SELECT COUNT(*) AS c FROM `{s}`")
+                    if key in ("cases", "traces") and (self.include_app_ids or self.exclude_app_ids):
+                        extra, params = self._app_and("app_id")
+                        cur.execute(
+                            f"SELECT COUNT(*) AS c FROM `{s}` WHERE 1=1{extra}",
+                            params,
+                        )
+                    elif key == "dispatch" and (self.include_app_ids or self.exclude_app_ids):
+                        extra, params = self._app_and("p.app_id")
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS c
+                            FROM collection_assign_log l
+                            LEFT JOIN repayment_plan p ON p.id = l.repayment_plan_id
+                            WHERE 1=1{extra}
+                            """,
+                            params,
+                        )
+                    else:
+                        cur.execute(f"SELECT COUNT(*) AS c FROM `{s}`")
                     src_cnt = cur.fetchone()["c"]
                 with tgt_conn.cursor() as cur:
                     cur.execute(f"SELECT COUNT(*) AS c FROM `{t}`")
@@ -1057,10 +1137,12 @@ class Migrator:
         WHERE o.disburse_time IS NOT NULL
           AND UNIX_TIMESTAMP(o.disburse_time) > 0
         """
+        extra, app_params = self._app_and("o.app_code")
+        sql = sql + extra
         cache: Dict[str, Dict[str, Any]] = {}
         conn = self.backend.connect(stream=True, retries=self.mysql_retries)
         try:
-            for r in self.stream(conn, sql):
+            for r in self.stream(conn, sql, app_params):
                 ono = str(r.get("order_no") or "").strip()
                 if ono:
                     cache[ono] = r
@@ -1195,9 +1277,14 @@ class Migrator:
                 if m:
                     pairs.append((VtClient.VT_MOBILE, m))
         log("preload repayment_plan phones for VT ...")
+        phone_where, phone_params = self._with_app_filter(
+            "WHERE phone IS NOT NULL AND TRIM(phone) <> ''",
+            "app_id",
+        )
         phone_rows = self.fetch_all(
             self.src,
-            "SELECT DISTINCT phone FROM repayment_plan WHERE phone IS NOT NULL AND TRIM(phone) <> ''",
+            f"SELECT DISTINCT phone FROM repayment_plan {phone_where}",
+            phone_params,
         )
         for pr in phone_rows:
             m = to_vt_mobile(pr.get("phone"))
@@ -1517,6 +1604,11 @@ class Migrator:
         order_no = str(r.get("order_no") or "").strip()
         if not order_no:
             return None
+        app_id = to_int(r.get("app_id"))
+        if self.include_app_ids and app_id not in self.include_app_ids:
+            return None
+        if self.exclude_app_ids and app_id in self.exclude_app_ids:
+            return None
         bu = self._backend_user_bundle(order_no)
         user_id = bu.get("user_id")
         phone = r.get("phone")
@@ -1609,13 +1701,14 @@ class Migrator:
 
     def _migrate_cases_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
         log(f"cases w{wid} start id[{lo},{hi}]")
-        sql = self._cases_select_sql(where="WHERE p.id BETWEEN %s AND %s")
+        where, app_params = self._with_app_filter("WHERE p.id BETWEEN %s AND %s", "p.app_id")
+        sql = self._cases_select_sql(where=where)
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
         scanned = 0
         try:
-            for r in self.stream(conn, sql, (lo, hi)):
+            for r in self.stream(conn, sql, (lo, hi) + app_params):
                 scanned += 1
                 if scanned == 1 or scanned % 50 == 0:
                     with self._progress_lock:
@@ -1650,7 +1743,8 @@ class Migrator:
         t0 = time.time()
         if self.args.limit:
             # limit 场景：单连接扫 + 线程池并行 enrich，再分批写
-            sql = self._cases_select_sql() + f" LIMIT {int(self.args.limit)}"
+            where, app_params = self._with_app_filter("", "p.app_id")
+            sql = self._cases_select_sql(where=where) + f" LIMIT {int(self.args.limit)}"
             log(f"migrate cases: limit={self.args.limit} workers={self.workers}")
             self.target_columns("cases")
             self.target_pks("cases")
@@ -1660,7 +1754,7 @@ class Migrator:
             scanned = 0
             try:
                 with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                    for r in self.stream(conn, sql):
+                    for r in self.stream(conn, sql, app_params):
                         raw_buf.append(r)
                         scanned += 1
                         if len(raw_buf) < max(self.args.batch, self.workers * 20):
@@ -1750,14 +1844,15 @@ class Migrator:
         LEFT JOIN collection_staff s1 ON s1.staff_code = l.initial_collector_id
         LEFT JOIN collection_staff s2 ON s2.staff_code = l.current_collector_id
         WHERE l.id BETWEEN %s AND %s
-        ORDER BY l.id
         """
+        extra, app_params = self._app_and("p.app_id")
+        sql = sql + extra + "\n        ORDER BY l.id\n        "
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
         scanned = 0
         try:
-            for r in self.stream(conn, sql, (lo, hi)):
+            for r in self.stream(conn, sql, (lo, hi) + app_params):
                 scanned += 1
                 if scanned == 1 or scanned % 200 == 0:
                     with self._progress_lock:
@@ -1787,7 +1882,8 @@ class Migrator:
         log("migrate dispatch")
         t0 = time.time()
         if self.args.limit:
-            sql = """
+            extra, app_params = self._app_and("p.app_id")
+            sql = f"""
             SELECT
               l.*,
               p.repayment_plan_order_no,
@@ -1798,13 +1894,15 @@ class Migrator:
             LEFT JOIN repayment_plan p ON p.id = l.repayment_plan_id
             LEFT JOIN collection_staff s1 ON s1.staff_code = l.initial_collector_id
             LEFT JOIN collection_staff s2 ON s2.staff_code = l.current_collector_id
+            WHERE 1=1{extra}
             ORDER BY l.id
-            """ + f" LIMIT {int(self.args.limit)}"
+            LIMIT {int(self.args.limit)}
+            """
             conn = self.src.connect(stream=True, retries=self.mysql_retries)
             batch: List[Dict[str, Any]] = []
             total = 0
             try:
-                for r in self.stream(conn, sql):
+                for r in self.stream(conn, sql, app_params):
                     batch.append(self._build_dispatch_row(r))
                     if len(batch) >= self.args.batch:
                         n, _ = self.upsert("dispatch_logs", batch)
@@ -1866,6 +1964,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="MySQL 断连(2013/2006/2003)重试次数，默认 5",
     )
     p.add_argument("--vt-base-url", default=env_first("VT_BASE_URL", default=DEFAULT_VT_URL) or DEFAULT_VT_URL)
+    p.add_argument(
+        "--app-ids",
+        default="",
+        help="只迁这些 app_id，逗号分隔；空=不限制（仍会应用 --exclude-app-ids）",
+    )
+    p.add_argument(
+        "--exclude-app-ids",
+        default=",".join(str(x) for x in DEFAULT_EXCLUDE_APP_IDS),
+        help="排除的 app_id，逗号分隔；默认 569。传空字符串表示不排除",
+    )
     return p
 
 
