@@ -9,12 +9,13 @@
 4. 支持 dry-run / verify / limit / batch / app_id 白名单与排除
 5. MySQL 断连（2013/2006/2003）自动重试
 6. 默认排除 app 569（监控包）；companys/members 无 app_id，仍全量迁
+7. cases 支持 --level-codes 按源 collection_level.name 白名单过滤（如 T-1..T-6）
 
 说明：
 - 需求来自 README_migrate_collection.md 与飞书文档
 - 当前主源库为 nigeria_admin；用户补充画像来自 nigeria_backend
 - cases/dispatch 的 case_no = repayment_plan.repayment_plan_order_no
-- level_code：T0->D0，T-N->S-N，TN->SN
+- level_code：T0->D0，T-N->S-N，TN->SN；--level-codes 按映射前源等级名过滤
 - product_id：与 02_sync_user_product_incr.sql 同一套 P*/L* 映射
 - cases 迁移前预加载已放款 user_order + 对应用户姓名/画像/紧急联系人到内存
 - VT：先查 backend.vt_token_cache(status=1)，未命中再批量 /v2t
@@ -212,6 +213,24 @@ def parse_int_ids(raw: Optional[str]) -> List[int]:
         if n not in seen:
             seen.add(n)
             out.append(n)
+    return out
+
+
+def parse_level_codes(raw: Optional[str]) -> List[str]:
+    """解析 --level-codes：逗号分隔，去空白并转大写，如 T-1,T-2。空=不限制。"""
+    if raw is None:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    out: List[str] = []
+    seen = set()
+    for part in s.split(","):
+        code = part.strip().upper()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
     return out
 
 
@@ -711,6 +730,9 @@ class Migrator:
             self.include_app_ids = [
                 x for x in self.include_app_ids if x not in set(self.exclude_app_ids)
             ]
+        # 源 collection_level.name 白名单（映射前，如 T-1）；仅 cases 生效
+        self.include_level_codes = parse_level_codes(getattr(args, "level_codes", None))
+        self._include_level_set = set(self.include_level_codes)
 
     def _src_cfg(self) -> DbConfig:
         return DbConfig(
@@ -898,10 +920,29 @@ class Migrator:
             return "WHERE " + extra[5:], params
         return where + extra, params
 
+    def _level_and(self, name_col: str = "cl.name") -> Tuple[str, Tuple[Any, ...]]:
+        """按源催收等级名过滤，形如 AND UPPER(TRIM(cl.name)) IN (%s,...)。"""
+        if not self.include_level_codes:
+            return "", ()
+        ph = ",".join(["%s"] * len(self.include_level_codes))
+        return f" AND UPPER(TRIM({name_col})) IN ({ph})", tuple(self.include_level_codes)
+
+    def _with_cases_filter(self, where: str, app_col: str = "p.app_id") -> Tuple[str, Tuple[Any, ...]]:
+        """cases 查询：app_id + 催收等级（源 cl.name）组合过滤。"""
+        where2, params = self._with_app_filter(where, app_col)
+        level_extra, level_params = self._level_and("cl.name")
+        if not level_extra:
+            return where2, params
+        if not (where2 or "").strip():
+            return "WHERE " + level_extra[5:], params + level_params
+        return where2 + level_extra, params + level_params
+
     def _log_app_filter(self) -> None:
         inc = ",".join(str(x) for x in self.include_app_ids) or "(all)"
         exc = ",".join(str(x) for x in self.exclude_app_ids) or "(none)"
+        levels = ",".join(self.include_level_codes) or "(all)"
         log(f"app filter: include={inc} exclude={exc} (companys/members 不受限)")
+        log(f"level filter: include={levels} (仅 cases；空=不限制)")
 
     def run(self) -> None:
         self._log_app_filter()
@@ -957,7 +998,22 @@ class Migrator:
                 s = mappings[key]
                 t = target_map[key]
                 with src_conn.cursor() as cur:
-                    if key in ("cases", "traces") and (self.include_app_ids or self.exclude_app_ids):
+                    if key == "cases" and (
+                        self.include_app_ids
+                        or self.exclude_app_ids
+                        or self.include_level_codes
+                    ):
+                        where, params = self._with_cases_filter("WHERE 1=1", "p.app_id")
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS c
+                            FROM repayment_plan p
+                            LEFT JOIN collection_level cl ON cl.id = p.collection_level_id
+                            {where}
+                            """,
+                            params,
+                        )
+                    elif key == "traces" and (self.include_app_ids or self.exclude_app_ids):
                         extra, params = self._app_and("app_id")
                         cur.execute(
                             f"SELECT COUNT(*) AS c FROM `{s}` WHERE 1=1{extra}",
@@ -1609,6 +1665,10 @@ class Migrator:
             return None
         if self.exclude_app_ids and app_id in self.exclude_app_ids:
             return None
+        if self._include_level_set:
+            raw_level = ("" if r.get("level_name") is None else str(r.get("level_name"))).strip().upper()
+            if raw_level not in self._include_level_set:
+                return None
         bu = self._backend_user_bundle(order_no)
         user_id = bu.get("user_id")
         phone = r.get("phone")
@@ -1701,14 +1761,14 @@ class Migrator:
 
     def _migrate_cases_shard(self, lo: int, hi: int, wid: int, t0: float) -> Tuple[int, int]:
         log(f"cases w{wid} start id[{lo},{hi}]")
-        where, app_params = self._with_app_filter("WHERE p.id BETWEEN %s AND %s", "p.app_id")
+        where, filter_params = self._with_cases_filter("WHERE p.id BETWEEN %s AND %s", "p.app_id")
         sql = self._cases_select_sql(where=where)
         conn = self.src.connect(stream=True, retries=self.mysql_retries)
         batch: List[Dict[str, Any]] = []
         total = 0
         scanned = 0
         try:
-            for r in self.stream(conn, sql, (lo, hi) + app_params):
+            for r in self.stream(conn, sql, (lo, hi) + filter_params):
                 scanned += 1
                 if scanned == 1 or scanned % 50 == 0:
                     with self._progress_lock:
@@ -1743,7 +1803,7 @@ class Migrator:
         t0 = time.time()
         if self.args.limit:
             # limit 场景：单连接扫 + 线程池并行 enrich，再分批写
-            where, app_params = self._with_app_filter("", "p.app_id")
+            where, filter_params = self._with_cases_filter("", "p.app_id")
             sql = self._cases_select_sql(where=where) + f" LIMIT {int(self.args.limit)}"
             log(f"migrate cases: limit={self.args.limit} workers={self.workers}")
             self.target_columns("cases")
@@ -1754,7 +1814,7 @@ class Migrator:
             scanned = 0
             try:
                 with ThreadPoolExecutor(max_workers=self.workers) as pool:
-                    for r in self.stream(conn, sql, app_params):
+                    for r in self.stream(conn, sql, filter_params):
                         raw_buf.append(r)
                         scanned += 1
                         if len(raw_buf) < max(self.args.batch, self.workers * 20):
@@ -1973,6 +2033,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude-app-ids",
         default=",".join(str(x) for x in DEFAULT_EXCLUDE_APP_IDS),
         help="排除的 app_id，逗号分隔；默认 569。传空字符串表示不排除",
+    )
+    p.add_argument(
+        "--level-codes",
+        default="",
+        help=(
+            "只迁这些催收等级（源 collection_level.name，映射前），逗号分隔；"
+            "空=不限制。例: T-1,T-2,T-3,T-4,T-5,T-6（仅 cases）"
+        ),
     )
     return p
 
