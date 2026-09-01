@@ -16,9 +16,9 @@ Usage:
   python3 scripts/apply_order_paid_status_fixes.py \\
     --env ./.env --list-file /tmp/order_list.txt --apply
 
-  # 3) 仅处理 report 里出现过的单号
+  # 4) 已有 plan，按主键 apply（旧 plan 无 PK 会在 apply 前自动补查）
   python3 scripts/apply_order_paid_status_fixes.py \\
-    --env ./.env --report /tmp/order_compare_report.jsonl --apply --dry-run
+    --env ./.env --apply-from-plan --plan-file /tmp/order_paid_status_fix_plan.jsonl --apply
 """
 import argparse
 import importlib.util
@@ -123,14 +123,16 @@ def fetch_target_fixable(cmp, conn, application_nos: Sequence[str]) -> Tuple[Dic
         ph = ",".join(["%s"] * len(batch))
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT application_no, status, last_paid_time, paid_off_time "
+                "SELECT application_no, mobile, group_user_id, sn, "
+                "status, last_paid_time, paid_off_time "
                 "FROM application WHERE application_no IN (" + ph + ")",
                 batch,
             )
             for row in cur.fetchall():
                 apps[str(row["application_no"])] = row
             cur.execute(
-                "SELECT application_no, status, paid_amount, paid_time, paid_off_date "
+                "SELECT application_no, period, roll_sequence, "
+                "status, paid_amount, paid_time, paid_off_date "
                 "FROM loan WHERE application_no IN (" + ph + ") "
                 "AND period = 1 AND roll_sequence = 0",
                 batch,
@@ -140,8 +142,64 @@ def fetch_target_fixable(cmp, conn, application_nos: Sequence[str]) -> Tuple[Dic
     return apps, loans
 
 
-def apply_application(conn, application_no: str, new_vals: Dict[str, Any]) -> int:
-    if not new_vals:
+def application_pk_from_row(row: dict) -> Optional[Dict[str, Any]]:
+    mobile = row.get("mobile")
+    group_user_id = row.get("group_user_id")
+    sn = row.get("sn")
+    if mobile is None or group_user_id is None or sn is None:
+        return None
+    return {
+        "mobile": str(mobile),
+        "group_user_id": int(group_user_id),
+        "sn": str(sn),
+    }
+
+
+def loan_pk_from_row(row: dict, application_no: str) -> Dict[str, Any]:
+    return {
+        "application_no": str(row.get("application_no") or application_no),
+        "period": int(row.get("period") or 1),
+        "roll_sequence": int(row.get("roll_sequence") or 0),
+    }
+
+
+def enrich_plan_pks(cmp, conn, plan: List[dict]) -> Dict[str, int]:
+    """已有 plan 缺主键时，按 application_no 回查目标库补 PK。"""
+    need: List[str] = []
+    for item in plan:
+        if item.get("apply_application") and not item.get("application_pk"):
+            need.append(str(item["application_no"]))
+        if item.get("apply_loan") and not item.get("loan_pk"):
+            need.append(str(item["application_no"]))
+    need = sorted(set(need))
+    if not need:
+        return {"pk_lookup": 0}
+    apps, loans = fetch_target_fixable(cmp, conn, need)
+    stats = {"pk_lookup": len(need), "app_pk_missing": 0, "loan_pk_missing": 0}
+    for item in plan:
+        app_no = str(item["application_no"])
+        if item.get("apply_application") and not item.get("application_pk"):
+            pk = application_pk_from_row(apps.get(app_no) or {})
+            if pk:
+                item["application_pk"] = pk
+            else:
+                stats["app_pk_missing"] += 1
+        if item.get("apply_loan") and not item.get("loan_pk"):
+            row = loans.get(app_no) or {}
+            if row:
+                item["loan_pk"] = loan_pk_from_row(row, app_no)
+            else:
+                item["loan_pk"] = {
+                    "application_no": app_no,
+                    "period": 1,
+                    "roll_sequence": 0,
+                }
+                stats["loan_pk_missing"] += 1
+    return stats
+
+
+def apply_application(conn, pk: Dict[str, Any], new_vals: Dict[str, Any]) -> int:
+    if not new_vals or not pk:
         return 0
     sets = []
     params: List[Any] = []
@@ -152,15 +210,18 @@ def apply_application(conn, application_no: str, new_vals: Dict[str, Any]) -> in
         params.append(new_vals[field])
     if not sets:
         return 0
-    sql = "UPDATE application SET " + ", ".join(sets) + " WHERE application_no = %s"
-    params.append(application_no)
+    sql = (
+        "UPDATE application SET " + ", ".join(sets)
+        + " WHERE mobile = %s AND group_user_id = %s AND sn = %s"
+    )
+    params.extend([pk["mobile"], pk["group_user_id"], pk["sn"]])
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return int(cur.rowcount or 0)
 
 
-def apply_loan(conn, application_no: str, new_vals: Dict[str, Any]) -> int:
-    if not new_vals:
+def apply_loan(conn, pk: Dict[str, Any], new_vals: Dict[str, Any]) -> int:
+    if not new_vals or not pk:
         return 0
     sets = []
     params: List[Any] = []
@@ -173,9 +234,9 @@ def apply_loan(conn, application_no: str, new_vals: Dict[str, Any]) -> int:
         return 0
     sql = (
         "UPDATE loan SET " + ", ".join(sets)
-        + " WHERE application_no = %s AND period = 1 AND roll_sequence = 0"
+        + " WHERE application_no = %s AND period = %s AND roll_sequence = %s"
     )
-    params.append(application_no)
+    params.extend([pk["application_no"], pk["period"], pk["roll_sequence"]])
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return int(cur.rowcount or 0)
@@ -242,15 +303,26 @@ def build_plan(
         loan_changes = diff_fixable(exp_loan, act_loan, LOAN_FIX_FIELDS)
         if not app_changes and not loan_changes:
             continue
+        app_pk = application_pk_from_row(act_app)
+        loan_pk = loan_pk_from_row(act_loan, app_no) if act_loan else {
+            "application_no": app_no,
+            "period": 1,
+            "roll_sequence": 0,
+        }
         item = {
             "application_no": app_no,
             "pipeline": pipe,
+            "application_pk": app_pk,
+            "loan_pk": loan_pk,
             "application_changes": {k: {"old": v[0], "new": v[1]} for k, v in app_changes.items()},
             "loan_changes": {k: {"old": v[0], "new": v[1]} for k, v in loan_changes.items()},
             "apply_application": {k: v[1] for k, v in app_changes.items()},
             "apply_loan": {k: v[1] for k, v in loan_changes.items()},
         }
         plan.append(item)
+        if app_changes and not app_pk:
+            stats.setdefault("app_pk_missing", 0)
+            stats["app_pk_missing"] += 1
         if app_changes:
             stats["app_need_fix"] += 1
             stats["app_fields"] += len(app_changes)
@@ -261,12 +333,18 @@ def build_plan(
 
 
 def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, int]:
-    stats = {"app_updated": 0, "loan_updated": 0, "app_rows": 0, "loan_rows": 0}
+    stats = {
+        "app_updated": 0,
+        "loan_updated": 0,
+        "app_rows": 0,
+        "loan_rows": 0,
+        "app_pk_skip": 0,
+    }
     if dry_run:
         for item in plan[:20]:
             print(
-                "dry-run %(application_no)s app=%(application_changes)s loan=%(loan_changes)s"
-                % item,
+                "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
+                "app=%(application_changes)s loan=%(loan_changes)s" % item,
                 flush=True,
             )
         if len(plan) > 20:
@@ -284,15 +362,25 @@ def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, 
     )
     conn.autocommit(False)
     try:
+        pk_stats = enrich_plan_pks(cmp_mod, conn, plan)
+        stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup")})
         for item in plan:
-            app_no = item["application_no"]
             if item.get("apply_application"):
-                n = apply_application(conn, app_no, item["apply_application"])
+                pk = item.get("application_pk")
+                if not pk:
+                    stats["app_pk_skip"] += 1
+                    continue
+                n = apply_application(conn, pk, item["apply_application"])
                 stats["app_rows"] += n
                 if n:
                     stats["app_updated"] += 1
             if item.get("apply_loan"):
-                n = apply_loan(conn, app_no, item["apply_loan"])
+                pk = item.get("loan_pk") or {
+                    "application_no": item["application_no"],
+                    "period": 1,
+                    "roll_sequence": 0,
+                }
+                n = apply_loan(conn, pk, item["apply_loan"])
                 stats["loan_rows"] += n
                 if n:
                     stats["loan_updated"] += 1
@@ -305,6 +393,14 @@ def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, 
     return stats
 
 
+def load_plan(plan_path: Path) -> List[dict]:
+    out: List[dict] = []
+    for line in plan_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fix only status/paid fields on application & loan")
     p.add_argument("--env", default=str(HERE.parent / ".env"))
@@ -312,6 +408,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--sanitize", help="write fixable-only report jsonl")
     p.add_argument("--list-file", help="application_no list (one per line)")
     p.add_argument("--plan-file", default="/tmp/order_paid_status_fix_plan.jsonl")
+    p.add_argument("--apply-from-plan", action="store_true",
+                   help="跳过 build-plan，直接加载 --plan-file 并 apply")
     p.add_argument("--apply", action="store_true", help="apply updates to target")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
@@ -332,18 +430,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not args.apply and not args.dry_run and not args.list_file:
             return 0
 
+    if args.apply_from_plan and not args.apply and not args.dry_run:
+        print("use --apply or --dry-run with --apply-from-plan", flush=True)
+        return 0
+
     application_nos: List[str] = []
-    if args.list_file:
-        application_nos.extend(
-            cmp.read_application_nos(argparse.Namespace(
-                stdin=False, list_file=args.list_file, application_no=[],
-            ))
-        )
-    elif args.report:
-        application_nos.extend(application_nos_from_report(Path(args.report)))
-    if not application_nos:
-        print("need --list-file or --report", file=sys.stderr)
-        return 2
+    if not args.apply_from_plan:
+        if args.list_file:
+            application_nos.extend(
+                cmp.read_application_nos(argparse.Namespace(
+                    stdin=False, list_file=args.list_file, application_no=[],
+                ))
+            )
+        elif args.report:
+            application_nos.extend(application_nos_from_report(Path(args.report)))
+        if not application_nos:
+            print("need --list-file or --report (or --apply-from-plan)", file=sys.stderr)
+            return 2
 
     env_path = Path(args.env).resolve()
     if not env_path.is_file():
@@ -353,12 +456,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cmp.print_connection_plan(cfg)
 
     t0 = time.time()
-    plan, stats = build_plan(cmp, application_nos, cfg)
-    plan_path = Path(args.plan_file)
-    with plan_path.open("w", encoding="utf-8") as fp:
-        for item in plan:
-            fp.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
-    print("plan rows=%s stats=%s file=%s" % (len(plan), stats, plan_path), flush=True)
+    if args.apply_from_plan:
+        plan_path = Path(args.plan_file)
+        if not plan_path.is_file():
+            print("missing plan: %s" % plan_path, file=sys.stderr)
+            return 2
+        plan = load_plan(plan_path)
+        print("loaded plan rows=%s file=%s" % (len(plan), plan_path), flush=True)
+    else:
+        plan, stats = build_plan(cmp, application_nos, cfg)
+        plan_path = Path(args.plan_file)
+        with plan_path.open("w", encoding="utf-8") as fp:
+            for item in plan:
+                fp.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
+        print("plan rows=%s stats=%s file=%s" % (len(plan), stats, plan_path), flush=True)
 
     if args.dry_run:
         apply_stats = run_apply(cmp, cfg, plan, dry_run=True)
