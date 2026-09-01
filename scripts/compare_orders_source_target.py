@@ -437,53 +437,64 @@ SELECT
     disburseTime,
     dueDate
 FROM application
-WHERE CONCAT(CAST(appId AS CHAR), '|', applicationNo) IN ({placeholders})
+WHERE appId = %s
+  AND applicationNo IN ({placeholders})
   AND disburseTime <> 0
 """
 
 
+def _lm_row_to_entry(row: dict) -> Tuple[str, dict]:
+    app_id = to_int(row.get("appId"))
+    sn = str(row.get("applicationNo"))
+    application_no = "ng{0:04d}-{1}".format(app_id, sn)
+    src_status = to_int(row.get("status"))
+    amount = to_int(row.get("amount"))
+    disburse = to_int(row.get("disburseAmount"))
+    admin_fee = max(amount - disburse, 0)
+    paid_amount = to_int(row.get("paidAmount")) if src_status in (17, 18, 19) else 0
+    paid_time = to_int(row.get("paidTime")) * 1000 if to_int(row.get("paidTime")) > 0 else None
+    principal = max(disburse, 0)
+    total_amount = max(to_int(row.get("repayment")), 0)
+    return application_no, {
+        "pipeline": "lm",
+        "application_no": application_no,
+        "app_id": app_id,
+        "sn": sn,
+        "source_status": src_status,
+        "expected_application": {
+            "status": map_lm_status(src_status),
+            "principal": principal,
+            "total_amount": total_amount,
+            "disbursed_amount": principal,
+            "last_paid_time": paid_time,
+        },
+        "expected_loan": {
+            "status": map_lm_status(src_status),
+            "principal": principal,
+            "admin_fee": admin_fee,
+            "total_amount": total_amount,
+            "paid_amount": paid_amount,
+            "paid_time": paid_time,
+        },
+    }
+
+
 def fetch_lm_source(conn, keys: Sequence[Tuple[int, str]]) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
-    for batch in chunks(list(keys), 200):
-        ph = ",".join(["%s"] * len(batch))
-        sql = LM_SOURCE_SQL.format(placeholders=ph)
-        params = ["{0}|{1}".format(app_id, sn) for app_id, sn in batch]
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            for row in cur.fetchall():
-                app_id = to_int(row.get("appId"))
-                sn = str(row.get("applicationNo"))
-                application_no = "ng{0:04d}-{1}".format(app_id, sn)
-                src_status = to_int(row.get("status"))
-                amount = to_int(row.get("amount"))
-                disburse = to_int(row.get("disburseAmount"))
-                admin_fee = max(amount - disburse, 0)
-                paid_amount = to_int(row.get("paidAmount")) if src_status in (17, 18, 19) else 0
-                paid_time = to_int(row.get("paidTime")) * 1000 if to_int(row.get("paidTime")) > 0 else None
-                principal = max(disburse, 0)
-                total_amount = max(to_int(row.get("repayment")), 0)
-                out[application_no] = {
-                    "pipeline": "lm",
-                    "application_no": application_no,
-                    "app_id": app_id,
-                    "sn": sn,
-                    "source_status": src_status,
-                    "expected_application": {
-                        "status": map_lm_status(src_status),
-                        "principal": principal,
-                        "total_amount": total_amount,
-                        "disbursed_amount": principal,
-                        "last_paid_time": paid_time,
-                    },
-                    "expected_loan": {
-                        "status": map_lm_status(src_status),
-                        "principal": principal,
-                        "admin_fee": admin_fee,
-                        "total_amount": total_amount,
-                        "paid_amount": paid_amount,
-                        "paid_time": paid_time,
-                    },
-                }
+    by_app: Dict[int, List[str]] = {}
+    for app_id, sn in keys:
+        by_app.setdefault(int(app_id), []).append(str(sn))
+
+    with conn.cursor() as cur:
+        for app_id, sns in by_app.items():
+            uniq_sns = sorted(set(sns))
+            for batch in chunks(uniq_sns, 200):
+                ph = ",".join(["%s"] * len(batch))
+                sql = LM_SOURCE_SQL.format(placeholders=ph)
+                cur.execute(sql, [app_id] + batch)
+                for row in cur.fetchall():
+                    application_no, entry = _lm_row_to_entry(row)
+                    out[application_no] = entry
     return out
 
 
