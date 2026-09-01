@@ -8,6 +8,7 @@
 --   paid_amount: status IN (17,18,19) → paidAmount，否则 0
 --   paid_time: paidTime(秒)*1000 → 目标毫秒
 --   status: 8→9 | 11,13,14,16→20 | 15→23 | 17,18,19→27 | 其他→20
+--   admin_fee = GREATEST(amount - disburseAmount, 0)
 --   roll_fee=0（原 service_fee）；interest/penalty_amount/reduction_amount/roll_paid_amount=0
 
 -- ========== 0. 预览 10 条（列名与目标 loan 一致）==========
@@ -20,7 +21,7 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000')                                 
        DATE(FROM_UNIXTIME(a.dueDate))                                             AS due_date_final,
        CAST(GREATEST(COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED)                            AS principal,
        CAST(0 AS UNSIGNED)                                                        AS interest,
-       CAST(GREATEST(ROUND(COALESCE(a.amount, 0) * 0.35), 0) AS UNSIGNED)                    AS admin_fee,
+       CAST(GREATEST(COALESCE(a.amount, 0) - COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED) AS admin_fee,
        CAST(0 AS SIGNED)                                                          AS roll_fee,
        CAST(0 AS UNSIGNED)                                                        AS penalty_amount,
        CAST(0 AS UNSIGNED)                                                        AS reduction_amount,
@@ -102,7 +103,7 @@ SELECT CONCAT('ng-', a.applicationNo, '-01000'),
        DATE(FROM_UNIXTIME(a.dueDate)),
        CAST(GREATEST(COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED),
        0,
-       CAST(GREATEST(ROUND(COALESCE(a.amount, 0) * 0.35), 0) AS UNSIGNED),
+       CAST(GREATEST(COALESCE(a.amount, 0) - COALESCE(a.disburseAmount, 0), 0) AS UNSIGNED),
        0,
        0,
        0,

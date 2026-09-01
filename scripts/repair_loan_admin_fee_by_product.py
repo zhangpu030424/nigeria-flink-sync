@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""按 product_id 批量修正 loan.admin_fee。
+"""按 product_id 批量修正目标库 loan.admin_fee。
 
-公式（与手工 SQL 一致）：
-  new_admin_fee = ROUND(admin_fee / 0.35 - principal, 0)
-
-只更新 new_admin_fee >= 0 且与当前 admin_fee 不同的行。
-按主键 (application_no, period, roll_sequence) 分批 UPDATE，避免大 JOIN 锁超时。
+流程：
+  1. 目标库 application 按 product_id 查出 application_no
+  2. 目标库 loan 按 application_no 载入内存
+  3. application_no 去前缀得 market applicationNo，分批查 ng_loan_market
+  4. 内存计算修复计划：admin_fee = GREATEST(amount - disburseAmount, 0)
+  5. 多线程分批 UPDATE 目标库 loan
 
 Usage:
-  # 先看有多少行、抽样
   python3 scripts/repair_loan_admin_fee_by_product.py \\
-    --env .env --scan
+    --env ./ng_migration.env --scan
 
-  # 生成 plan
   python3 scripts/repair_loan_admin_fee_by_product.py \\
-    --env .env --build-plan \\
+    --env ./ng_migration.env --build-plan \\
     --plan-file /tmp/fix_loan_admin_fee_plan.jsonl
 
-  # 执行（165 上可用 ng_migration.env）
   python3 scripts/repair_loan_admin_fee_by_product.py \\
     --env ./ng_migration.env --apply \\
     --plan-file /tmp/fix_loan_admin_fee_plan.jsonl \\
-    --batch-size 100
+    --batch-size 100 --apply-workers 4
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -46,22 +47,8 @@ PRODUCT_IDS: Tuple[int, ...] = (
     765, 766, 767, 1012, 1013, 1014, 1015, 1016, 1017, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032,
 )
 
-SELECT_SQL = """
-SELECT
-    l.application_no,
-    l.period,
-    l.roll_sequence,
-    l.loan_no,
-    l.admin_fee AS old_admin_fee,
-    l.principal,
-    CAST(ROUND(l.admin_fee / 0.35 - l.principal, 0) AS SIGNED) AS new_admin_fee,
-    a.product_id
-FROM loan l
-INNER JOIN application a ON l.application_no = a.application_no
-WHERE CAST(a.product_id AS UNSIGNED) IN ({product_ph})
-  AND CAST(ROUND(l.admin_fee / 0.35 - l.principal, 0) AS SIGNED) >= 0
-  AND l.admin_fee <> CAST(ROUND(l.admin_fee / 0.35 - l.principal, 0) AS SIGNED)
-"""
+APP_NO_RE = re.compile(r"^ng(\d+)-(.+)$", re.IGNORECASE)
+FETCH_CHUNK = 500
 
 
 def load_env(path: Path) -> Dict[str, str]:
@@ -77,12 +64,29 @@ def load_env(path: Path) -> Dict[str, str]:
     return cfg
 
 
-def connect_target(cfg: Dict[str, str], for_apply: bool = False):
-    host = cfg.get("TARGET_MYSQL_HOST") or cfg.get("TARGET_HOST") or "127.0.0.1"
-    port = int(cfg.get("TARGET_MYSQL_PORT") or cfg.get("TARGET_PORT") or 3306)
-    user = cfg.get("TARGET_MYSQL_USER") or cfg.get("TARGET_USER") or "root"
-    password = cfg.get("TARGET_MYSQL_PASSWORD") or cfg.get("TARGET_PASSWORD") or ""
-    database = cfg.get("TARGET_MYSQL_DATABASE") or cfg.get("TARGET_DB") or "ng"
+def connect_mysql(
+    cfg: Dict[str, str],
+    *,
+    host_key: Sequence[str],
+    port_key: Sequence[str],
+    user_key: Sequence[str],
+    password_key: Sequence[str],
+    database_key: Sequence[str],
+    default_db: str,
+    for_apply: bool = False,
+):
+    def _pick(keys: Sequence[str], default: str = "") -> str:
+        for key in keys:
+            val = cfg.get(key)
+            if val not in (None, ""):
+                return val
+        return default
+
+    host = _pick(host_key, "127.0.0.1")
+    port = int(_pick(port_key, "3306"))
+    user = _pick(user_key, "root")
+    password = _pick(password_key, "")
+    database = _pick(database_key, default_db)
     timeout = 120 if for_apply else 3600
     return pymysql.connect(
         host=host,
@@ -99,24 +103,218 @@ def connect_target(cfg: Dict[str, str], for_apply: bool = False):
     )
 
 
-def compute_new_admin_fee(admin_fee: Any, principal: Any) -> int:
-    try:
-        af = float(admin_fee or 0)
-    except (TypeError, ValueError):
-        af = 0.0
-    try:
-        pr = float(principal or 0)
-    except (TypeError, ValueError):
-        pr = 0.0
-    return int(round(af / 0.35 - pr, 0))
+def connect_target(cfg: Dict[str, str], for_apply: bool = False):
+    return connect_mysql(
+        cfg,
+        host_key=("TARGET_MYSQL_HOST", "TARGET_HOST"),
+        port_key=("TARGET_MYSQL_PORT", "TARGET_PORT"),
+        user_key=("TARGET_MYSQL_USER", "TARGET_USER"),
+        password_key=("TARGET_MYSQL_PASSWORD", "TARGET_PASSWORD"),
+        database_key=("TARGET_MYSQL_DATABASE", "TARGET_DB"),
+        default_db="ng",
+        for_apply=for_apply,
+    )
 
 
-def fetch_rows(conn, product_ids: Sequence[int]) -> List[dict]:
+def connect_source(cfg: Dict[str, str]):
+    return connect_mysql(
+        cfg,
+        host_key=("LM_MYSQL_HOST", "SOURCE_MYSQL_HOST"),
+        port_key=("LM_MYSQL_PORT", "SOURCE_MYSQL_PORT"),
+        user_key=("LM_MYSQL_USER", "SOURCE_MYSQL_USER"),
+        password_key=("LM_MYSQL_PASSWORD", "SOURCE_MYSQL_PASSWORD"),
+        database_key=("LM_MYSQL_DATABASE",),
+        default_db="ng_loan_market",
+        for_apply=False,
+    )
+
+
+def chunks(items: Sequence[Any], size: int) -> Iterable[List[Any]]:
+    n = max(1, size)
+    for i in range(0, len(items), n):
+        yield list(items[i:i + n])
+
+
+def parse_application_no(application_no: str) -> Tuple[int, str]:
+    """ng0502-169617902712032877 -> (502, 169617902712032877)"""
+    m = APP_NO_RE.match(str(application_no or "").strip())
+    if not m:
+        raise ValueError("bad application_no: %r" % application_no)
+    return int(m.group(1)), m.group(2)
+
+
+def market_application_no(application_no: str) -> str:
+    return parse_application_no(application_no)[1]
+
+
+def fetch_applications_by_product(conn, product_ids: Sequence[int]) -> List[dict]:
     ph = ",".join(["%s"] * len(product_ids))
-    sql = SELECT_SQL.format(product_ph=ph)
+    sql = """
+    SELECT
+        application_no,
+        CAST(product_id AS UNSIGNED) AS product_id,
+        CAST(app_id AS UNSIGNED) AS app_id
+    FROM application
+    WHERE CAST(product_id AS UNSIGNED) IN ({product_ph})
+    """.format(product_ph=ph)
     with conn.cursor() as cur:
         cur.execute(sql, list(product_ids))
         return list(cur.fetchall())
+
+
+def fetch_loans_by_application_nos(
+    conn,
+    application_nos: Sequence[str],
+    chunk_size: int = FETCH_CHUNK,
+) -> List[dict]:
+    if not application_nos:
+        return []
+    rows: List[dict] = []
+    sql_tpl = """
+    SELECT
+        l.application_no,
+        l.period,
+        l.roll_sequence,
+        l.loan_no,
+        l.admin_fee AS old_admin_fee,
+        l.principal
+    FROM loan l
+    WHERE l.application_no IN ({ph})
+    """
+    with conn.cursor() as cur:
+        for part in chunks(list(application_nos), chunk_size):
+            ph = ",".join(["%s"] * len(part))
+            cur.execute(sql_tpl.format(ph=ph), part)
+            rows.extend(cur.fetchall())
+    return rows
+
+
+def fetch_source_by_market_nos(
+    conn,
+    market_nos: Sequence[str],
+    chunk_size: int = FETCH_CHUNK,
+) -> Dict[Tuple[int, str], dict]:
+    """按 market applicationNo 分批查源库，key=(appId, applicationNo)。"""
+    out: Dict[Tuple[int, str], dict] = {}
+    if not market_nos:
+        return out
+    uniq = sorted(set(str(x) for x in market_nos if x))
+    sql_tpl = """
+    SELECT
+        CAST(a.appId AS UNSIGNED) AS app_id,
+        a.applicationNo AS market_no,
+        CAST(a.productId AS UNSIGNED) AS product_id,
+        CAST(COALESCE(a.amount, 0) AS SIGNED) AS market_amount,
+        CAST(COALESCE(a.disburseAmount, 0) AS SIGNED) AS market_disburse_amount,
+        CAST(GREATEST(COALESCE(a.amount, 0) - COALESCE(a.disburseAmount, 0), 0) AS SIGNED) AS new_admin_fee
+    FROM application a
+    WHERE a.applicationNo IN ({ph})
+      AND a.disburseTime <> 0
+    """
+    with conn.cursor() as cur:
+        for part in chunks(uniq, chunk_size):
+            ph = ",".join(["%s"] * len(part))
+            cur.execute(sql_tpl.format(ph=ph), part)
+            for row in cur.fetchall():
+                key = (int(row["app_id"]), str(row["market_no"]))
+                out[key] = row
+    return out
+
+
+def build_plan(
+    applications: List[dict],
+    loans: List[dict],
+    source_by_key: Dict[Tuple[int, str], dict],
+) -> Tuple[List[dict], Dict[str, int]]:
+    app_by_no = {str(a["application_no"]): a for a in applications}
+    rows: List[dict] = []
+    stats = {
+        "applications": len(applications),
+        "target_loans": len(loans),
+        "source_rows": len(source_by_key),
+        "need_update": 0,
+        "already_ok": 0,
+        "no_source_match": 0,
+        "bad_application_no": 0,
+        "app_id_mismatch": 0,
+    }
+
+    for loan in loans:
+        app_no = str(loan["application_no"])
+        app_meta = app_by_no.get(app_no)
+        try:
+            parsed_app_id, market_no = parse_application_no(app_no)
+        except ValueError:
+            stats["bad_application_no"] += 1
+            continue
+
+        src = source_by_key.get((parsed_app_id, market_no))
+        if not src:
+            alt = source_by_key.get((int(app_meta["app_id"]), market_no)) if app_meta else None
+            if alt:
+                src = alt
+            else:
+                stats["no_source_match"] += 1
+                continue
+
+        if int(src["app_id"]) != parsed_app_id:
+            stats["app_id_mismatch"] += 1
+
+        old_fee = int(loan["old_admin_fee"] or 0)
+        new_fee = int(src["new_admin_fee"] or 0)
+        if old_fee == new_fee:
+            stats["already_ok"] += 1
+            continue
+
+        stats["need_update"] += 1
+        rows.append({
+            "application_no": app_no,
+            "market_no": market_no,
+            "period": int(loan["period"]),
+            "roll_sequence": int(loan["roll_sequence"]),
+            "loan_no": loan.get("loan_no"),
+            "product_id": int(
+                (app_meta or {}).get("product_id")
+                or src.get("product_id")
+                or parsed_app_id
+            ),
+            "old_admin_fee": old_fee,
+            "new_admin_fee": new_fee,
+            "principal": int(loan.get("principal") or 0),
+            "market_amount": int(src.get("market_amount") or 0),
+            "market_disburse_amount": int(src.get("market_disburse_amount") or 0),
+        })
+    stats["plan_rows"] = len(rows)
+    return rows, stats
+
+
+def load_and_build_plan(
+    source_conn,
+    target_conn,
+    product_ids: Sequence[int],
+    fetch_chunk: int,
+) -> Tuple[List[dict], Dict[str, int]]:
+    print("step1 load application by product_id ...", flush=True)
+    applications = fetch_applications_by_product(target_conn, product_ids)
+    app_nos = [str(a["application_no"]) for a in applications]
+    print(" applications=%s" % len(app_nos), flush=True)
+
+    print("step2 load target loans into memory ...", flush=True)
+    loans = fetch_loans_by_application_nos(target_conn, app_nos, chunk_size=fetch_chunk)
+    print(" loans=%s" % len(loans), flush=True)
+
+    print("step3 strip prefix -> market applicationNo, query source ...", flush=True)
+    market_nos: List[str] = []
+    for app_no in app_nos:
+        try:
+            market_nos.append(market_application_no(app_no))
+        except ValueError:
+            pass
+    source_by_key = fetch_source_by_market_nos(source_conn, market_nos, chunk_size=fetch_chunk)
+    print(" source_hits=%s market_nos=%s" % (len(source_by_key), len(set(market_nos))), flush=True)
+
+    print("step4 build repair plan in memory ...", flush=True)
+    return build_plan(applications, loans, source_by_key)
 
 
 def write_jsonl(path: Path, rows: List[dict]) -> None:
@@ -181,96 +379,200 @@ def apply_batch(conn, batch: List[dict]) -> int:
     return affected
 
 
-def scan(conn, product_ids: Sequence[int], sample: int = 10) -> Dict[str, Any]:
-    rows = fetch_rows(conn, product_ids)
-    print("match_rows=%s product_ids=%s" % (len(rows), len(product_ids)), flush=True)
-    if rows:
-        for row in rows[:sample]:
-            print(
-                " sample loan_no=%s app=%s p%s r%s product_id=%s "
-                "admin_fee %s -> %s (principal=%s)"
-                % (
-                    row.get("loan_no"),
-                    row.get("application_no"),
-                    row.get("period"),
-                    row.get("roll_sequence"),
-                    row.get("product_id"),
-                    row.get("old_admin_fee"),
-                    row.get("new_admin_fee"),
-                    row.get("principal"),
-                ),
-                flush=True,
-            )
-    return {"match_rows": len(rows)}
+_print_lock = threading.Lock()
 
 
-def build_plan(conn, product_ids: Sequence[int]) -> Tuple[List[dict], Dict[str, int]]:
-    rows = fetch_rows(conn, product_ids)
-    plan: List[dict] = []
-    for row in rows:
-        plan.append({
-            "application_no": row["application_no"],
-            "period": int(row["period"]),
-            "roll_sequence": int(row["roll_sequence"]),
-            "loan_no": row.get("loan_no"),
-            "product_id": row.get("product_id"),
-            "old_admin_fee": int(row["old_admin_fee"]),
-            "new_admin_fee": int(row["new_admin_fee"]),
-            "principal": int(row.get("principal") or 0),
-        })
-    stats = {"plan_rows": len(plan)}
-    return plan, stats
+def _log(msg: str) -> None:
+    with _print_lock:
+        print(msg, flush=True)
 
 
-def apply_plan(conn, plan: List[dict], batch_size: int, dry_run: bool) -> Dict[str, int]:
+def apply_batch_worker(cfg: Dict[str, str], batch_no: int, batch: List[dict]) -> Tuple[int, int, int]:
+    conn = connect_target(cfg, for_apply=True)
+    try:
+        def _run():
+            return apply_batch(conn, batch)
+
+        n = exec_with_retry(conn, _run, "batch %s" % batch_no) or 0
+        return batch_no, int(n), len(batch) - int(n)
+    finally:
+        conn.close()
+
+
+def scan(
+    source_conn,
+    target_conn,
+    product_ids: Sequence[int],
+    fetch_chunk: int,
+    sample: int,
+) -> Dict[str, Any]:
+    rows, stats = load_and_build_plan(source_conn, target_conn, product_ids, fetch_chunk)
+    print(
+        "applications=%s target_loans=%s source_rows=%s need_update=%s already_ok=%s "
+        "no_source_match=%s bad_application_no=%s app_id_mismatch=%s product_ids=%s"
+        % (
+            stats.get("applications"),
+            stats.get("target_loans"),
+            stats.get("source_rows"),
+            stats.get("need_update"),
+            stats.get("already_ok"),
+            stats.get("no_source_match"),
+            stats.get("bad_application_no"),
+            stats.get("app_id_mismatch"),
+            len(product_ids),
+        ),
+        flush=True,
+    )
+    for row in rows[:sample]:
+        print(
+            " sample loan_no=%s app=%s market_no=%s p%s r%s product_id=%s "
+            "admin_fee %s -> %s (amount=%s disburseAmount=%s principal=%s)"
+            % (
+                row.get("loan_no"),
+                row.get("application_no"),
+                row.get("market_no"),
+                row.get("period"),
+                row.get("roll_sequence"),
+                row.get("product_id"),
+                row.get("old_admin_fee"),
+                row.get("new_admin_fee"),
+                row.get("market_amount"),
+                row.get("market_disburse_amount"),
+                row.get("principal"),
+            ),
+            flush=True,
+        )
+    return stats
+
+
+def apply_plan(
+    cfg: Dict[str, str],
+    plan: List[dict],
+    batch_size: int,
+    apply_workers: int,
+    dry_run: bool,
+) -> Dict[str, int]:
     if dry_run:
         print("dry-run rows=%s" % len(plan), flush=True)
         for row in plan[:10]:
             print(
-                "  %s admin_fee %s -> %s"
-                % (row.get("loan_no"), row.get("old_admin_fee"), row.get("new_admin_fee")),
+                "  %s admin_fee %s -> %s (amount=%s disburseAmount=%s)"
+                % (
+                    row.get("loan_no"),
+                    row.get("old_admin_fee"),
+                    row.get("new_admin_fee"),
+                    row.get("market_amount"),
+                    row.get("market_disburse_amount"),
+                ),
                 flush=True,
             )
         return {"dry_run": len(plan)}
 
-    stats = {"updated": 0, "skipped": 0}
-    total_batches = (len(plan) + batch_size - 1) // batch_size
-    for bi in range(0, len(plan), batch_size):
-        part = plan[bi:bi + batch_size]
-        bno = bi // batch_size + 1
+    batches = list(chunks(plan, max(1, batch_size)))
+    total_batches = len(batches)
+    stats = {"updated": 0, "skipped": 0, "batches": total_batches}
+    workers = max(1, apply_workers)
 
-        def _run():
-            return apply_batch(conn, part)
+    print(
+        "apply start rows=%s batches=%s batch_size=%s workers=%s"
+        % (len(plan), total_batches, batch_size, workers),
+        flush=True,
+    )
 
-        n = exec_with_retry(conn, _run, "batch %s/%s" % (bno, total_batches))
-        stats["updated"] += int(n or 0)
-        stats["skipped"] += len(part) - int(n or 0)
-        if bno == 1 or bno % 20 == 0 or bno == total_batches:
-            print(
-                "batch %s/%s affected=%s total_updated=%s"
-                % (bno, total_batches, n, stats["updated"]),
-                flush=True,
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {
+            ex.submit(apply_batch_worker, cfg, i + 1, batch): i + 1
+            for i, batch in enumerate(batches)
+        }
+        done = 0
+        for fut in as_completed(futs):
+            bno, updated, skipped = fut.result()
+            stats["updated"] += updated
+            stats["skipped"] += skipped
+            done += 1
+            if done == 1 or done % 20 == 0 or done == total_batches:
+                _log(
+                    "batch %s/%s affected=%s total_updated=%s total_skipped=%s"
+                    % (bno, total_batches, updated, stats["updated"], stats["skipped"])
+                )
+    return stats
+
+
+def verify_plan(conn, plan: List[dict], sample: int = 10) -> Dict[str, int]:
+    stats = {"ok": 0, "mismatch": 0, "missing": 0}
+    mismatches: List[dict] = []
+    with conn.cursor() as cur:
+        for row in plan:
+            cur.execute(
+                """
+                SELECT admin_fee FROM loan
+                WHERE application_no = %s AND period = %s AND roll_sequence = %s
+                """,
+                (
+                    str(row["application_no"]),
+                    int(row["period"]),
+                    int(row["roll_sequence"]),
+                ),
             )
+            got = cur.fetchone()
+            exp = int(row["new_admin_fee"])
+            if not got:
+                stats["missing"] += 1
+                if len(mismatches) < sample:
+                    mismatches.append({**row, "actual_admin_fee": None, "reason": "missing"})
+                continue
+            actual = int(got["admin_fee"] or 0)
+            if actual == exp:
+                stats["ok"] += 1
+            else:
+                stats["mismatch"] += 1
+                if len(mismatches) < sample:
+                    mismatches.append({
+                        **row,
+                        "actual_admin_fee": actual,
+                        "reason": "mismatch",
+                    })
+    print(
+        "verify ok=%s mismatch=%s missing=%s total=%s"
+        % (stats["ok"], stats["mismatch"], stats["missing"], len(plan)),
+        flush=True,
+    )
+    for m in mismatches:
+        print(
+            "  %s expect=%s actual=%s (old=%s amount=%s disburseAmount=%s)"
+            % (
+                m.get("loan_no"),
+                m.get("new_admin_fee"),
+                m.get("actual_admin_fee"),
+                m.get("old_admin_fee"),
+                m.get("market_amount"),
+                m.get("market_disburse_amount"),
+            ),
+            flush=True,
+        )
     return stats
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Fix loan.admin_fee by product_id list")
+    p = argparse.ArgumentParser(description="Fix loan.admin_fee from ng_loan_market amount - disburseAmount")
     p.add_argument("--env", default=str(REPO / ".env"))
     p.add_argument("--scan", action="store_true", help="count + sample only")
     p.add_argument("--build-plan", action="store_true")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--verify", action="store_true", help="对照 plan 验收 admin_fee")
     p.add_argument("--plan-file", default="/tmp/fix_loan_admin_fee_plan.jsonl")
     p.add_argument("--batch-size", type=int, default=100)
+    p.add_argument("--apply-workers", type=int, default=4, help="多线程 apply 并发数")
+    p.add_argument("--fetch-chunk", type=int, default=FETCH_CHUNK, help="IN 查询分批大小")
     p.add_argument("--sample", type=int, default=10)
     return p.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    if not args.scan and not args.build_plan and not args.apply and not args.dry_run:
-        print("specify --scan, --build-plan, and/or --apply", file=sys.stderr)
+    if not args.scan and not args.build_plan and not args.apply and not args.dry_run and not args.verify:
+        print("specify --scan, --build-plan, --apply, and/or --verify", file=sys.stderr)
         return 2
     if args.apply and args.dry_run:
         print("use either --apply or --dry-run", file=sys.stderr)
@@ -285,12 +587,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     t0 = time.time()
 
     if args.scan or args.build_plan:
-        conn = connect_target(cfg, for_apply=False)
+        source_conn = connect_source(cfg)
+        target_conn = connect_target(cfg, for_apply=False)
         try:
             if args.scan:
-                scan(conn, PRODUCT_IDS, sample=args.sample)
+                scan(
+                    source_conn, target_conn, PRODUCT_IDS,
+                    fetch_chunk=args.fetch_chunk, sample=args.sample,
+                )
             if args.build_plan:
-                plan, stats = build_plan(conn, PRODUCT_IDS)
+                plan, stats = load_and_build_plan(
+                    source_conn, target_conn, PRODUCT_IDS, args.fetch_chunk,
+                )
                 write_jsonl(plan_path, plan)
                 print(
                     "plan written file=%s rows=%s stats=%s elapsed=%.1fs"
@@ -298,20 +606,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     flush=True,
                 )
         finally:
-            conn.close()
+            source_conn.close()
+            target_conn.close()
 
-    if args.apply or args.dry_run:
+    if args.apply or args.dry_run or args.verify:
         if not plan_path.is_file():
             print("missing plan: %s (run --build-plan first)" % plan_path, file=sys.stderr)
             return 2
         plan = read_jsonl(plan_path)
         print("loaded plan rows=%s" % len(plan), flush=True)
-        conn = connect_target(cfg, for_apply=True)
-        try:
-            stats = apply_plan(conn, plan, args.batch_size, dry_run=bool(args.dry_run))
-            print("apply stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
-        finally:
-            conn.close()
+        if args.verify:
+            conn = connect_target(cfg, for_apply=False)
+            try:
+                stats = verify_plan(conn, plan, sample=args.sample)
+                print("verify stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
+                return 1 if stats.get("mismatch") or stats.get("missing") else 0
+            finally:
+                conn.close()
+        stats = apply_plan(
+            cfg, plan, args.batch_size, args.apply_workers, dry_run=bool(args.dry_run),
+        )
+        print("apply stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
     return 0
 
 
