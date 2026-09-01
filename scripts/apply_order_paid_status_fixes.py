@@ -24,9 +24,13 @@ import argparse
 import importlib.util
 import json
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import pymysql
 
 HERE = Path(__file__).resolve().parent
 
@@ -45,6 +49,66 @@ ALLOWED = {
     "application": APP_FIX_FIELDS,
     "loan": LOAN_FIX_FIELDS,
 }
+
+
+class Progress:
+    """终端单行进度条。"""
+
+    def __init__(self, label: str, total: int, width: int = 36):
+        self.label = label
+        self.total = max(1, int(total))
+        self.done = 0
+        self.width = width
+        self.t0 = time.time()
+        self._lock = threading.Lock()
+        self._last_len = 0
+        self.extra = ""
+
+    def set_extra(self, text: str) -> None:
+        self.extra = text
+
+    def increment(self, n: int = 1) -> None:
+        with self._lock:
+            self.done = min(self.total, self.done + n)
+            self._render()
+
+    def _render(self) -> None:
+        pct = self.done / self.total
+        filled = int(self.width * pct)
+        bar = "#" * filled + "-" * (self.width - filled)
+        elapsed = time.time() - self.t0
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        eta = int((self.total - self.done) / rate) if rate > 0 else 0
+        line = (
+            "\r%s [%s] %s/%s %5.1f%% %ss eta=%ss %s"
+            % (self.label, bar, self.done, self.total, pct * 100, int(elapsed), eta, self.extra)
+        )
+        pad = max(0, self._last_len - len(line))
+        self._last_len = len(line)
+        sys.stdout.write(line + " " * pad)
+        sys.stdout.flush()
+
+    def finish(self, msg: str = "") -> None:
+        with self._lock:
+            self.done = self.total
+            self._render()
+            sys.stdout.write(" " + msg + "\n")
+            sys.stdout.flush()
+
+
+def connect_target_apply(cmp_mod, cfg: dict):
+    conn = cmp_mod.connect_mysql(
+        cfg,
+        host_keys=("TARGET_MYSQL_HOST", "TARGET_HOST"),
+        port_keys=("TARGET_MYSQL_PORT", "TARGET_PORT"),
+        user_keys=("TARGET_MYSQL_USER", "TARGET_USER"),
+        password_keys=("TARGET_MYSQL_PASSWORD", "TARGET_PASSWORD"),
+        db_keys=("TARGET_MYSQL_DATABASE", "TARGET_DB"),
+        default_db="ng",
+    )
+    conn.read_timeout = 120
+    conn.write_timeout = 120
+    return conn
 
 
 def sanitize_report(in_path: Path, out_path: Path) -> Dict[str, int]:
@@ -332,73 +396,129 @@ def build_plan(
     return plan, stats
 
 
-def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, int]:
+def apply_plan_item(item: dict) -> Dict[str, Any]:
+    """单条 plan：独立连接 + 立即 commit，供多线程调用。"""
+    cmp_mod = item["_cmp"]
+    cfg = item["_cfg"]
+    out = {
+        "application_no": item.get("application_no"),
+        "app_rows": 0,
+        "loan_rows": 0,
+        "app_pk_skip": 0,
+        "error": None,
+    }
+    conn = connect_target_apply(cmp_mod, cfg)
+    try:
+        conn.autocommit(False)
+        if item.get("apply_application"):
+            pk = item.get("application_pk")
+            if not pk:
+                out["app_pk_skip"] = 1
+            else:
+                out["app_rows"] = apply_application(conn, pk, item["apply_application"])
+        if item.get("apply_loan"):
+            pk = item.get("loan_pk") or {
+                "application_no": item["application_no"],
+                "period": 1,
+                "roll_sequence": 0,
+            }
+            out["loan_rows"] = apply_loan(conn, pk, item["apply_loan"])
+        conn.commit()
+    except pymysql.Error as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out["error"] = str(exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return out
+
+
+def run_apply(
+    cmp_mod,
+    cfg: dict,
+    plan: List[dict],
+    dry_run: bool,
+    apply_workers: int = 8,
+) -> Dict[str, int]:
     stats = {
         "app_updated": 0,
         "loan_updated": 0,
         "app_rows": 0,
         "loan_rows": 0,
         "app_pk_skip": 0,
+        "errors": 0,
     }
-    conn = cmp_mod.connect_mysql(
-        cfg,
-        host_keys=("TARGET_MYSQL_HOST", "TARGET_HOST"),
-        port_keys=("TARGET_MYSQL_PORT", "TARGET_PORT"),
-        user_keys=("TARGET_MYSQL_USER", "TARGET_USER"),
-        password_keys=("TARGET_MYSQL_PASSWORD", "TARGET_PASSWORD"),
-        db_keys=("TARGET_MYSQL_DATABASE", "TARGET_DB"),
-        default_db="ng",
-    )
+    conn = connect_target_apply(cmp_mod, cfg)
     try:
         pk_stats = enrich_plan_pks(cmp_mod, conn, plan)
         stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup", "loan_pk_missing")})
-
-        if dry_run:
-            for item in plan[:20]:
-                print(
-                    "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
-                    "app=%(application_changes)s loan=%(loan_changes)s"
-                    % {
-                        "application_no": item.get("application_no"),
-                        "application_pk": item.get("application_pk"),
-                        "loan_pk": item.get("loan_pk"),
-                        "application_changes": item.get("application_changes"),
-                        "loan_changes": item.get("loan_changes"),
-                    },
-                    flush=True,
-                )
-            if len(plan) > 20:
-                print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
-            return stats
-
-        conn.autocommit(False)
-        for item in plan:
-            if item.get("apply_application"):
-                pk = item.get("application_pk")
-                if not pk:
-                    stats["app_pk_skip"] += 1
-                    continue
-                n = apply_application(conn, pk, item["apply_application"])
-                stats["app_rows"] += n
-                if n:
-                    stats["app_updated"] += 1
-            if item.get("apply_loan"):
-                pk = item.get("loan_pk") or {
-                    "application_no": item["application_no"],
-                    "period": 1,
-                    "roll_sequence": 0,
-                }
-                n = apply_loan(conn, pk, item["apply_loan"])
-                stats["loan_rows"] += n
-                if n:
-                    stats["loan_updated"] += 1
-        conn.commit()
-    except Exception:
-        if not dry_run:
-            conn.rollback()
-        raise
     finally:
         conn.close()
+
+    if dry_run:
+        for item in plan[:20]:
+            print(
+                "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
+                "app=%(application_changes)s loan=%(loan_changes)s"
+                % {
+                    "application_no": item.get("application_no"),
+                    "application_pk": item.get("application_pk"),
+                    "loan_pk": item.get("loan_pk"),
+                    "application_changes": item.get("application_changes"),
+                    "loan_changes": item.get("loan_changes"),
+                },
+                flush=True,
+            )
+        if len(plan) > 20:
+            print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
+        return stats
+
+    workers = max(1, min(int(apply_workers), len(plan) or 1))
+    print(
+        "apply start rows=%s workers=%s (one commit per row)"
+        % (len(plan), workers),
+        flush=True,
+    )
+    prog = Progress("apply", len(plan))
+    errors: List[str] = []
+
+    def _task(row: dict) -> Dict[str, Any]:
+        payload = dict(row)
+        payload["_cmp"] = cmp_mod
+        payload["_cfg"] = cfg
+        return apply_plan_item(payload)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_task, item): item for item in plan}
+        for fut in as_completed(futs):
+            res = fut.result()
+            stats["app_rows"] += int(res.get("app_rows") or 0)
+            stats["loan_rows"] += int(res.get("loan_rows") or 0)
+            stats["app_pk_skip"] += int(res.get("app_pk_skip") or 0)
+            if int(res.get("app_rows") or 0):
+                stats["app_updated"] += 1
+            if int(res.get("loan_rows") or 0):
+                stats["loan_updated"] += 1
+            if res.get("error"):
+                stats["errors"] += 1
+                if len(errors) < 5:
+                    errors.append("%s: %s" % (res.get("application_no"), res.get("error")))
+            prog.set_extra(
+                "app=%s loan=%s err=%s"
+                % (stats["app_updated"], stats["loan_updated"], stats["errors"])
+            )
+            prog.increment(1)
+    prog.finish("done")
+
+    if errors:
+        print("apply errors sample:", flush=True)
+        for e in errors:
+            print("  %s" % e, flush=True)
     return stats
 
 
@@ -420,6 +540,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--apply-from-plan", action="store_true",
                    help="跳过 build-plan，直接加载 --plan-file 并 apply")
     p.add_argument("--apply", action="store_true", help="apply updates to target")
+    p.add_argument("--apply-workers", type=int, default=8, help="并行 apply 线程数")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
 
@@ -481,10 +602,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("plan rows=%s stats=%s file=%s" % (len(plan), stats, plan_path), flush=True)
 
     if args.dry_run:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=True)
+        apply_stats = run_apply(cmp, cfg, plan, dry_run=True, apply_workers=args.apply_workers)
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
     elif args.apply:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=False)
+        apply_stats = run_apply(cmp, cfg, plan, dry_run=False, apply_workers=args.apply_workers)
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
     else:
         print("plan only; add --apply or --dry-run", flush=True)
