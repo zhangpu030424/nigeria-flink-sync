@@ -419,11 +419,69 @@ def apply_plan_item(conn, item: dict) -> Dict[str, Any]:
     return out
 
 
+def apply_one_row(
+    cmp_mod,
+    cfg: dict,
+    item: dict,
+    retries: int = 3,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """每条 plan 独立连接，失败重试。"""
+    last_err: Optional[str] = None
+    for attempt in range(max(1, retries)):
+        conn = None
+        try:
+            conn = connect_target_apply(cmp_mod, cfg)
+            conn.autocommit(False)
+            res = apply_plan_item(conn, item)
+            conn.commit()
+            return res, None
+        except pymysql.Error as exc:
+            last_err = str(exc)
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            if attempt + 1 < retries:
+                time.sleep(0.5 * (attempt + 1))
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    return None, last_err
+
+
+def filter_plan(plan: List[dict], application_nos: Optional[Set[str]]) -> List[dict]:
+    if not application_nos:
+        return plan
+    return [p for p in plan if str(p.get("application_no")) in application_nos]
+
+
+def load_application_no_set(path: Path) -> Set[str]:
+    out: Set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("{"):
+            rec = json.loads(line)
+            app_no = str(rec.get("application_no") or "").strip()
+        else:
+            app_no = line.strip(",").split()[0]
+        if app_no:
+            out.add(app_no)
+    return out
+
+
 def run_apply(
     cmp_mod,
     cfg: dict,
     plan: List[dict],
     dry_run: bool,
+    retries: int = 3,
+    failed_file: Optional[Path] = None,
 ) -> Dict[str, int]:
     stats = {
         "app_updated": 0,
@@ -437,55 +495,45 @@ def run_apply(
     try:
         pk_stats = enrich_plan_pks(cmp_mod, conn, plan)
         stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup", "loan_pk_missing")})
+    finally:
+        conn.close()
 
-        if dry_run:
-            for item in plan[:20]:
-                print(
-                    "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
-                    "app=%(application_changes)s loan=%(loan_changes)s"
-                    % {
-                        "application_no": item.get("application_no"),
-                        "application_pk": item.get("application_pk"),
-                        "loan_pk": item.get("loan_pk"),
-                        "application_changes": item.get("application_changes"),
-                        "loan_changes": item.get("loan_changes"),
-                    },
-                    flush=True,
-                )
-            if len(plan) > 20:
-                print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
-            return stats
+    if dry_run:
+        for item in plan[:20]:
+            print(
+                "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
+                "app=%(application_changes)s loan=%(loan_changes)s"
+                % {
+                    "application_no": item.get("application_no"),
+                    "application_pk": item.get("application_pk"),
+                    "loan_pk": item.get("loan_pk"),
+                    "application_changes": item.get("application_changes"),
+                    "loan_changes": item.get("loan_changes"),
+                },
+                flush=True,
+            )
+        if len(plan) > 20:
+            print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
+        return stats
 
-        print("apply start rows=%s (sequential, commit per row)" % len(plan), flush=True)
-        prog = Progress("apply", len(plan))
-        errors: List[str] = []
-        conn.autocommit(False)
+    print(
+        "apply start rows=%s (sequential, commit per row, retries=%s)"
+        % (len(plan), retries),
+        flush=True,
+    )
+    prog = Progress("apply", len(plan))
+    errors: List[str] = []
+    failed_items: List[dict] = []
 
-        for item in plan:
-            app_no = item.get("application_no")
-            try:
-                res = apply_plan_item(conn, item)
-                conn.commit()
-            except pymysql.Error as exc:
-                stats["errors"] += 1
-                if len(errors) < 5:
-                    errors.append("%s: %s" % (app_no, exc))
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                try:
-                    conn.ping(reconnect=True)
-                except Exception:
-                    conn.close()
-                    conn = connect_target_apply(cmp_mod, cfg)
-                    conn.autocommit(False)
-                prog.set_extra("app=%s loan=%s err=%s" % (
-                    stats["app_updated"], stats["loan_updated"], stats["errors"],
-                ))
-                prog.increment(1)
-                continue
-
+    for item in plan:
+        app_no = item.get("application_no")
+        res, err = apply_one_row(cmp_mod, cfg, item, retries=retries)
+        if err:
+            stats["errors"] += 1
+            failed_items.append(item)
+            if len(errors) < 10:
+                errors.append("%s: %s" % (app_no, err))
+        else:
             stats["app_rows"] += int(res.get("app_rows") or 0)
             stats["loan_rows"] += int(res.get("loan_rows") or 0)
             stats["app_pk_skip"] += int(res.get("app_pk_skip") or 0)
@@ -493,22 +541,25 @@ def run_apply(
                 stats["app_updated"] += 1
             if int(res.get("loan_rows") or 0):
                 stats["loan_updated"] += 1
-            prog.set_extra("app=%s loan=%s err=%s" % (
-                stats["app_updated"], stats["loan_updated"], stats["errors"],
-            ))
-            prog.increment(1)
 
-        prog.finish("done")
-        if errors:
-            print("apply errors sample:", flush=True)
-            for e in errors:
-                print("  %s" % e, flush=True)
-        return stats
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        prog.set_extra("app=%s loan=%s err=%s" % (
+            stats["app_updated"], stats["loan_updated"], stats["errors"],
+        ))
+        prog.increment(1)
+
+    prog.finish("done")
+
+    if failed_file and failed_items:
+        with failed_file.open("w", encoding="utf-8") as fp:
+            for row in failed_items:
+                fp.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        print("failed plan rows=%s -> %s" % (len(failed_items), failed_file), flush=True)
+
+    if errors:
+        print("apply errors sample:", flush=True)
+        for e in errors:
+            print("  %s" % e, flush=True)
+    return stats
 
 
 def load_plan(plan_path: Path) -> List[dict]:
@@ -530,6 +581,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                    help="跳过 build-plan，直接加载 --plan-file 并 apply")
     p.add_argument("--apply", action="store_true", help="apply updates to target")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--retries", type=int, default=3, help="每条失败重试次数")
+    p.add_argument("--failed-file", default="/tmp/order_paid_status_fix_failed.jsonl",
+                   help="失败 plan 行输出路径")
+    p.add_argument("--retry-file", help="仅 apply 此文件中的 application_no（补跑）")
     return p.parse_args(argv)
 
 
@@ -581,6 +636,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         plan = load_plan(plan_path)
         print("loaded plan rows=%s file=%s" % (len(plan), plan_path), flush=True)
+        if args.retry_file:
+            retry_set = load_application_no_set(Path(args.retry_file))
+            plan = filter_plan(plan, retry_set)
+            print("retry filter rows=%s from %s" % (len(plan), args.retry_file), flush=True)
     else:
         plan, stats = build_plan(cmp, application_nos, cfg)
         plan_path = Path(args.plan_file)
@@ -589,12 +648,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fp.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
         print("plan rows=%s stats=%s file=%s" % (len(plan), stats, plan_path), flush=True)
 
+    failed_path = Path(args.failed_file) if args.failed_file else None
+
     if args.dry_run:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=True)
+        apply_stats = run_apply(
+            cmp, cfg, plan, dry_run=True, retries=args.retries, failed_file=failed_path,
+        )
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
     elif args.apply:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=False)
+        apply_stats = run_apply(
+            cmp, cfg, plan, dry_run=False, retries=args.retries, failed_file=failed_path,
+        )
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
+        if apply_stats.get("errors"):
+            return 1
     else:
         print("plan only; add --apply or --dry-run", flush=True)
     return 0
