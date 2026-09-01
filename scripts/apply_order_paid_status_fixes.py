@@ -340,17 +340,6 @@ def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, 
         "loan_rows": 0,
         "app_pk_skip": 0,
     }
-    if dry_run:
-        for item in plan[:20]:
-            print(
-                "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
-                "app=%(application_changes)s loan=%(loan_changes)s" % item,
-                flush=True,
-            )
-        if len(plan) > 20:
-            print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
-        return stats
-
     conn = cmp_mod.connect_mysql(
         cfg,
         host_keys=("TARGET_MYSQL_HOST", "TARGET_HOST"),
@@ -360,10 +349,29 @@ def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, 
         db_keys=("TARGET_MYSQL_DATABASE", "TARGET_DB"),
         default_db="ng",
     )
-    conn.autocommit(False)
     try:
         pk_stats = enrich_plan_pks(cmp_mod, conn, plan)
-        stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup")})
+        stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup", "loan_pk_missing")})
+
+        if dry_run:
+            for item in plan[:20]:
+                print(
+                    "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
+                    "app=%(application_changes)s loan=%(loan_changes)s"
+                    % {
+                        "application_no": item.get("application_no"),
+                        "application_pk": item.get("application_pk"),
+                        "loan_pk": item.get("loan_pk"),
+                        "application_changes": item.get("application_changes"),
+                        "loan_changes": item.get("loan_changes"),
+                    },
+                    flush=True,
+                )
+            if len(plan) > 20:
+                print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
+            return stats
+
+        conn.autocommit(False)
         for item in plan:
             if item.get("apply_application"):
                 pk = item.get("application_pk")
@@ -386,7 +394,8 @@ def run_apply(cmp_mod, cfg: dict, plan: List[dict], dry_run: bool) -> Dict[str, 
                     stats["loan_updated"] += 1
         conn.commit()
     except Exception:
-        conn.rollback()
+        if not dry_run:
+            conn.rollback()
         raise
     finally:
         conn.close()
