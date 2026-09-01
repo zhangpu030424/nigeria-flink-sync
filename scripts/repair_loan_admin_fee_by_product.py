@@ -7,7 +7,7 @@
   2. 目标库 loan JOIN application 按 product_id 载入（~10 批 SQL，非 583 万次 IN）
   3. 源库 ng_loan_market 按 product_id 并行拉取 amount/disburseAmount
   4. 内存计算修复计划：admin_fee = GREATEST(amount - disburseAmount, 0)
-  5. 多线程分批 UPDATE 目标库 loan（WHERE loan_no = ? AND admin_fee = old，带进度条）
+  5. 多线程分批 UPDATE（bulk：临时表 JOIN 主键 application_no+period+roll_sequence）
 
 查数阶段（application / loan / 源库）同样多连接并行；目标 loan 与源库可并行拉取。
 step1 默认只 COUNT application，避免 583 万行占内存。
@@ -574,33 +574,99 @@ def exec_with_retry(conn, fn, label: str, retries: int = 5):
     return None
 
 
-def apply_batch(conn, batch: List[dict]) -> int:
+def apply_batch_row(conn, batch: List[dict]) -> int:
+    """逐条 UPDATE（慢，仅调试用）。"""
     affected = 0
-    skipped_no_loan_no = 0
+    skipped_no_key = 0
     with conn.cursor() as cur:
         for row in batch:
-            loan_no = str(row.get("loan_no") or "").strip()
-            if not loan_no:
-                skipped_no_loan_no += 1
+            app_no = str(row.get("application_no") or "").strip()
+            if not app_no:
+                skipped_no_key += 1
                 continue
             cur.execute(
                 """
                 UPDATE loan
                 SET admin_fee = %s
-                WHERE loan_no = %s
+                WHERE application_no = %s
+                  AND period = %s
+                  AND roll_sequence = %s
                   AND admin_fee = %s
                 """,
                 (
                     int(row["new_admin_fee"]),
-                    loan_no,
+                    app_no,
+                    int(row.get("period") or 1),
+                    int(row.get("roll_sequence") or 0),
                     int(row["old_admin_fee"]),
                 ),
             )
             affected += int(cur.rowcount or 0)
     conn.commit()
-    if skipped_no_loan_no:
-        print("apply skip no loan_no=%s" % skipped_no_loan_no, flush=True)
+    if skipped_no_key:
+        print("apply skip no application_no=%s" % skipped_no_key, flush=True)
     return affected
+
+
+def apply_batch_bulk(conn, batch: List[dict]) -> int:
+    """临时表 + JOIN 按主键批量 UPDATE（快，推荐）。"""
+    rows: List[Tuple[Any, ...]] = []
+    for row in batch:
+        app_no = str(row.get("application_no") or "").strip()
+        if not app_no:
+            continue
+        rows.append((
+            app_no,
+            int(row.get("period") or 1),
+            int(row.get("roll_sequence") or 0),
+            int(row["old_admin_fee"]),
+            int(row["new_admin_fee"]),
+        ))
+    if not rows:
+        conn.commit()
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TEMPORARY TABLE IF NOT EXISTS loan_admin_fee_repair (
+                application_no CHAR(36) NOT NULL,
+                period TINYINT UNSIGNED NOT NULL,
+                roll_sequence TINYINT UNSIGNED NOT NULL,
+                old_admin_fee BIGINT UNSIGNED NOT NULL,
+                new_admin_fee BIGINT UNSIGNED NOT NULL,
+                PRIMARY KEY (application_no, period, roll_sequence)
+            ) ENGINE=Memory
+            """
+        )
+        cur.execute("TRUNCATE TABLE loan_admin_fee_repair")
+        cur.executemany(
+            """
+            INSERT INTO loan_admin_fee_repair
+                (application_no, period, roll_sequence, old_admin_fee, new_admin_fee)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
+        cur.execute(
+            """
+            UPDATE loan l
+            INNER JOIN loan_admin_fee_repair r
+                ON l.application_no = r.application_no
+               AND l.period = r.period
+               AND l.roll_sequence = r.roll_sequence
+            SET l.admin_fee = r.new_admin_fee
+            WHERE l.admin_fee = r.old_admin_fee
+            """
+        )
+        affected = int(cur.rowcount or 0)
+    conn.commit()
+    return affected
+
+
+def apply_batch(conn, batch: List[dict], apply_mode: str = "bulk") -> int:
+    if apply_mode == "row":
+        return apply_batch_row(conn, batch)
+    return apply_batch_bulk(conn, batch)
 
 
 _print_lock = threading.Lock()
@@ -611,11 +677,16 @@ def _log(msg: str) -> None:
         print(msg, flush=True)
 
 
-def apply_batch_worker(cfg: Dict[str, str], batch_no: int, batch: List[dict]) -> Tuple[int, int, int]:
+def apply_batch_worker(
+    cfg: Dict[str, str],
+    batch_no: int,
+    batch: List[dict],
+    apply_mode: str,
+) -> Tuple[int, int, int]:
     conn = connect_target(cfg, for_apply=True)
     try:
         def _run():
-            return apply_batch(conn, batch)
+            return apply_batch(conn, batch, apply_mode=apply_mode)
 
         n = exec_with_retry(conn, _run, "batch %s" % batch_no) or 0
         return batch_no, int(n), len(batch) - int(n)
@@ -630,8 +701,8 @@ def _verify_plan_chunk(cfg: Dict[str, str], batch: List[dict]) -> Dict[str, int]
     try:
         with conn.cursor() as cur:
             for row in batch:
-                loan_no = str(row.get("loan_no") or "").strip()
-                if not loan_no:
+                app_no = str(row.get("application_no") or "").strip()
+                if not app_no:
                     stats["missing"] += 1
                     if len(mismatches) < 3:
                         mismatches.append({**row, "actual_admin_fee": None})
@@ -639,9 +710,15 @@ def _verify_plan_chunk(cfg: Dict[str, str], batch: List[dict]) -> Dict[str, int]
                 cur.execute(
                     """
                     SELECT admin_fee FROM loan
-                    WHERE loan_no = %s
+                    WHERE application_no = %s
+                      AND period = %s
+                      AND roll_sequence = %s
                     """,
-                    (loan_no,),
+                    (
+                        str(row["application_no"]),
+                        int(row.get("period") or 1),
+                        int(row.get("roll_sequence") or 0),
+                    ),
                 )
                 got = cur.fetchone()
                 exp = int(row["new_admin_fee"])
@@ -713,6 +790,7 @@ def apply_plan(
     plan: List[dict],
     batch_size: int,
     apply_workers: int,
+    apply_mode: str,
     dry_run: bool,
 ) -> Dict[str, int]:
     if dry_run:
@@ -737,14 +815,14 @@ def apply_plan(
     workers = max(1, apply_workers)
 
     print(
-        "apply start rows=%s batches=%s batch_size=%s workers=%s"
-        % (len(plan), total_batches, batch_size, workers),
+        "apply start rows=%s batches=%s batch_size=%s workers=%s mode=%s"
+        % (len(plan), total_batches, batch_size, workers, apply_mode),
         flush=True,
     )
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
-            ex.submit(apply_batch_worker, cfg, i + 1, batch): i + 1
+            ex.submit(apply_batch_worker, cfg, i + 1, batch, apply_mode): i + 1
             for i, batch in enumerate(batches)
         }
         prog = Progress("apply", total_batches)
@@ -815,8 +893,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verify", action="store_true", help="对照 plan 验收 admin_fee")
     p.add_argument("--plan-file", default="/tmp/fix_loan_admin_fee_plan.jsonl")
-    p.add_argument("--batch-size", type=int, default=100)
-    p.add_argument("--apply-workers", type=int, default=4, help="多线程 apply 并发数")
+    p.add_argument("--batch-size", type=int, default=2000, help="bulk 模式每批行数")
+    p.add_argument("--apply-workers", type=int, default=8, help="多线程 apply 并发数")
+    p.add_argument(
+        "--apply-mode",
+        choices=("bulk", "row"),
+        default="bulk",
+        help="bulk=临时表JOIN按主键批量UPDATE（快）；row=逐条UPDATE（慢）",
+    )
     p.add_argument(
         "--fetch-workers",
         type=int,
@@ -880,7 +964,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("verify stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
             return 1 if stats.get("mismatch") or stats.get("missing") else 0
         stats = apply_plan(
-            cfg, plan, args.batch_size, args.apply_workers, dry_run=bool(args.dry_run),
+            cfg, plan, args.batch_size, args.apply_workers, args.apply_mode,
+            dry_run=bool(args.dry_run),
         )
         print("apply stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
     return 0
