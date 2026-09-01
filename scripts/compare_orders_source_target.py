@@ -5,13 +5,21 @@
 ng01 主链路 app_code：567, 568, 569, 571, 572, 573（查 nigeria_backend.user_order）
 其余为贷超 LM（查 ng_loan_market.application）
 
-Usage:
+env 需同时配置：
+  ng01 源：SOURCE_MYSQL_*  → nigeria_backend
+  LM 源：  LM_MYSQL_*      → ng_loan_market（101 上 .env 通常两套都有）
+  目标：   TARGET_MYSQL_*  → ng
+
+Usage（101 内网，推荐）:
   python3 scripts/compare_orders_source_target.py \\
-    --env ./ng_migration.env \\
+    --env ./.env \\
     --list-file /tmp/order_list.txt \\
     --output /tmp/order_compare_report.jsonl
 
-  cat order_list.txt | python3 scripts/compare_orders_source_target.py --env .env --stdin
+Usage（165 迁移机，若 env 只有 LM 源则 ng01 查数会失败）:
+  python3 scripts/compare_orders_source_target.py \\
+    --env ./ng_migration.env \\
+    --list-file /tmp/order_list.txt
 """
 import argparse
 import json
@@ -49,6 +57,79 @@ def load_env(path: Path) -> Dict[str, str]:
         k, v = line.split("=", 1)
         cfg[k.strip()] = v.strip().strip("'\"")
     return cfg
+
+
+def resolve_db_endpoint(
+    cfg: Dict[str, str],
+    *,
+    host_keys: Sequence[str],
+    port_keys: Sequence[str],
+    user_keys: Sequence[str],
+    db_keys: Sequence[str],
+    default_db: str,
+) -> Dict[str, str]:
+    def pick(keys: Sequence[str], default: str = "") -> str:
+        for key in keys:
+            val = cfg.get(key)
+            if val not in (None, ""):
+                return val
+        return default
+
+    return {
+        "host": pick(host_keys, "127.0.0.1"),
+        "port": pick(port_keys, "3306"),
+        "user": pick(user_keys, "root"),
+        "database": pick(db_keys, default_db),
+    }
+
+
+def print_connection_plan(cfg: Dict[str, str]) -> None:
+    lm_db = cfg.get("LM_MYSQL_DATABASE") or cfg.get("VT_TOKEN_DB") or "ng_loan_market"
+    ng01 = resolve_db_endpoint(
+        cfg,
+        host_keys=("SOURCE_MYSQL_HOST", "SOURCE_HOST"),
+        port_keys=("SOURCE_MYSQL_PORT", "SOURCE_PORT"),
+        user_keys=("SOURCE_MYSQL_USER", "SOURCE_USER"),
+        db_keys=("SOURCE_MYSQL_DATABASE",),
+        default_db="nigeria_backend",
+    )
+    lm = resolve_db_endpoint(
+        cfg,
+        host_keys=("LM_MYSQL_HOST",),
+        port_keys=("LM_MYSQL_PORT",),
+        user_keys=("LM_MYSQL_USER",),
+        db_keys=("LM_MYSQL_DATABASE",),
+        default_db=lm_db,
+    )
+    target = resolve_db_endpoint(
+        cfg,
+        host_keys=("TARGET_MYSQL_HOST", "TARGET_HOST"),
+        port_keys=("TARGET_MYSQL_PORT", "TARGET_PORT"),
+        user_keys=("TARGET_MYSQL_USER", "TARGET_USER"),
+        db_keys=("TARGET_MYSQL_DATABASE", "TARGET_DB"),
+        default_db="ng",
+    )
+    print(
+        "connections ng01=%(host)s:%(port)s/%(database)s user=%(user)s"
+        % ng01,
+        flush=True,
+    )
+    if lm.get("host"):
+        print(
+            "connections lm=%(host)s:%(port)s/%(database)s user=%(user)s"
+            % lm,
+            flush=True,
+        )
+    else:
+        print(
+            "connections lm=MISSING LM_MYSQL_HOST (will not query ng_loan_market)",
+            flush=True,
+        )
+    print(
+        "connections target=%(host)s:%(port)s/%(database)s user=%(user)s"
+        % target,
+        flush=True,
+    )
 
 
 def connect_mysql(
@@ -97,14 +178,18 @@ def connect_ng01_source(cfg: Dict[str, str]):
 
 def connect_lm_source(cfg: Dict[str, str]):
     db = cfg.get("LM_MYSQL_DATABASE") or cfg.get("VT_TOKEN_DB") or "ng_loan_market"
+    if not (cfg.get("LM_MYSQL_HOST") or "").strip():
+        raise RuntimeError(
+            "LM_MYSQL_HOST not set; 101 上请用含 LM 源库的 .env，勿用只有 SOURCE_* 的 ng_migration.env"
+        )
     merged = dict(cfg)
     merged.setdefault("LM_MYSQL_DATABASE", db)
     return connect_mysql(
         merged,
-        host_keys=("LM_MYSQL_HOST", "SOURCE_MYSQL_HOST", "SOURCE_HOST"),
-        port_keys=("LM_MYSQL_PORT", "SOURCE_MYSQL_PORT", "SOURCE_PORT"),
-        user_keys=("LM_MYSQL_USER", "SOURCE_MYSQL_USER", "SOURCE_USER"),
-        password_keys=("LM_MYSQL_PASSWORD", "SOURCE_MYSQL_PASSWORD", "SOURCE_PASSWORD"),
+        host_keys=("LM_MYSQL_HOST",),
+        port_keys=("LM_MYSQL_PORT",),
+        user_keys=("LM_MYSQL_USER",),
+        password_keys=("LM_MYSQL_PASSWORD",),
         db_keys=("LM_MYSQL_DATABASE",),
         default_db=db,
     )
@@ -581,6 +666,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     cfg = load_env(env_path)
+    print_connection_plan(cfg)
+
     ng01_keys: List[str] = []
     lm_keys: List[Tuple[int, str]] = []
     pipeline_by_no: Dict[str, str] = {}
