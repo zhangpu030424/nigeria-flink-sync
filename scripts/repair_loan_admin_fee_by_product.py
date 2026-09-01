@@ -9,13 +9,16 @@
   4. 内存计算修复计划：admin_fee = GREATEST(amount - disburseAmount, 0)
   5. 多线程分批 UPDATE 目标库 loan
 
+查数阶段（application / loan / 源库）同样多连接并行；目标 loan 与源库可并行拉取。
+
 Usage:
   python3 scripts/repair_loan_admin_fee_by_product.py \\
-    --env ./ng_migration.env --scan
+    --env ./ng_migration.env --scan --fetch-workers 8
 
   python3 scripts/repair_loan_admin_fee_by_product.py \\
     --env ./ng_migration.env --build-plan \\
-    --plan-file /tmp/fix_loan_admin_fee_plan.jsonl
+    --plan-file /tmp/fix_loan_admin_fee_plan.jsonl \\
+    --fetch-workers 8 --fetch-chunk 500
 
   python3 scripts/repair_loan_admin_fee_by_product.py \\
     --env ./ng_migration.env --apply \\
@@ -26,13 +29,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, TypeVar
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -147,7 +151,36 @@ def market_application_no(application_no: str) -> str:
     return parse_application_no(application_no)[1]
 
 
-def fetch_applications_by_product(conn, product_ids: Sequence[int]) -> List[dict]:
+T = TypeVar("T")
+
+
+def default_fetch_workers() -> int:
+    cpu = os.cpu_count() or 4
+    return max(4, min(16, cpu))
+
+
+def parallel_map(
+    items: Sequence[T],
+    workers: int,
+    fn: Callable[[T], Any],
+    label: str = "fetch",
+) -> List[Any]:
+    if not items:
+        return []
+    workers = max(1, min(workers, len(items)))
+    if workers == 1:
+        return [fn(x) for x in items]
+    out: List[Any] = []
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=label) as ex:
+        futs = [ex.submit(fn, item) for item in items]
+        for fut in as_completed(futs):
+            out.append(fut.result())
+    return out
+
+
+def _fetch_applications_chunk(cfg: Dict[str, str], product_ids: Sequence[int]) -> List[dict]:
+    if not product_ids:
+        return []
     ph = ",".join(["%s"] * len(product_ids))
     sql = """
     SELECT
@@ -157,67 +190,134 @@ def fetch_applications_by_product(conn, product_ids: Sequence[int]) -> List[dict
     FROM application
     WHERE CAST(product_id AS UNSIGNED) IN ({product_ph})
     """.format(product_ph=ph)
-    with conn.cursor() as cur:
-        cur.execute(sql, list(product_ids))
-        return list(cur.fetchall())
+    conn = connect_target(cfg, for_apply=False)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, list(product_ids))
+            return list(cur.fetchall())
+    finally:
+        conn.close()
 
 
-def fetch_loans_by_application_nos(
-    conn,
-    application_nos: Sequence[str],
-    chunk_size: int = FETCH_CHUNK,
+def fetch_applications_by_product(
+    cfg: Dict[str, str],
+    product_ids: Sequence[int],
+    fetch_workers: int,
 ) -> List[dict]:
-    if not application_nos:
+    ids = list(product_ids)
+    if not ids:
         return []
+    n_workers = max(1, min(fetch_workers, len(ids)))
+    chunk_n = max(1, (len(ids) + n_workers - 1) // n_workers)
+    id_chunks = list(chunks(ids, chunk_n))
+    parts = parallel_map(
+        id_chunks,
+        n_workers,
+        lambda part: _fetch_applications_chunk(cfg, part),
+        label="fetch-app",
+    )
     rows: List[dict] = []
-    sql_tpl = """
-    SELECT
-        l.application_no,
-        l.period,
-        l.roll_sequence,
-        l.loan_no,
-        l.admin_fee AS old_admin_fee,
-        l.principal
-    FROM loan l
-    WHERE l.application_no IN ({ph})
-    """
-    with conn.cursor() as cur:
-        for part in chunks(list(application_nos), chunk_size):
-            ph = ",".join(["%s"] * len(part))
-            cur.execute(sql_tpl.format(ph=ph), part)
-            rows.extend(cur.fetchall())
+    for part in parts:
+        rows.extend(part)
     return rows
 
 
-def fetch_source_by_market_nos(
-    conn,
-    market_nos: Sequence[str],
-    chunk_size: int = FETCH_CHUNK,
-) -> Dict[Tuple[int, str], dict]:
-    """按 market applicationNo 分批查源库，key=(appId, applicationNo)。"""
-    out: Dict[Tuple[int, str], dict] = {}
+LOAN_SQL_TPL = """
+SELECT
+    l.application_no,
+    l.period,
+    l.roll_sequence,
+    l.loan_no,
+    l.admin_fee AS old_admin_fee,
+    l.principal
+FROM loan l
+WHERE l.application_no IN ({ph})
+"""
+
+SOURCE_SQL_TPL = """
+SELECT
+    CAST(a.appId AS UNSIGNED) AS app_id,
+    a.applicationNo AS market_no,
+    CAST(a.productId AS UNSIGNED) AS product_id,
+    CAST(COALESCE(a.amount, 0) AS SIGNED) AS market_amount,
+    CAST(COALESCE(a.disburseAmount, 0) AS SIGNED) AS market_disburse_amount,
+    CAST(GREATEST(COALESCE(a.amount, 0) - COALESCE(a.disburseAmount, 0), 0) AS SIGNED) AS new_admin_fee
+FROM application a
+WHERE a.applicationNo IN ({ph})
+  AND a.disburseTime <> 0
+"""
+
+
+def _fetch_loans_chunk(cfg: Dict[str, str], app_nos: Sequence[str]) -> List[dict]:
+    if not app_nos:
+        return []
+    ph = ",".join(["%s"] * len(app_nos))
+    conn = connect_target(cfg, for_apply=False)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(LOAN_SQL_TPL.format(ph=ph), list(app_nos))
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def fetch_loans_by_application_nos(
+    cfg: Dict[str, str],
+    application_nos: Sequence[str],
+    chunk_size: int,
+    fetch_workers: int,
+) -> List[dict]:
+    uniq = list(dict.fromkeys(str(x) for x in application_nos if x))
+    if not uniq:
+        return []
+    parts_list = list(chunks(uniq, max(1, chunk_size)))
+    parts = parallel_map(
+        parts_list,
+        fetch_workers,
+        lambda part: _fetch_loans_chunk(cfg, part),
+        label="fetch-loan",
+    )
+    rows: List[dict] = []
+    for part in parts:
+        rows.extend(part)
+    return rows
+
+
+def _fetch_source_chunk(cfg: Dict[str, str], market_nos: Sequence[str]) -> List[dict]:
     if not market_nos:
-        return out
+        return []
+    ph = ",".join(["%s"] * len(market_nos))
+    conn = connect_source(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SOURCE_SQL_TPL.format(ph=ph), list(market_nos))
+            return list(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def fetch_source_by_market_nos(
+    cfg: Dict[str, str],
+    market_nos: Sequence[str],
+    chunk_size: int,
+    fetch_workers: int,
+) -> Dict[Tuple[int, str], dict]:
+    """按 market applicationNo 分批并行查源库，key=(appId, applicationNo)。"""
     uniq = sorted(set(str(x) for x in market_nos if x))
-    sql_tpl = """
-    SELECT
-        CAST(a.appId AS UNSIGNED) AS app_id,
-        a.applicationNo AS market_no,
-        CAST(a.productId AS UNSIGNED) AS product_id,
-        CAST(COALESCE(a.amount, 0) AS SIGNED) AS market_amount,
-        CAST(COALESCE(a.disburseAmount, 0) AS SIGNED) AS market_disburse_amount,
-        CAST(GREATEST(COALESCE(a.amount, 0) - COALESCE(a.disburseAmount, 0), 0) AS SIGNED) AS new_admin_fee
-    FROM application a
-    WHERE a.applicationNo IN ({ph})
-      AND a.disburseTime <> 0
-    """
-    with conn.cursor() as cur:
-        for part in chunks(uniq, chunk_size):
-            ph = ",".join(["%s"] * len(part))
-            cur.execute(sql_tpl.format(ph=ph), part)
-            for row in cur.fetchall():
-                key = (int(row["app_id"]), str(row["market_no"]))
-                out[key] = row
+    if not uniq:
+        return {}
+    parts_list = list(chunks(uniq, max(1, chunk_size)))
+    parts = parallel_map(
+        parts_list,
+        fetch_workers,
+        lambda part: _fetch_source_chunk(cfg, part),
+        label="fetch-src",
+    )
+    out: Dict[Tuple[int, str], dict] = {}
+    for rows in parts:
+        for row in rows:
+            key = (int(row["app_id"]), str(row["market_no"]))
+            out[key] = row
     return out
 
 
@@ -289,29 +389,48 @@ def build_plan(
 
 
 def load_and_build_plan(
-    source_conn,
-    target_conn,
+    cfg: Dict[str, str],
     product_ids: Sequence[int],
     fetch_chunk: int,
+    fetch_workers: int,
 ) -> Tuple[List[dict], Dict[str, int]]:
-    print("step1 load application by product_id ...", flush=True)
-    applications = fetch_applications_by_product(target_conn, product_ids)
+    t0 = time.time()
+    print(
+        "step1 load application by product_id (workers=%s) ..."
+        % fetch_workers,
+        flush=True,
+    )
+    applications = fetch_applications_by_product(cfg, product_ids, fetch_workers)
     app_nos = [str(a["application_no"]) for a in applications]
-    print(" applications=%s" % len(app_nos), flush=True)
+    print(" applications=%s elapsed=%.1fs" % (len(app_nos), time.time() - t0), flush=True)
 
-    print("step2 load target loans into memory ...", flush=True)
-    loans = fetch_loans_by_application_nos(target_conn, app_nos, chunk_size=fetch_chunk)
-    print(" loans=%s" % len(loans), flush=True)
-
-    print("step3 strip prefix -> market applicationNo, query source ...", flush=True)
     market_nos: List[str] = []
     for app_no in app_nos:
         try:
             market_nos.append(market_application_no(app_no))
         except ValueError:
             pass
-    source_by_key = fetch_source_by_market_nos(source_conn, market_nos, chunk_size=fetch_chunk)
-    print(" source_hits=%s market_nos=%s" % (len(source_by_key), len(set(market_nos))), flush=True)
+
+    print(
+        "step2+3 parallel fetch target loans + source market (workers=%s chunk=%s) ..."
+        % (fetch_workers, fetch_chunk),
+        flush=True,
+    )
+    t1 = time.time()
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="fetch-pair") as ex:
+        fut_loans = ex.submit(
+            fetch_loans_by_application_nos, cfg, app_nos, fetch_chunk, fetch_workers,
+        )
+        fut_source = ex.submit(
+            fetch_source_by_market_nos, cfg, market_nos, fetch_chunk, fetch_workers,
+        )
+        loans = fut_loans.result()
+        source_by_key = fut_source.result()
+    print(
+        " loans=%s source_hits=%s market_nos=%s elapsed=%.1fs"
+        % (len(loans), len(source_by_key), len(set(market_nos)), time.time() - t1),
+        flush=True,
+    )
 
     print("step4 build repair plan in memory ...", flush=True)
     return build_plan(applications, loans, source_by_key)
@@ -399,14 +518,52 @@ def apply_batch_worker(cfg: Dict[str, str], batch_no: int, batch: List[dict]) ->
         conn.close()
 
 
+def _verify_plan_chunk(cfg: Dict[str, str], batch: List[dict]) -> Dict[str, int]:
+    stats = {"ok": 0, "mismatch": 0, "missing": 0}
+    mismatches: List[dict] = []
+    conn = connect_target(cfg, for_apply=False)
+    try:
+        with conn.cursor() as cur:
+            for row in batch:
+                cur.execute(
+                    """
+                    SELECT admin_fee FROM loan
+                    WHERE application_no = %s AND period = %s AND roll_sequence = %s
+                    """,
+                    (
+                        str(row["application_no"]),
+                        int(row["period"]),
+                        int(row["roll_sequence"]),
+                    ),
+                )
+                got = cur.fetchone()
+                exp = int(row["new_admin_fee"])
+                if not got:
+                    stats["missing"] += 1
+                    if len(mismatches) < 3:
+                        mismatches.append({**row, "actual_admin_fee": None})
+                    continue
+                actual = int(got["admin_fee"] or 0)
+                if actual == exp:
+                    stats["ok"] += 1
+                else:
+                    stats["mismatch"] += 1
+                    if len(mismatches) < 3:
+                        mismatches.append({**row, "actual_admin_fee": actual})
+    finally:
+        conn.close()
+    stats["_mismatches"] = mismatches
+    return stats
+
+
 def scan(
-    source_conn,
-    target_conn,
+    cfg: Dict[str, str],
     product_ids: Sequence[int],
     fetch_chunk: int,
+    fetch_workers: int,
     sample: int,
 ) -> Dict[str, Any]:
-    rows, stats = load_and_build_plan(source_conn, target_conn, product_ids, fetch_chunk)
+    rows, stats = load_and_build_plan(cfg, product_ids, fetch_chunk, fetch_workers)
     print(
         "applications=%s target_loans=%s source_rows=%s need_update=%s already_ok=%s "
         "no_source_match=%s bad_application_no=%s app_id_mismatch=%s product_ids=%s"
@@ -498,43 +655,33 @@ def apply_plan(
     return stats
 
 
-def verify_plan(conn, plan: List[dict], sample: int = 10) -> Dict[str, int]:
+def verify_plan(
+    cfg: Dict[str, str],
+    plan: List[dict],
+    fetch_workers: int,
+    fetch_chunk: int,
+    sample: int = 10,
+) -> Dict[str, int]:
     stats = {"ok": 0, "mismatch": 0, "missing": 0}
     mismatches: List[dict] = []
-    with conn.cursor() as cur:
-        for row in plan:
-            cur.execute(
-                """
-                SELECT admin_fee FROM loan
-                WHERE application_no = %s AND period = %s AND roll_sequence = %s
-                """,
-                (
-                    str(row["application_no"]),
-                    int(row["period"]),
-                    int(row["roll_sequence"]),
-                ),
-            )
-            got = cur.fetchone()
-            exp = int(row["new_admin_fee"])
-            if not got:
-                stats["missing"] += 1
-                if len(mismatches) < sample:
-                    mismatches.append({**row, "actual_admin_fee": None, "reason": "missing"})
-                continue
-            actual = int(got["admin_fee"] or 0)
-            if actual == exp:
-                stats["ok"] += 1
-            else:
-                stats["mismatch"] += 1
-                if len(mismatches) < sample:
-                    mismatches.append({
-                        **row,
-                        "actual_admin_fee": actual,
-                        "reason": "mismatch",
-                    })
+    batches = list(chunks(plan, max(1, fetch_chunk)))
+    workers = max(1, min(fetch_workers, len(batches) or 1))
+    parts = parallel_map(
+        batches,
+        workers,
+        lambda batch: _verify_plan_chunk(cfg, batch),
+        label="verify",
+    )
+    for part in parts:
+        stats["ok"] += int(part.get("ok") or 0)
+        stats["mismatch"] += int(part.get("mismatch") or 0)
+        stats["missing"] += int(part.get("missing") or 0)
+        for m in part.get("_mismatches") or []:
+            if len(mismatches) < sample:
+                mismatches.append({**m, "reason": "missing" if m.get("actual_admin_fee") is None else "mismatch"})
     print(
-        "verify ok=%s mismatch=%s missing=%s total=%s"
-        % (stats["ok"], stats["mismatch"], stats["missing"], len(plan)),
+        "verify ok=%s mismatch=%s missing=%s total=%s workers=%s"
+        % (stats["ok"], stats["mismatch"], stats["missing"], len(plan), workers),
         flush=True,
     )
     for m in mismatches:
@@ -564,6 +711,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--plan-file", default="/tmp/fix_loan_admin_fee_plan.jsonl")
     p.add_argument("--batch-size", type=int, default=100)
     p.add_argument("--apply-workers", type=int, default=4, help="多线程 apply 并发数")
+    p.add_argument(
+        "--fetch-workers",
+        type=int,
+        default=default_fetch_workers(),
+        help="查目标库/源库并行连接数（默认 min(16, cpu)）",
+    )
     p.add_argument("--fetch-chunk", type=int, default=FETCH_CHUNK, help="IN 查询分批大小")
     p.add_argument("--sample", type=int, default=10)
     return p.parse_args(argv)
@@ -587,27 +740,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     t0 = time.time()
 
     if args.scan or args.build_plan:
-        source_conn = connect_source(cfg)
-        target_conn = connect_target(cfg, for_apply=False)
-        try:
-            if args.scan:
-                scan(
-                    source_conn, target_conn, PRODUCT_IDS,
-                    fetch_chunk=args.fetch_chunk, sample=args.sample,
-                )
-            if args.build_plan:
-                plan, stats = load_and_build_plan(
-                    source_conn, target_conn, PRODUCT_IDS, args.fetch_chunk,
-                )
-                write_jsonl(plan_path, plan)
-                print(
-                    "plan written file=%s rows=%s stats=%s elapsed=%.1fs"
-                    % (plan_path, len(plan), stats, time.time() - t0),
-                    flush=True,
-                )
-        finally:
-            source_conn.close()
-            target_conn.close()
+        fetch_workers = max(1, args.fetch_workers)
+        if args.scan:
+            scan(
+                cfg, PRODUCT_IDS,
+                fetch_chunk=args.fetch_chunk,
+                fetch_workers=fetch_workers,
+                sample=args.sample,
+            )
+        if args.build_plan:
+            plan, stats = load_and_build_plan(
+                cfg, PRODUCT_IDS, args.fetch_chunk, fetch_workers,
+            )
+            write_jsonl(plan_path, plan)
+            print(
+                "plan written file=%s rows=%s stats=%s fetch_workers=%s elapsed=%.1fs"
+                % (plan_path, len(plan), stats, fetch_workers, time.time() - t0),
+                flush=True,
+            )
 
     if args.apply or args.dry_run or args.verify:
         if not plan_path.is_file():
@@ -616,13 +766,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         plan = read_jsonl(plan_path)
         print("loaded plan rows=%s" % len(plan), flush=True)
         if args.verify:
-            conn = connect_target(cfg, for_apply=False)
-            try:
-                stats = verify_plan(conn, plan, sample=args.sample)
-                print("verify stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
-                return 1 if stats.get("mismatch") or stats.get("missing") else 0
-            finally:
-                conn.close()
+            stats = verify_plan(
+                cfg, plan,
+                fetch_workers=max(1, args.fetch_workers),
+                fetch_chunk=args.fetch_chunk,
+                sample=args.sample,
+            )
+            print("verify stats=%s elapsed=%.1fs" % (stats, time.time() - t0), flush=True)
+            return 1 if stats.get("mismatch") or stats.get("missing") else 0
         stats = apply_plan(
             cfg, plan, args.batch_size, args.apply_workers, dry_run=bool(args.dry_run),
         )
