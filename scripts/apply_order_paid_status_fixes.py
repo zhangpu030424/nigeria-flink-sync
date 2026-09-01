@@ -26,7 +26,6 @@ import json
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -396,45 +395,27 @@ def build_plan(
     return plan, stats
 
 
-def apply_plan_item(item: dict) -> Dict[str, Any]:
-    """单条 plan：独立连接 + 立即 commit，供多线程调用。"""
-    cmp_mod = item["_cmp"]
-    cfg = item["_cfg"]
+def apply_plan_item(conn, item: dict) -> Dict[str, Any]:
+    """单条 plan：在同一连接上 UPDATE，由调用方 commit。"""
     out = {
         "application_no": item.get("application_no"),
         "app_rows": 0,
         "loan_rows": 0,
         "app_pk_skip": 0,
-        "error": None,
     }
-    conn = connect_target_apply(cmp_mod, cfg)
-    try:
-        conn.autocommit(False)
-        if item.get("apply_application"):
-            pk = item.get("application_pk")
-            if not pk:
-                out["app_pk_skip"] = 1
-            else:
-                out["app_rows"] = apply_application(conn, pk, item["apply_application"])
-        if item.get("apply_loan"):
-            pk = item.get("loan_pk") or {
-                "application_no": item["application_no"],
-                "period": 1,
-                "roll_sequence": 0,
-            }
-            out["loan_rows"] = apply_loan(conn, pk, item["apply_loan"])
-        conn.commit()
-    except pymysql.Error as exc:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        out["error"] = str(exc)
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+    if item.get("apply_application"):
+        pk = item.get("application_pk")
+        if not pk:
+            out["app_pk_skip"] = 1
+        else:
+            out["app_rows"] = apply_application(conn, pk, item["apply_application"])
+    if item.get("apply_loan"):
+        pk = item.get("loan_pk") or {
+            "application_no": item["application_no"],
+            "period": 1,
+            "roll_sequence": 0,
+        }
+        out["loan_rows"] = apply_loan(conn, pk, item["apply_loan"])
     return out
 
 
@@ -443,7 +424,6 @@ def run_apply(
     cfg: dict,
     plan: List[dict],
     dry_run: bool,
-    apply_workers: int = 8,
 ) -> Dict[str, int]:
     stats = {
         "app_updated": 0,
@@ -457,46 +437,55 @@ def run_apply(
     try:
         pk_stats = enrich_plan_pks(cmp_mod, conn, plan)
         stats.update({k: pk_stats.get(k, 0) for k in ("app_pk_missing", "pk_lookup", "loan_pk_missing")})
-    finally:
-        conn.close()
 
-    if dry_run:
-        for item in plan[:20]:
-            print(
-                "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
-                "app=%(application_changes)s loan=%(loan_changes)s"
-                % {
-                    "application_no": item.get("application_no"),
-                    "application_pk": item.get("application_pk"),
-                    "loan_pk": item.get("loan_pk"),
-                    "application_changes": item.get("application_changes"),
-                    "loan_changes": item.get("loan_changes"),
-                },
-                flush=True,
-            )
-        if len(plan) > 20:
-            print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
-        return stats
+        if dry_run:
+            for item in plan[:20]:
+                print(
+                    "dry-run %(application_no)s app_pk=%(application_pk)s loan_pk=%(loan_pk)s "
+                    "app=%(application_changes)s loan=%(loan_changes)s"
+                    % {
+                        "application_no": item.get("application_no"),
+                        "application_pk": item.get("application_pk"),
+                        "loan_pk": item.get("loan_pk"),
+                        "application_changes": item.get("application_changes"),
+                        "loan_changes": item.get("loan_changes"),
+                    },
+                    flush=True,
+                )
+            if len(plan) > 20:
+                print("dry-run ... and %s more" % (len(plan) - 20), flush=True)
+            return stats
 
-    workers = max(1, min(int(apply_workers), len(plan) or 1))
-    print(
-        "apply start rows=%s workers=%s (one commit per row)"
-        % (len(plan), workers),
-        flush=True,
-    )
-    prog = Progress("apply", len(plan))
-    errors: List[str] = []
+        print("apply start rows=%s (sequential, commit per row)" % len(plan), flush=True)
+        prog = Progress("apply", len(plan))
+        errors: List[str] = []
+        conn.autocommit(False)
 
-    def _task(row: dict) -> Dict[str, Any]:
-        payload = dict(row)
-        payload["_cmp"] = cmp_mod
-        payload["_cfg"] = cfg
-        return apply_plan_item(payload)
+        for item in plan:
+            app_no = item.get("application_no")
+            try:
+                res = apply_plan_item(conn, item)
+                conn.commit()
+            except pymysql.Error as exc:
+                stats["errors"] += 1
+                if len(errors) < 5:
+                    errors.append("%s: %s" % (app_no, exc))
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    conn.ping(reconnect=True)
+                except Exception:
+                    conn.close()
+                    conn = connect_target_apply(cmp_mod, cfg)
+                    conn.autocommit(False)
+                prog.set_extra("app=%s loan=%s err=%s" % (
+                    stats["app_updated"], stats["loan_updated"], stats["errors"],
+                ))
+                prog.increment(1)
+                continue
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(_task, item): item for item in plan}
-        for fut in as_completed(futs):
-            res = fut.result()
             stats["app_rows"] += int(res.get("app_rows") or 0)
             stats["loan_rows"] += int(res.get("loan_rows") or 0)
             stats["app_pk_skip"] += int(res.get("app_pk_skip") or 0)
@@ -504,22 +493,22 @@ def run_apply(
                 stats["app_updated"] += 1
             if int(res.get("loan_rows") or 0):
                 stats["loan_updated"] += 1
-            if res.get("error"):
-                stats["errors"] += 1
-                if len(errors) < 5:
-                    errors.append("%s: %s" % (res.get("application_no"), res.get("error")))
-            prog.set_extra(
-                "app=%s loan=%s err=%s"
-                % (stats["app_updated"], stats["loan_updated"], stats["errors"])
-            )
+            prog.set_extra("app=%s loan=%s err=%s" % (
+                stats["app_updated"], stats["loan_updated"], stats["errors"],
+            ))
             prog.increment(1)
-    prog.finish("done")
 
-    if errors:
-        print("apply errors sample:", flush=True)
-        for e in errors:
-            print("  %s" % e, flush=True)
-    return stats
+        prog.finish("done")
+        if errors:
+            print("apply errors sample:", flush=True)
+            for e in errors:
+                print("  %s" % e, flush=True)
+        return stats
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def load_plan(plan_path: Path) -> List[dict]:
@@ -540,7 +529,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--apply-from-plan", action="store_true",
                    help="跳过 build-plan，直接加载 --plan-file 并 apply")
     p.add_argument("--apply", action="store_true", help="apply updates to target")
-    p.add_argument("--apply-workers", type=int, default=8, help="并行 apply 线程数")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args(argv)
 
@@ -602,10 +590,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("plan rows=%s stats=%s file=%s" % (len(plan), stats, plan_path), flush=True)
 
     if args.dry_run:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=True, apply_workers=args.apply_workers)
+        apply_stats = run_apply(cmp, cfg, plan, dry_run=True)
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
     elif args.apply:
-        apply_stats = run_apply(cmp, cfg, plan, dry_run=False, apply_workers=args.apply_workers)
+        apply_stats = run_apply(cmp, cfg, plan, dry_run=False)
         print("apply stats=%s elapsed=%.1fs" % (apply_stats, time.time() - t0), flush=True)
     else:
         print("plan only; add --apply or --dry-run", flush=True)
