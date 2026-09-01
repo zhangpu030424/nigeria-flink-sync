@@ -26,6 +26,7 @@ import json
 import re
 import sys
 import time
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -395,6 +396,9 @@ def fetch_ng01_source(conn, order_nos: Sequence[str]) -> Dict[str, dict]:
                 paid_time = dt_to_ms(row.get("period_paid_time"))
                 if paid_time is None and risk_status in (20, 30, 50):
                     paid_time = dt_to_ms(row.get("settled_time"))
+                settled_ms = dt_to_ms(row.get("settled_time"))
+                settled_dt = row.get("settled_time")
+                paid_off_date = settled_dt.date() if settled_dt is not None and hasattr(settled_dt, "date") else None
 
                 out[application_no] = {
                     "pipeline": "ng01",
@@ -411,6 +415,7 @@ def fetch_ng01_source(conn, order_nos: Sequence[str]) -> Dict[str, dict]:
                         "total_amount": to_money_minor(row.get("repayment")),
                         "disbursed_amount": to_money_minor(row.get("received")),
                         "last_paid_time": dt_to_ms(row.get("last_paid_time")),
+                        "paid_off_time": settled_ms,
                     },
                     "expected_loan": {
                         "status": map_ng01_loan_status(risk_status, is_overdue, repaid),
@@ -419,6 +424,7 @@ def fetch_ng01_source(conn, order_nos: Sequence[str]) -> Dict[str, dict]:
                         "total_amount": total_amount,
                         "paid_amount": paid_amount,
                         "paid_time": paid_time,
+                        "paid_off_date": paid_off_date,
                     },
                 }
     return out
@@ -453,8 +459,13 @@ def _lm_row_to_entry(row: dict) -> Tuple[str, dict]:
     admin_fee = max(amount - disburse, 0)
     paid_amount = to_int(row.get("paidAmount")) if src_status in (17, 18, 19) else 0
     paid_time = to_int(row.get("paidTime")) * 1000 if to_int(row.get("paidTime")) > 0 else None
+    paid_off_date = None
+    if to_int(row.get("paidTime")) > 0:
+        paid_off_date = datetime.utcfromtimestamp(to_int(row.get("paidTime"))).date()
     principal = max(disburse, 0)
     total_amount = max(to_int(row.get("repayment")), 0)
+    tgt_status = map_lm_status(src_status)
+    paid_off_time = paid_time if src_status in (17, 18, 19) else None
     return application_no, {
         "pipeline": "lm",
         "application_no": application_no,
@@ -462,19 +473,21 @@ def _lm_row_to_entry(row: dict) -> Tuple[str, dict]:
         "sn": sn,
         "source_status": src_status,
         "expected_application": {
-            "status": map_lm_status(src_status),
+            "status": tgt_status,
             "principal": principal,
             "total_amount": total_amount,
             "disbursed_amount": principal,
             "last_paid_time": paid_time,
+            "paid_off_time": paid_off_time,
         },
         "expected_loan": {
-            "status": map_lm_status(src_status),
+            "status": tgt_status,
             "principal": principal,
             "admin_fee": admin_fee,
             "total_amount": total_amount,
             "paid_amount": paid_amount,
             "paid_time": paid_time,
+            "paid_off_date": paid_off_date,
         },
     }
 
@@ -616,7 +629,8 @@ def summarize(records: List[dict]) -> dict:
                 stats["lm"] += 1
         entity = rec.get("entity")
         result = rec.get("result")
-        key = "{0}_{1}".format(entity, result)
+        prefix = "app" if entity == "application" else entity
+        key = "{0}_{1}".format(prefix, result)
         if key in stats:
             stats[key] += 1
         if entity == "loan" and result == "mismatch":
@@ -627,8 +641,27 @@ def summarize(records: List[dict]) -> dict:
     return stats
 
 
-def print_summary(stats: dict, mismatch_only: List[dict]) -> None:
+def summarize_field_breakdown(records: List[dict]) -> Dict[str, Any]:
+    """按 pipeline × entity × field 统计 mismatch 次数。"""
+    breakdown: Dict[str, Dict[str, int]] = {}
+    for rec in records:
+        if rec.get("result") != "mismatch":
+            continue
+        pipe = str(rec.get("pipeline") or "unknown")
+        entity = str(rec.get("entity") or "unknown")
+        for m in rec.get("mismatches") or []:
+            field = str(m.get("field") or "?")
+            key = "{0}.{1}.{2}".format(pipe, entity, field)
+            breakdown[key] = int(breakdown.get(key) or 0) + 1
+    top = sorted(breakdown.items(), key=lambda x: (-x[1], x[0]))
+    return {"top": top[:25], "all_count": len(breakdown)}
+
+
+def print_summary(stats: dict, mismatch_only: List[dict], records: Optional[List[dict]] = None) -> None:
     print("summary=%s" % json.dumps(stats, ensure_ascii=False), flush=True)
+    if records:
+        bd = summarize_field_breakdown(records)
+        print("mismatch_breakdown_top=%s" % json.dumps(bd["top"], ensure_ascii=False), flush=True)
     print("--- mismatches (first 50) ---", flush=True)
     n = 0
     for rec in mismatch_only:
@@ -768,7 +801,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stats["report"] = str(out_path)
 
     mismatch_only = [r for r in records if r.get("result") != "ok"]
-    print_summary(stats, mismatch_only)
+    print_summary(stats, mismatch_only, records)
     return 1 if any(r.get("result") not in ("ok",) for r in records) else 0
 
 
