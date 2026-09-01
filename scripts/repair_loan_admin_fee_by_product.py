@@ -7,7 +7,7 @@
   2. 目标库 loan JOIN application 按 product_id 载入（~10 批 SQL，非 583 万次 IN）
   3. 源库 ng_loan_market 按 product_id 并行拉取 amount/disburseAmount
   4. 内存计算修复计划：admin_fee = GREATEST(amount - disburseAmount, 0)
-  5. 多线程分批 UPDATE 目标库 loan（带进度条）
+  5. 多线程分批 UPDATE 目标库 loan（WHERE loan_no = ? AND admin_fee = old，带进度条）
 
 查数阶段（application / loan / 源库）同样多连接并行；目标 loan 与源库可并行拉取。
 step1 默认只 COUNT application，避免 583 万行占内存。
@@ -26,8 +26,6 @@ Usage:
     --plan-file /tmp/fix_loan_admin_fee_plan.jsonl \\
     --batch-size 100 --apply-workers 4
 """
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -122,14 +120,21 @@ def connect_target(cfg: Dict[str, str], for_apply: bool = False):
 
 
 def connect_source(cfg: Dict[str, str]):
+    db = (
+        cfg.get("LM_MYSQL_DATABASE")
+        or cfg.get("VT_TOKEN_DB")
+        or "ng_loan_market"
+    )
+    merged = dict(cfg)
+    merged.setdefault("LM_MYSQL_DATABASE", db)
     return connect_mysql(
-        cfg,
-        host_key=("LM_MYSQL_HOST", "SOURCE_MYSQL_HOST"),
-        port_key=("LM_MYSQL_PORT", "SOURCE_MYSQL_PORT"),
-        user_key=("LM_MYSQL_USER", "SOURCE_MYSQL_USER"),
-        password_key=("LM_MYSQL_PASSWORD", "SOURCE_MYSQL_PASSWORD"),
+        merged,
+        host_key=("LM_MYSQL_HOST", "SOURCE_MYSQL_HOST", "SOURCE_HOST"),
+        port_key=("LM_MYSQL_PORT", "SOURCE_MYSQL_PORT", "SOURCE_PORT"),
+        user_key=("LM_MYSQL_USER", "SOURCE_MYSQL_USER", "SOURCE_USER"),
+        password_key=("LM_MYSQL_PASSWORD", "SOURCE_MYSQL_PASSWORD", "SOURCE_PASSWORD"),
         database_key=("LM_MYSQL_DATABASE",),
-        default_db="ng_loan_market",
+        default_db=db,
         for_apply=False,
     )
 
@@ -571,27 +576,30 @@ def exec_with_retry(conn, fn, label: str, retries: int = 5):
 
 def apply_batch(conn, batch: List[dict]) -> int:
     affected = 0
+    skipped_no_loan_no = 0
     with conn.cursor() as cur:
         for row in batch:
+            loan_no = str(row.get("loan_no") or "").strip()
+            if not loan_no:
+                skipped_no_loan_no += 1
+                continue
             cur.execute(
                 """
                 UPDATE loan
                 SET admin_fee = %s
-                WHERE application_no = %s
-                  AND period = %s
-                  AND roll_sequence = %s
+                WHERE loan_no = %s
                   AND admin_fee = %s
                 """,
                 (
                     int(row["new_admin_fee"]),
-                    str(row["application_no"]),
-                    int(row["period"]),
-                    int(row["roll_sequence"]),
+                    loan_no,
                     int(row["old_admin_fee"]),
                 ),
             )
             affected += int(cur.rowcount or 0)
     conn.commit()
+    if skipped_no_loan_no:
+        print("apply skip no loan_no=%s" % skipped_no_loan_no, flush=True)
     return affected
 
 
@@ -622,16 +630,18 @@ def _verify_plan_chunk(cfg: Dict[str, str], batch: List[dict]) -> Dict[str, int]
     try:
         with conn.cursor() as cur:
             for row in batch:
+                loan_no = str(row.get("loan_no") or "").strip()
+                if not loan_no:
+                    stats["missing"] += 1
+                    if len(mismatches) < 3:
+                        mismatches.append({**row, "actual_admin_fee": None})
+                    continue
                 cur.execute(
                     """
                     SELECT admin_fee FROM loan
-                    WHERE application_no = %s AND period = %s AND roll_sequence = %s
+                    WHERE loan_no = %s
                     """,
-                    (
-                        str(row["application_no"]),
-                        int(row["period"]),
-                        int(row["roll_sequence"]),
-                    ),
+                    (loan_no,),
                 )
                 got = cur.fetchone()
                 exp = int(row["new_admin_fee"])
