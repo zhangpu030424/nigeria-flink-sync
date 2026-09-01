@@ -7,7 +7,7 @@
   2. 目标库 loan JOIN application 按 product_id 载入（~10 批 SQL，非 583 万次 IN）
   3. 源库 ng_loan_market 按 product_id 并行拉取 amount/disburseAmount
   4. 内存计算修复计划：admin_fee = GREATEST(amount - disburseAmount, 0)
-  5. 多线程分批 UPDATE（bulk：临时表 JOIN 主键 application_no+period+roll_sequence）
+  5. 多线程分批 UPDATE admin_fee + total_amount（bulk：临时表 JOIN 主键）
 
 查数阶段（application / loan / 源库）同样多连接并行；目标 loan 与源库可并行拉取。
 step1 默认只 COUNT application，避免 583 万行占内存。
@@ -587,13 +587,15 @@ def apply_batch_row(conn, batch: List[dict]) -> int:
             cur.execute(
                 """
                 UPDATE loan
-                SET admin_fee = %s
+                SET admin_fee = %s,
+                    total_amount = principal + interest + %s + service_fee + tax_fee + penalty_amount
                 WHERE application_no = %s
                   AND period = %s
                   AND roll_sequence = %s
                   AND admin_fee = %s
                 """,
                 (
+                    int(row["new_admin_fee"]),
                     int(row["new_admin_fee"]),
                     app_no,
                     int(row.get("period") or 1),
@@ -654,7 +656,9 @@ def apply_batch_bulk(conn, batch: List[dict]) -> int:
                 ON l.application_no = r.application_no
                AND l.period = r.period
                AND l.roll_sequence = r.roll_sequence
-            SET l.admin_fee = r.new_admin_fee
+            SET l.admin_fee = r.new_admin_fee,
+                l.total_amount = l.principal + l.interest + r.new_admin_fee
+                                 + l.service_fee + l.tax_fee + l.penalty_amount
             WHERE l.admin_fee = r.old_admin_fee
             """
         )
