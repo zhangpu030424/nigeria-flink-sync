@@ -8,6 +8,7 @@ G3: (mobile, app_id, user_id, group_user_id) 四元组在 user 无一致行（MI
 源库：仅用 TSV 里的 **user_id** 查 user（G2/G3 两文件都有该列）
   user_id >= USER_ID_OFFSET → nigeria_backend.user，WHERE id = user_id - offset
   user_id <  offset          → ng_loan_market.user，WHERE id = user_id
+                              若 user 无行，回退 user_data.userId + application.deviceId
 
 目标库写入：TSV 的 mobile 已是 VT token（tk_*），**直接使用，不再查 VT**；
 app_id / user_id / group_user_id 亦以 TSV 为准。
@@ -75,6 +76,24 @@ SELECT u.id,
        u.updated
 FROM `user` u
 WHERE u.id IN ({ph})
+"""
+
+LM_USER_DATA_SQL = """
+SELECT ud.`userId` AS id, ud.created, ud.updated
+FROM `user_data` ud
+INNER JOIN (
+    SELECT `userId`, MAX(id) AS max_id
+    FROM `user_data`
+    WHERE `userId` IN ({ph})
+    GROUP BY `userId`
+) pick ON pick.max_id = ud.id
+"""
+
+LM_APP_DEVICE_SQL = """
+SELECT `userId` AS id, MAX(`deviceId`) AS device_id
+FROM `application`
+WHERE `userId` IN ({ph})
+GROUP BY `userId`
 """
 
 
@@ -283,6 +302,46 @@ def fetch_lm_by_user_ids(cmp_mod, cfg: dict, user_ids: Sequence[int]) -> Dict[in
     return out
 
 
+def fetch_lm_user_data_fallback(
+    cmp_mod, cfg: dict, user_ids: Sequence[int],
+) -> Dict[int, dict]:
+    """user 表无行时，用 user_data.userId 拼 LM user 行（形状同 fetch_lm_by_user_ids）。"""
+    if not user_ids:
+        return {}
+    ids = sorted(set(int(u) for u in user_ids))
+    conn = cmp_mod.connect_lm_source(cfg)
+    ud_map: Dict[int, dict] = {}
+    dev_map: Dict[int, Any] = {}
+    try:
+        with conn.cursor() as cur:
+            for batch in chunks(ids, 200):
+                ph = ",".join(["%s"] * len(batch))
+                cur.execute(LM_USER_DATA_SQL.format(ph=ph), list(batch))
+                for row in cur.fetchall():
+                    ud_map[int(row["id"])] = dict(row)
+            for batch in chunks(ids, 200):
+                ph = ",".join(["%s"] * len(batch))
+                cur.execute(LM_APP_DEVICE_SQL.format(ph=ph), list(batch))
+                for row in cur.fetchall():
+                    dev_map[int(row["id"])] = row.get("device_id")
+    finally:
+        conn.close()
+    out: Dict[int, dict] = {}
+    for uid in ids:
+        ud = ud_map.get(uid)
+        if not ud:
+            continue
+        out[uid] = {
+            "id": uid,
+            "device_id": dev_map.get(uid) or 0,
+            "is_cancel": 0,
+            "created": ud.get("created"),
+            "updated": ud.get("updated"),
+            "_source": "user_data",
+        }
+    return out
+
+
 def filter_existing_g3(conn, needs: Sequence[UserNeed]) -> Tuple[List[UserNeed], int]:
     """返回仍缺四元组的 need；skipped=已在目标库一致的数量。"""
     if not needs:
@@ -316,8 +375,8 @@ def fetch_sources_parallel(
     needs: Sequence[UserNeed],
     offset: int,
     workers: int,
-) -> Tuple[Dict[str, Dict[int, dict]], List[UserNeed]]:
-    """并发按 TSV user_id 查源库；src_map[pipeline][user_id] -> row。"""
+) -> Tuple[Dict[str, Dict[int, dict]], List[UserNeed], int]:
+    """并发按 TSV user_id 查源库；src_map[pipeline][user_id] -> row。返回 lm_user_data_fallback 计数。"""
     ng01_uids = sorted({n.user_id for n in needs if n.user_id >= offset})
     lm_uids = sorted({n.user_id for n in needs if n.user_id < offset})
 
@@ -331,12 +390,16 @@ def fetch_sources_parallel(
         for pipe, fut in tasks:
             src_map[pipe].update(fut.result())
 
+    lm_missing_uids = [uid for uid in lm_uids if uid not in src_map["lm"]]
+    ud_fallback = fetch_lm_user_data_fallback(cmp_mod, cfg, lm_missing_uids)
+    src_map["lm"].update(ud_fallback)
+
     missing_needs: List[UserNeed] = []
     for n in needs:
         pipe = pipeline_for_user_id(n.user_id, offset)
         if n.user_id not in src_map.get(pipe, {}):
             missing_needs.append(n)
-    return src_map, missing_needs
+    return src_map, missing_needs, len(ud_fallback)
 
 
 def build_rows(
@@ -435,6 +498,7 @@ def main() -> int:
         "pending": len(pending),
         "by_kind": {},
         "by_pipeline": {},
+        "lm_user_data_fallback": 0,
         "source_missing": 0,
         "planned_insert": 0,
         "applied_insert": 0,
@@ -445,9 +509,12 @@ def main() -> int:
         stats["by_pipeline"][pipe] = stats["by_pipeline"].get(pipe, 0) + 1
 
     t0 = time.time()
-    src_map, src_missing = fetch_sources_parallel(cmp_mod, cfg, pending, offset, args.workers)
+    src_map, src_missing, ud_fb = fetch_sources_parallel(
+        cmp_mod, cfg, pending, offset, args.workers,
+    )
     rows, still_missing = build_rows(pending, src_map, offset)
     rows = dedupe_rows_by_pk(rows)
+    stats["lm_user_data_fallback"] = ud_fb
     stats["source_missing"] = len(still_missing)
     stats["planned_insert"] = len(rows)
 
