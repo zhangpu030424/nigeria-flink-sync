@@ -80,10 +80,15 @@ def fetch_order_meta(cfg: dict, sn: str) -> Optional[dict]:
         env_util.close_conn(conn)
 
 
+def _escape_sql_literals_for_pymysql(sql: str) -> str:
+    """嵌套 SQL 里 DATE_FORMAT 等含 %；PyMySQL 参数化时会误解析。"""
+    return sql.replace("%", "%%")
+
+
 def fetch_by_sn(cfg: dict, table: str, sns: Sequence[str]) -> List[dict]:
     if not sns:
         return []
-    base = source_queries._load_base_sql(table)
+    base = _escape_sql_literals_for_pymysql(source_queries._load_base_sql(table))
     alias = "s"
     ph = ",".join(["%s"] * len(sns))
     if table == "application":
