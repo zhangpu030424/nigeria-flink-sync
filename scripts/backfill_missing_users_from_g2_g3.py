@@ -13,6 +13,8 @@ G3: (mobile, app_id, user_id, group_user_id) 四元组在 user 无一致行（MI
 目标库写入：TSV 的 mobile 已是 VT token（tk_*），**直接使用，不再查 VT**；
 app_id / user_id / group_user_id 亦以 TSV 为准。
 
+默认 **仅 INSERT**（PK 已存在则跳过并列入 needs_update）；加 `--upsert` 才 ON DUPLICATE KEY UPDATE。
+
 Usage（101 内网，.env 需 SOURCE_* + LM_MYSQL_* + TARGET_*）:
   python3 scripts/backfill_missing_users_from_g2_g3.py \\
     --env ./.env \\
@@ -44,7 +46,13 @@ sys.path.insert(0, str(RECON))
 
 import env_util  # noqa: E402
 import mapping as M  # noqa: E402
-from reconcile_tables import _insert_batch, resolve_columns  # noqa: E402
+from reconcile_tables import (  # noqa: E402
+    USER_PK,
+    _insert_batch,
+    clamp_amounts,
+    quote_cols,
+    resolve_columns,
+)
 
 NG01_USER_SQL = """
 SELECT u.id,
@@ -434,6 +442,74 @@ def dedupe_rows_by_pk(rows: Sequence[dict]) -> List[dict]:
     return out
 
 
+def user_row_pk(row: dict) -> Tuple[str, int, int]:
+    return (str(row["mobile"]), int(row["app_id"]), int(row.get("closed_time") or 0))
+
+
+def fetch_target_by_pks(conn, pks: Sequence[Tuple[str, int, int]]) -> Dict[Tuple[str, int, int], dict]:
+    """按 user 主键 (mobile, app_id, closed_time) 查目标库已有行。"""
+    out: Dict[Tuple[str, int, int], dict] = {}
+    if not pks:
+        return out
+    uniq = list(dict.fromkeys(pks))
+    with conn.cursor() as cur:
+        for batch in chunks(uniq, 100):
+            parts: List[str] = []
+            params: List[Any] = []
+            for mobile, app_id, closed_time in batch:
+                parts.append("(mobile=%s AND app_id=%s AND closed_time=%s)")
+                params.extend([mobile, app_id, closed_time])
+            sql = (
+                "SELECT mobile, app_id, closed_time, user_id, group_user_id, info_user_id, reg_time "
+                "FROM `user` WHERE " + " OR ".join(parts)
+            )
+            cur.execute(sql, params)
+            for row in cur.fetchall():
+                pk = (str(row["mobile"]), int(row["app_id"]), int(row["closed_time"]))
+                out[pk] = dict(row)
+    return out
+
+
+def classify_insert_vs_update(
+    conn,
+    rows: Sequence[dict],
+) -> Tuple[List[dict], List[dict]]:
+    """PK 不存在 → insert；PK 已存在但 user_id/group_user_id 与 plan 不同 → needs_update。"""
+    pks = [user_row_pk(r) for r in rows]
+    existing = fetch_target_by_pks(conn, pks)
+    insert_rows: List[dict] = []
+    update_rows: List[dict] = []
+    for r in rows:
+        pk = user_row_pk(r)
+        tgt = existing.get(pk)
+        if tgt is None:
+            insert_rows.append(r)
+            continue
+        if int(tgt["user_id"]) == int(r["user_id"]) and int(tgt["group_user_id"]) == int(r["group_user_id"]):
+            continue
+        update_rows.append(
+            {
+                "mobile": pk[0],
+                "app_id": pk[1],
+                "closed_time": pk[2],
+                "target_user_id": int(tgt["user_id"]),
+                "target_group_user_id": int(tgt["group_user_id"]),
+                "target_info_user_id": int(tgt.get("info_user_id") or tgt["user_id"]),
+                "planned_user_id": int(r["user_id"]),
+                "planned_group_user_id": int(r["group_user_id"]),
+                "planned_info_user_id": int(r.get("info_user_id") or r["user_id"]),
+                "planned_row": r,
+            }
+        )
+    return insert_rows, update_rows
+
+
+def write_jsonl(path: Path, items: Iterable[Any]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        for item in items:
+            f.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
+
+
 def apply_inserts(
     cfg: dict,
     columns: Sequence[str],
@@ -443,13 +519,57 @@ def apply_inserts(
 ) -> int:
     if not rows:
         return 0
-    inserted = 0
+    affected = 0
     batches = chunks(rows, batch_size)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        futs = [ex.submit(_insert_batch, cfg, "user", columns, batch) for batch in batches]
+        futs = [
+            ex.submit(_insert_batch, cfg, "user", columns, batch)
+            for batch in batches
+        ]
         for fut in as_completed(futs):
-            inserted += fut.result()
-    return inserted
+            affected += fut.result()
+    return affected
+
+
+def apply_upserts(
+    cfg: dict,
+    columns: Sequence[str],
+    rows: List[dict],
+    batch_size: int,
+    workers: int,
+) -> int:
+    """INSERT；PK(mobile,app_id,closed_time) 冲突则 UPDATE（修 G3 INCONSISTENT）。"""
+    if not rows:
+        return 0
+    cols = list(columns)
+    pk_set = set(USER_PK)
+    update_cols = [c for c in cols if c not in pk_set]
+    placeholders = ", ".join(["%s"] * len(cols))
+    set_sql = ", ".join("`{0}`=VALUES(`{0}`)".format(c) for c in update_cols)
+    sql = "INSERT INTO `user` ({0}) VALUES ({1}) ON DUPLICATE KEY UPDATE {2}".format(
+        quote_cols(cols), placeholders, set_sql,
+    )
+
+    def _upsert_batch(batch: List[dict]) -> int:
+        conn = env_util.connect_target(cfg)
+        try:
+            with conn.cursor() as cur:
+                data = []
+                for r in batch:
+                    clamp_amounts(r)
+                    data.append(tuple(r.get(c) for c in cols))
+                cur.executemany(sql, data)
+            return len(batch)
+        finally:
+            env_util.close_conn(conn)
+
+    affected = 0
+    batches = chunks(rows, batch_size)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = [ex.submit(_upsert_batch, batch) for batch in batches]
+        for fut in as_completed(futs):
+            affected += fut.result()
+    return affected
 
 
 def main() -> int:
@@ -465,7 +585,17 @@ def main() -> int:
     p.add_argument("--apply", action="store_true", help="insert into target (default dry-run)")
     p.add_argument("--workers", type=int, default=8, help="parallel workers for fetch/insert")
     p.add_argument("--batch-size", type=int, default=200, help="insert batch size")
-    p.add_argument("--plan-file", help="write planned rows JSONL")
+    p.add_argument("--plan-file", help="write rows to INSERT (JSONL)")
+    p.add_argument(
+        "--update-file",
+        help="write rows that need UPDATE (PK exists, user_id/group_user_id mismatch) JSONL",
+    )
+    p.add_argument(
+        "--upsert",
+        action="store_true",
+        help="apply 时用 INSERT..ON DUPLICATE KEY UPDATE（默认仅 INSERT，冲突行写入 --update-file）",
+    )
+
     args = p.parse_args()
 
     if not args.g2_file and not args.g3_file:
@@ -500,7 +630,9 @@ def main() -> int:
         "by_pipeline": {},
         "lm_user_data_fallback": 0,
         "source_missing": 0,
+        "planned_total": 0,
         "planned_insert": 0,
+        "needs_update": 0,
         "applied_insert": 0,
     }
     for n in pending:
@@ -516,15 +648,41 @@ def main() -> int:
     rows = dedupe_rows_by_pk(rows)
     stats["lm_user_data_fallback"] = ud_fb
     stats["source_missing"] = len(still_missing)
-    stats["planned_insert"] = len(rows)
+    stats["planned_total"] = len(rows)
 
-    if args.plan_file:
-        out_path = Path(args.plan_file)
-        with out_path.open("w", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    conn = env_util.connect_target(cfg)
+    try:
+        insert_rows, update_rows = classify_insert_vs_update(conn, rows)
+    finally:
+        env_util.close_conn(conn)
+
+    stats["planned_insert"] = len(insert_rows)
+    stats["needs_update"] = len(update_rows)
+
+    plan_path = Path(args.plan_file) if args.plan_file else None
+    update_path = Path(args.update_file) if args.update_file else None
+    if plan_path:
+        write_jsonl(plan_path, insert_rows)
+    if update_path:
+        write_jsonl(update_path, update_rows)
+    elif update_rows:
+        default_update = Path("/tmp/user_backfill_needs_update.jsonl")
+        write_jsonl(default_update, update_rows)
+        stats["needs_update_file"] = str(default_update)
 
     print(json.dumps(stats, ensure_ascii=False, indent=2))
+    if update_rows[:3]:
+        print("needs_update sample:", file=sys.stderr)
+        for item in update_rows[:3]:
+            print(
+                "  mobile={mobile} app_id={app_id} target_uid={tu} planned_uid={pu}".format(
+                    mobile=item["mobile"],
+                    app_id=item["app_id"],
+                    tu=item["target_user_id"],
+                    pu=item["planned_user_id"],
+                ),
+                file=sys.stderr,
+            )
     if still_missing[:5]:
         print("source_missing sample:", file=sys.stderr)
         for n in still_missing[:5]:
@@ -540,14 +698,28 @@ def main() -> int:
             )
 
     if not args.apply:
-        print("dry-run only; pass --apply to insert {0} rows".format(len(rows)))
+        print(
+            "dry-run: would INSERT {0}, needs UPDATE {1}; pass --apply to insert only".format(
+                len(insert_rows), len(update_rows),
+            )
+        )
         print("elapsed_sec={0:.1f}".format(time.time() - t0))
         return 0
 
     columns = resolve_columns(cfg, "user", M.USER_COLS)
-    applied = apply_inserts(cfg, columns, rows, args.batch_size, args.workers)
-    stats["applied_insert"] = applied
-    print(json.dumps({"applied_insert": applied, "elapsed_sec": round(time.time() - t0, 1)}))
+    if args.upsert:
+        applied = apply_upserts(cfg, columns, insert_rows + [
+            u["planned_row"] for u in update_rows
+        ], args.batch_size, args.workers)
+        print(json.dumps({"applied_upsert": applied, "elapsed_sec": round(time.time() - t0, 1)}))
+    else:
+        applied = apply_inserts(cfg, columns, insert_rows, args.batch_size, args.workers)
+        stats["applied_insert"] = applied
+        print(json.dumps({
+            "applied_insert": applied,
+            "skipped_needs_update": len(update_rows),
+            "elapsed_sec": round(time.time() - t0, 1),
+        }))
     return 0
 
 
