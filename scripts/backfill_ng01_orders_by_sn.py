@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -81,8 +82,8 @@ def fetch_order_meta(cfg: dict, sn: str) -> Optional[dict]:
 
 
 def _escape_sql_literals_for_pymysql(sql: str) -> str:
-    """嵌套 SQL 里 DATE_FORMAT 等含 %；PyMySQL 参数化时会误解析。"""
-    return sql.replace("%", "%%")
+    """DATE_FORMAT 等含 %Y；须加倍，但不能动 PyMySQL 的 %s 占位符。"""
+    return re.sub(r"%(?!s)", "%%", sql)
 
 
 _APP_ORDER_NO_ANCHOR = (
