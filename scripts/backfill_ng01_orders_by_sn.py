@@ -85,28 +85,39 @@ def _escape_sql_literals_for_pymysql(sql: str) -> str:
     return sql.replace("%", "%%")
 
 
+_APP_ORDER_NO_ANCHOR = (
+    "WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> ''\n     ) base"
+)
+_LOAN_ORDER_NO_ANCHOR = "AND o.risk_order_status NOT IN (0, 2, 4, 6, 8)"
+
+
 def fetch_by_sn(cfg: dict, table: str, sns: Sequence[str]) -> List[dict]:
     if not sns:
         return []
-    base = _escape_sql_literals_for_pymysql(source_queries._load_base_sql(table))
-    alias = "s"
+    if table not in ("application", "loan"):
+        raise ValueError("unsupported table: {0}".format(table))
+
+    base = source_queries._load_base_sql(table)
     ph = ",".join(["%s"] * len(sns))
     if table == "application":
-        pred = "`{a}`.`sn` IN ({ph})".format(a=alias, ph=ph)
-    elif table == "loan":
-        # loan 宽表无 sn；用 application_no 精确匹配
-        app_nos = []
-        for sn in sns:
-            app_code = int(str(sn)[:3])
-            app_nos.append("ng{0:04d}-{1}".format(app_code, sn))
-        ph2 = ",".join(["%s"] * len(app_nos))
-        pred = "`{a}`.`application_no` IN ({ph})".format(a=alias, ph=ph2)
-        sns = app_nos
+        if _APP_ORDER_NO_ANCHOR not in base:
+            raise RuntimeError("application_source.sql anchor missing; cannot filter by sn")
+        base = base.replace(
+            _APP_ORDER_NO_ANCHOR,
+            "WHERE o.order_no IS NOT NULL AND TRIM(o.order_no) <> '' "
+            "AND o.order_no IN ({0})\n     ) base".format(ph),
+            1,
+        )
     else:
-        raise ValueError("unsupported table: {0}".format(table))
-    sql = "SELECT `{a}`.* FROM ({base}) `{a}` WHERE {pred}".format(
-        a=alias, base=base, pred=pred,
-    )
+        if _LOAN_ORDER_NO_ANCHOR not in base:
+            raise RuntimeError("loan_source.sql anchor missing; cannot filter by sn")
+        base = base.replace(
+            _LOAN_ORDER_NO_ANCHOR,
+            "{0} AND o.order_no IN ({1})".format(_LOAN_ORDER_NO_ANCHOR, ph),
+            1,
+        )
+
+    sql = _escape_sql_literals_for_pymysql(base)
     conn = env_util.connect_source(cfg)
     try:
         with conn.cursor() as cur:
