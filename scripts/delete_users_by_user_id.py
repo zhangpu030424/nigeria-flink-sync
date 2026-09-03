@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""按 user_id 删除 target.user。
+"""按 user_id 清理 target.user 重复行（U1）。
 
-lookup 拿到主键后顺序执行：
-  DELETE FROM user WHERE mobile=? AND app_id=? AND closed_time=? LIMIT 1
+典型场景：同一 user_id 占多条 (mobile, app_id, closed_time)，留 1 删其余。
+  SELECT user_id, COUNT(*) FROM user GROUP BY user_id HAVING COUNT(*) > 1
 
-若 pymysql 一直 2013，可先 --probe 诊断，或 --export-sql 后在 101 本机 mysql 执行；
-也可 --via-mysql 走 mysql 客户端（每条独立连接，常比 pymysql 稳）。
+默认 --strategy keep-one：每 user_id 保留 closed_time 最小的一行（通常 closed_time=0）。
 
-删前建议暂停 Flink user 增量 Job，避免与 JDBC sink 抢锁。
+Usage:
+  # 自动从库内查重复 user_id，dry-run
+  python3 scripts/delete_users_by_user_id.py --env ./.env --from-duplicates
 
-Usage（101）:
-  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --apply
-  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --probe
-  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --export-sql /tmp/del_user.sql
+  # 执行删除（先停 165 Flink user 增量）
+  python3 scripts/delete_users_by_user_id.py --env ./.env --from-duplicates --via-mysql --apply
+
+  # 或沿用 ids 文件
+  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --strategy keep-one --apply
 """
 from __future__ import annotations
 
@@ -326,7 +328,7 @@ def fetch_pk_rows(conn, user_ids: Sequence[int]) -> List[Dict[str, Any]]:
         return []
     ph = ",".join(["%s"] * len(user_ids))
     sql = (
-        "SELECT mobile, app_id, closed_time, user_id, group_user_id "
+        "SELECT mobile, app_id, closed_time, user_id, group_user_id, reg_time "
         "FROM `user` WHERE user_id IN ({0})".format(ph)
     )
     with conn.cursor() as cur:
@@ -334,8 +336,40 @@ def fetch_pk_rows(conn, user_ids: Sequence[int]) -> List[Dict[str, Any]]:
         return list(cur.fetchall())
 
 
-def row_sort_key(r: Dict[str, Any]) -> Tuple[int, int, str]:
-    return (int(r["closed_time"]), int(r["app_id"]), str(r["mobile"]))
+def fetch_duplicate_user_ids(conn) -> List[int]:
+    sql = (
+        "SELECT user_id FROM `user` "
+        "GROUP BY user_id HAVING COUNT(*) > 1 "
+        "ORDER BY COUNT(*) DESC, user_id"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        return [int(r["user_id"]) for r in cur.fetchall()]
+
+
+def fetch_duplicate_rows(conn) -> List[Dict[str, Any]]:
+    """一次查出所有重复 user_id 的全部行（含 reg_time 供 keep-one 排序）。"""
+    sql = (
+        "SELECT u.mobile, u.app_id, u.closed_time, u.user_id, u.group_user_id, u.reg_time "
+        "FROM `user` u "
+        "INNER JOIN ("
+        "  SELECT user_id FROM `user` GROUP BY user_id HAVING COUNT(*) > 1"
+        ") d ON d.user_id = u.user_id "
+        "ORDER BY u.user_id, u.closed_time, u.app_id, u.mobile"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        return list(cur.fetchall())
+
+
+def row_sort_key(r: Dict[str, Any]) -> Tuple[int, int, int, str]:
+    """keep-one 保留优先级：closed_time=0 > 更早 reg_time > 更小 app_id > mobile。"""
+    return (
+        int(r["closed_time"]),
+        int(r.get("reg_time") or 0),
+        int(r["app_id"]),
+        str(r["mobile"]),
+    )
 
 
 def select_rows_to_delete(
@@ -365,6 +399,35 @@ def select_rows_to_delete(
         return out
 
     raise SystemExit("unknown strategy: {0}".format(strategy))
+
+
+def preview_keep_one(all_rows: Sequence[Dict[str, Any]], limit: int = 10) -> None:
+    by_uid: Dict[int, List[Dict[str, Any]]] = {}
+    for r in all_rows:
+        by_uid.setdefault(int(r["user_id"]), []).append(r)
+    print("keep-one plan sample (first {0} duplicate user_id(s)):".format(limit), file=sys.stderr)
+    shown = 0
+    for uid, rows in sorted(by_uid.items()):
+        if len(rows) <= 1:
+            continue
+        rows_sorted = sorted(rows, key=row_sort_key)
+        keep = rows_sorted[0]
+        print(
+            "  uid={0}: KEEP ({1},{2},{3})  DROP {4} row(s)".format(
+                uid,
+                keep["mobile"], keep["app_id"], keep["closed_time"],
+                len(rows_sorted) - 1,
+            ),
+            file=sys.stderr,
+        )
+        for drop in rows_sorted[1:]:
+            print(
+                "    DEL ({mobile},{app_id},{closed_time})".format(**drop),
+                file=sys.stderr,
+            )
+        shown += 1
+        if shown >= limit:
+            break
 
 
 def delete_one_row(conn, row: Dict[str, Any]) -> int:
@@ -542,12 +605,17 @@ def main() -> int:
     p.add_argument("--env", default=str(HERE.parent / ".env"))
     p.add_argument("--ids-file", help="file with user_id list")
     p.add_argument("--user-ids", help="comma-separated user_ids")
+    p.add_argument(
+        "--from-duplicates",
+        action="store_true",
+        help="从库内查 HAVING COUNT(*)>1 的 user_id（U1 重复），无需 ids 文件",
+    )
     p.add_argument("--apply", action="store_true", help="execute delete (default dry-run)")
     p.add_argument(
         "--strategy",
         choices=("all", "keep-one", "closed-only"),
-        default="all",
-        help="all=删该 user_id 全部行(默认); keep-one=每 user_id 留 1 行; closed-only=只删 closed_time>0",
+        default=None,
+        help="keep-one=每 user_id 留 1 删其余(U1默认); all=删该 user_id 全部行; closed-only=只删 closed_time>0",
     )
     p.add_argument(
         "--only-closed-time",
@@ -592,33 +660,56 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    if args.ids_file:
+    if args.strategy is None:
+        args.strategy = "keep-one"
+
+    if args.from_duplicates:
+        if args.ids_file or args.user_ids:
+            print("warn: --from-duplicates ignores --ids-file / --user-ids", file=sys.stderr)
+    elif args.ids_file:
         ids = load_ids(Path(args.ids_file))
     elif args.user_ids:
         ids = parse_ids(args.user_ids)
     else:
-        print("need --ids-file or --user-ids", file=sys.stderr)
-        return 2
-
-    if not ids:
-        print("no user_id parsed", file=sys.stderr)
+        print("need --from-duplicates or --ids-file or --user-ids", file=sys.stderr)
         return 2
 
     cfg = env_util.load_env(Path(args.env))
 
-    all_rows: List[Dict[str, Any]] = []
-    print("lookup {0} distinct user_id(s)...".format(len(ids)), file=sys.stderr)
-    for batch_no, batch in enumerate(chunks(ids, args.lookup_batch), 1):
-        def _fetch(conn) -> List[Dict[str, Any]]:
-            return fetch_pk_rows(conn, batch)
+    if args.from_duplicates:
+        print("discover duplicate user_id(s) from target...", file=sys.stderr)
 
-        found = with_retry(
-            cfg, "lookup-{0}".format(batch_no), args.query_timeout, args.retries, _fetch,
+        def _fetch_dup(conn) -> List[Dict[str, Any]]:
+            return fetch_duplicate_rows(conn)
+
+        all_rows = with_retry(
+            cfg, "duplicate-rows", args.query_timeout, args.retries, _fetch_dup,
         )
-        all_rows.extend(found)
-        print("  batch {0}: +{1} rows, total={2}".format(
-            batch_no, len(found), len(all_rows),
-        ), file=sys.stderr)
+        dup_ids = sorted({int(r["user_id"]) for r in all_rows})
+        print(
+            "duplicates: {0} user_id(s), {1} row(s) total".format(
+                len(dup_ids), len(all_rows),
+            ),
+            file=sys.stderr,
+        )
+    else:
+        if not ids:
+            print("no user_id parsed", file=sys.stderr)
+            return 2
+
+        all_rows = []
+        print("lookup {0} distinct user_id(s)...".format(len(ids)), file=sys.stderr)
+        for batch_no, batch in enumerate(chunks(ids, args.lookup_batch), 1):
+            def _fetch(conn, b=batch) -> List[Dict[str, Any]]:
+                return fetch_pk_rows(conn, b)
+
+            found = with_retry(
+                cfg, "lookup-{0}".format(batch_no), args.query_timeout, args.retries, _fetch,
+            )
+            all_rows.extend(found)
+            print("  batch {0}: +{1} rows, total={2}".format(
+                batch_no, len(found), len(all_rows),
+            ), file=sys.stderr)
 
     if not all_rows:
         print("no matching rows in user table", file=sys.stderr)
@@ -629,28 +720,32 @@ def main() -> int:
         uid = int(r["user_id"])
         by_uid[uid] = by_uid.get(uid, 0) + 1
 
+    dup_uid_count = sum(1 for c in by_uid.values() if c > 1)
     print(
-        "lookup: {0} row(s), {1} user_id(s) hit, {2} id(s) not in table".format(
-            len(all_rows), len(by_uid), len(ids) - len(by_uid),
+        "lookup: {0} row(s), {1} user_id(s), {2} with duplicates".format(
+            len(all_rows), len(by_uid), dup_uid_count,
         ),
         file=sys.stderr,
     )
-    multi = [(u, c) for u, c in by_uid.items() if c > 1]
-    if multi:
-        print("duplicate user_id (U1): {0} ids, e.g. {1}".format(len(multi), multi[:5]), file=sys.stderr)
 
     to_delete = select_rows_to_delete(all_rows, args.strategy, args.only_closed_time)
+    keep_count = len(all_rows) - len(to_delete)
 
     print(
-        "will delete {0} row(s) one-by-one via PK".format(len(to_delete)),
+        "strategy={0}: delete {1} row(s), keep {2} row(s)".format(
+            args.strategy, len(to_delete), keep_count,
+        ),
         file=sys.stderr,
     )
-    print("delete plan sample (first 10):", file=sys.stderr)
-    for r in to_delete[:10]:
-        print(
-            "  DEL uid={user_id} mobile={mobile} app_id={app_id} closed_time={closed_time}".format(**r),
-            file=sys.stderr,
-        )
+    if args.strategy == "keep-one":
+        preview_keep_one(all_rows)
+    else:
+        print("delete plan sample (first 10):", file=sys.stderr)
+        for r in to_delete[:10]:
+            print(
+                "  DEL uid={user_id} mobile={mobile} app_id={app_id} closed_time={closed_time}".format(**r),
+                file=sys.stderr,
+            )
 
     if not to_delete:
         print("nothing to delete", file=sys.stderr)
