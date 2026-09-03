@@ -6,7 +6,7 @@
 命中规则另导出 TSV 明细，并在报告中附预览表格。
 
 Usage（101 内网）:
-  python3 scripts/validate_target_dq.py --env ./.env -o /tmp/dq_ng_report.md
+  python3 scripts/validate_target_dq.py --env ./.env -o /tmp/dq_ng_report.md --workers 8
   python3 scripts/validate_target_dq.py --env ./.env --rules G2,G3 --detail-dir /tmp/dq_details
   python3 scripts/validate_target_dq.py --env ./.env --json --detail-limit 0
 """
@@ -17,12 +17,14 @@ import csv
 import json
 import re
 import sys
+import threading
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import pymysql
 
@@ -30,6 +32,111 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 sys.path.insert(0, str(REPO / "scripts" / "reconcile"))
 import env_util  # noqa: E402
+
+# Nigeria WAT = UTC+1；部分 MySQL 未导入 tz 表时 Africa/Lagos 不可用
+_SESSION_TZ_CANDIDATES = ("Africa/Lagos", "+01:00")
+_TZ_LOG_LOCK = threading.Lock()
+_TZ_LOGGED = False
+
+# MySQL 可重试错误码：断连、锁等待、连接数等
+_RETRYABLE_MYSQL_ERRNO = frozenset({
+    1040,  # too many connections
+    1159,  # timeout
+    1161,  # timeout
+    1205,  # lock wait timeout
+    1213,  # deadlock
+    2006,  # server has gone away
+    2013,  # lost connection during query
+})
+
+
+def connect_target(cfg: Dict[str, Any], read_timeout: int) -> Any:
+    return pymysql.connect(
+        host=cfg["TARGET_MYSQL_HOST"],
+        port=int(cfg.get("TARGET_MYSQL_PORT") or 3306),
+        user=cfg["TARGET_MYSQL_USER"],
+        password=cfg["TARGET_MYSQL_PASSWORD"],
+        database=cfg["TARGET_MYSQL_DATABASE"],
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        connect_timeout=30,
+        read_timeout=read_timeout,
+        write_timeout=read_timeout,
+        autocommit=True,
+    )
+
+
+def is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, pymysql.err.InterfaceError):
+        return True
+    if isinstance(exc, pymysql.err.OperationalError) and exc.args:
+        return int(exc.args[0]) in _RETRYABLE_MYSQL_ERRNO
+    if isinstance(exc, OSError):
+        return True
+    return False
+
+
+def call_with_conn_retry(
+    cfg: Dict[str, Any],
+    label: str,
+    read_timeout: int,
+    retries: int,
+    fn: Callable[[Any], Any],
+) -> Any:
+    last_exc: Optional[BaseException] = None
+    for attempt in range(retries + 1):
+        conn = None
+        try:
+            conn = connect_target(cfg, read_timeout)
+            ensure_session_tz(conn)
+            return fn(conn)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries or not is_retryable(exc):
+                raise
+            wait_s = min(2 ** attempt, 30)
+            print(
+                "[retry] {0} attempt={1}/{2} wait={3}s err={4}".format(
+                    label, attempt + 1, retries, wait_s, exc,
+                ),
+                file=sys.stderr,
+            )
+            time.sleep(wait_s)
+        finally:
+            env_util.close_conn(conn)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("call_with_conn_retry: no result")
+
+
+def ensure_session_tz(conn) -> str:
+    """设置会话时区；返回实际使用的 tz 名/偏移（或 server_default）。"""
+    global _TZ_LOGGED
+    if getattr(conn, "_dq_session_tz", None):
+        return conn._dq_session_tz
+    for tz in _SESSION_TZ_CANDIDATES:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET time_zone = %s", (tz,))
+            conn._dq_session_tz = tz
+            with _TZ_LOG_LOCK:
+                if not _TZ_LOGGED:
+                    print("session time_zone={0}".format(tz), file=sys.stderr)
+                    _TZ_LOGGED = True
+            return tz
+        except pymysql.err.OperationalError as exc:
+            if exc.args and exc.args[0] == 1298:
+                continue
+            raise
+    conn._dq_session_tz = "server_default"
+    with _TZ_LOG_LOCK:
+        if not _TZ_LOGGED:
+            print(
+                "warn: cannot SET time_zone (Africa/Lagos / +01:00); using server default",
+                file=sys.stderr,
+            )
+            _TZ_LOGGED = True
+    return "server_default"
 
 # ---------------------------------------------------------------------------
 # Status / time constants (aligned with dq_full_ng_report.md)
@@ -599,7 +706,6 @@ def fetch_detail_rows(
     if limit > 0:
         q = "{0} LIMIT {1}".format(q, int(limit))
     with conn.cursor() as cur:
-        cur.execute("SET time_zone = 'Africa/Lagos'")
         cur.execute(q)
         rows = list(cur.fetchall())
     if limit > 0 and len(rows) >= limit:
@@ -607,60 +713,90 @@ def fetch_detail_rows(
     return rows, truncated
 
 
-def export_rule_details(
+def export_one_rule_details(
     conn,
-    rules: Sequence[Rule],
-    results: Sequence[Dict[str, Any]],
+    rule: Rule,
+    rec: Dict[str, Any],
     bc: str,
     a_bc: str,
     detail_dir: Optional[Path],
     export_limit: int,
     preview_limit: int,
 ) -> None:
-    by_id = {r.rule_id: r for r in rules}
-    for rec in results:
-        if rec["hits"] <= 0:
-            continue
-        rule = by_id[rec["rule_id"]]
-        detail_sql = build_detail_sql(rule, bc, a_bc)
-        if not detail_sql:
-            rec["detail_rows"] = []
-            rec["detail_note"] = "无明细 SQL"
-            continue
+    if rec["hits"] <= 0:
+        rec["detail_rows"] = []
+        return
 
-        rec["detail_sql"] = detail_sql
+    detail_sql = build_detail_sql(rule, bc, a_bc)
+    if not detail_sql:
+        rec["detail_rows"] = []
+        rec["detail_note"] = "无明细 SQL"
+        return
 
-        if detail_dir is not None:
-            cap = export_limit if export_limit > 0 else 0
-            rows, truncated = fetch_detail_rows(conn, detail_sql, cap)
-            rec["detail_exported"] = len(rows)
-            rec["detail_truncated"] = truncated
-            safe_name = rec["rule_id"].replace("/", "_").replace(".", "_")
-            tsv_path = detail_dir / "{0}.tsv".format(safe_name)
-            write_tsv(tsv_path, rows)
-            rec["detail_file"] = str(tsv_path)
-            print("detail {0}: {1} rows -> {2}{3}".format(
-                rec["rule_id"],
-                len(rows),
-                tsv_path,
-                " (truncated)" if truncated else "",
-            ), file=sys.stderr)
-            if preview_limit > 0:
-                rec["detail_rows"] = rows[:preview_limit]
-            else:
-                rec["detail_rows"] = []
-        elif preview_limit > 0:
-            rows, truncated = fetch_detail_rows(conn, detail_sql, preview_limit)
-            rec["detail_rows"] = rows
-            rec["detail_exported"] = len(rows)
-            rec["detail_truncated"] = truncated or rec["hits"] > len(rows)
+    rec["detail_sql"] = detail_sql
+
+    if detail_dir is not None:
+        cap = export_limit if export_limit > 0 else 0
+        rows, truncated = fetch_detail_rows(conn, detail_sql, cap)
+        rec["detail_exported"] = len(rows)
+        rec["detail_truncated"] = truncated
+        safe_name = rec["rule_id"].replace("/", "_").replace(".", "_")
+        tsv_path = detail_dir / "{0}.tsv".format(safe_name)
+        write_tsv(tsv_path, rows)
+        rec["detail_file"] = str(tsv_path)
+        print("detail {0}: {1} rows -> {2}{3}".format(
+            rec["rule_id"],
+            len(rows),
+            tsv_path,
+            " (truncated)" if truncated else "",
+        ), file=sys.stderr)
+        rec["detail_rows"] = rows[:preview_limit] if preview_limit > 0 else []
+    elif preview_limit > 0:
+        rows, truncated = fetch_detail_rows(conn, detail_sql, preview_limit)
+        rec["detail_rows"] = rows
+        rec["detail_exported"] = len(rows)
+        rec["detail_truncated"] = truncated or rec["hits"] > len(rows)
+    else:
+        rec["detail_rows"] = []
+
+
+def run_one_rule(
+    cfg: Dict[str, Any],
+    rule: Rule,
+    bc: str,
+    a_bc: str,
+    detail_dir: Optional[Path],
+    export_limit: int,
+    preview_limit: int,
+    read_timeout: int,
+    retries: int,
+) -> Dict[str, Any]:
+    """单规则：独立连库 → COUNT →（命中则）导出明细；失败可重试。"""
+
+    def work(conn) -> Dict[str, Any]:
+        t_rule = time.time()
+        hits = run_count(conn, rule.sql)
+        rec: Dict[str, Any] = {
+            "rule_id": rule.rule_id,
+            "level": rule.level,
+            "section": rule.section,
+            "description": rule.description,
+            "hits": hits,
+        }
+        if hits > 0:
+            export_one_rule_details(
+                conn, rule, rec, bc, a_bc, detail_dir, export_limit, preview_limit,
+            )
         else:
             rec["detail_rows"] = []
+        rec["elapsed_sec"] = round(time.time() - t_rule, 2)
+        return rec
+
+    return call_with_conn_retry(cfg, rule.rule_id, read_timeout, retries, work)
 
 
 def run_count(conn, sql: str) -> int:
     with conn.cursor() as cur:
-        cur.execute("SET time_zone = 'Africa/Lagos'")
         cur.execute(sql)
         row = cur.fetchone()
         if row is None:
@@ -810,6 +946,14 @@ def main() -> int:
         default=20,
         help="markdown/JSON 中每条命中规则预览行数 (0=不预览)",
     )
+    p.add_argument("--workers", type=int, default=8, help="并发跑规则的线程数（每线程独立连库）")
+    p.add_argument("--retries", type=int, default=3, help="单规则失败后的重试次数")
+    p.add_argument(
+        "--query-timeout",
+        type=int,
+        default=3600,
+        help="MySQL read/write 超时秒数（单条规则查询）",
+    )
     args = p.parse_args()
 
     cfg = env_util.load_env(Path(args.env))
@@ -828,72 +972,91 @@ def main() -> int:
     all_rules = build_rules(bid_clause)
     rules = filter_rules(all_rules, args.rules.split(",") if args.rules else None)
 
-    conn = env_util.connect_target(cfg)
+    if detail_dir is not None:
+        detail_dir.mkdir(parents=True, exist_ok=True)
+
     t0 = time.time()
-    try:
-        table_stats = fetch_table_stats(conn)
-        results: List[Dict[str, Any]] = []
-        for rule in rules:
-            t_rule = time.time()
-            hits = run_count(conn, rule.sql)
-            rec: Dict[str, Any] = {
-                "rule_id": rule.rule_id,
-                "level": rule.level,
-                "section": rule.section,
-                "description": rule.description,
-                "hits": hits,
-                "elapsed_sec": round(time.time() - t_rule, 2),
-            }
-            results.append(rec)
-            if hits > 0:
-                print("[{0}] {1} hits={2} ({3:.1f}s)".format(
-                    rule.level, rule.rule_id, hits, rec["elapsed_sec"],
-                ), file=sys.stderr)
+    table_stats = call_with_conn_retry(
+        cfg,
+        "table_stats",
+        args.query_timeout,
+        args.retries,
+        fetch_table_stats,
+    )
 
-        export_rule_details(
-            conn,
-            rules,
-            results,
-            bid_clause,
-            a_bc,
-            detail_dir,
-            args.detail_limit,
-            args.detail_preview,
-        )
+    workers = max(1, args.workers)
+    print(
+        "running {0} rules with {1} workers (timeout={2}s retries={3})".format(
+            len(rules), workers, args.query_timeout, args.retries,
+        ),
+        file=sys.stderr,
+    )
 
-        elapsed = time.time() - t0
-        payload = {
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "bid": args.bid,
-            "table_stats": table_stats,
-            "elapsed_sec": round(elapsed, 1),
-            "detail_dir": str(detail_dir) if detail_dir else None,
-            "results": results,
+    results_by_id: Dict[str, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dq-rule") as ex:
+        futs = {
+            ex.submit(
+                run_one_rule,
+                cfg,
+                rule,
+                bid_clause,
+                a_bc,
+                detail_dir,
+                args.detail_limit,
+                args.detail_preview,
+                args.query_timeout,
+                args.retries,
+            ): rule
+            for rule in rules
         }
+        for fut in as_completed(futs):
+            rule = futs[fut]
+            try:
+                rec = fut.result()
+            except Exception as exc:
+                print("[FAIL] {0} err={1}".format(rule.rule_id, exc), file=sys.stderr)
+                raise
+            results_by_id[rule.rule_id] = rec
+            if rec["hits"] > 0:
+                print("[{0}] {1} hits={2} ({3:.1f}s)".format(
+                    rec["level"], rec["rule_id"], rec["hits"], rec["elapsed_sec"],
+                ), file=sys.stderr)
+            else:
+                print("[ok] {0} ({1:.1f}s)".format(rule.rule_id, rec["elapsed_sec"]), file=sys.stderr)
 
-        if args.json:
-            # detail_rows 可能很大；JSON 默认只保留 preview
-            slim = []
-            for r in results:
-                item = dict(r)
-                if "detail_sql" in item:
-                    del item["detail_sql"]
-                slim.append(item)
-            payload["results"] = slim
-            out = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-        else:
-            out = render_markdown(results, table_stats, args.bid, elapsed)
+    results = [results_by_id[r.rule_id] for r in rules]
 
-        if args.output:
-            Path(args.output).write_text(out, encoding="utf-8")
-            print("wrote {0}".format(args.output), file=sys.stderr)
-            if detail_dir:
-                print("details -> {0}/".format(detail_dir), file=sys.stderr)
-        else:
-            print(out)
+    elapsed = time.time() - t0
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "bid": args.bid,
+        "table_stats": table_stats,
+        "elapsed_sec": round(elapsed, 1),
+        "workers": workers,
+        "detail_dir": str(detail_dir) if detail_dir else None,
+        "results": results,
+    }
 
-    finally:
-        env_util.close_conn(conn)
+    if args.json:
+        # detail_rows 可能很大；JSON 默认只保留 preview
+        slim = []
+        for r in results:
+            item = dict(r)
+            if "detail_sql" in item:
+                del item["detail_sql"]
+            slim.append(item)
+        payload["results"] = slim
+        out = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    else:
+        out = render_markdown(results, table_stats, args.bid, elapsed)
+
+    if args.output:
+        Path(args.output).write_text(out, encoding="utf-8")
+        print("wrote {0}".format(args.output), file=sys.stderr)
+        if detail_dir:
+            print("details -> {0}/".format(detail_dir), file=sys.stderr)
+    else:
+        print(out)
 
     return 0
 
