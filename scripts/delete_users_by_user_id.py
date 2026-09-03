@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""按 user_id 分批删除 target.user（走主键 DELETE，带重试）。
+"""按 user_id 删除 target.user。
 
-user 主键 (mobile, app_id, closed_time)，无 user_id 索引。
-
-U1 重复常见两种：
-  - 同 mobile+app_id：closed_time=0 与 closed_time=1 各一行
-  - 同 user_id 不同 app_id：两行 closed_time 都为 0
-
-默认 --strategy all：删除列表中每个 user_id 在 user 表中的全部行。
+strategy=all（默认）：按 (mobile, user_id) 一条 DELETE，走分区键 mobile，一次删掉该用户在该手机号下所有行。
+其他 strategy 仍按主键逐行删。
 
 Usage（101）:
-  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt
   python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --apply
 """
 from __future__ import annotations
@@ -176,6 +170,108 @@ def delete_one_row(conn, row: Dict[str, Any]) -> int:
         return cur.rowcount
 
 
+def mobile_user_pairs(rows: Sequence[Dict[str, Any]]) -> List[Tuple[str, int]]:
+    seen: Set[Tuple[str, int]] = set()
+    out: List[Tuple[str, int]] = []
+    for r in rows:
+        key = (str(r["mobile"]), int(r["user_id"]))
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def delete_by_mobile_user(
+    conn,
+    mobile: str,
+    user_id: int,
+    *,
+    only_closed_time: Optional[int] = None,
+    closed_only: bool = False,
+) -> int:
+    sql = "DELETE FROM `user` WHERE mobile = %s AND user_id = %s"
+    params: List[Any] = [mobile, user_id]
+    if only_closed_time is not None:
+        sql += " AND closed_time = %s"
+        params.append(only_closed_time)
+    elif closed_only:
+        sql += " AND closed_time > 0"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.rowcount
+
+
+def delete_mobile_user_with_retry(
+    cfg: dict,
+    pairs: Sequence[Tuple[str, int]],
+    read_timeout: int,
+    retries: int,
+    sleep_ms: int,
+    start_from: int,
+    *,
+    only_closed_time: Optional[int] = None,
+    closed_only: bool = False,
+) -> int:
+    """每个 (mobile, user_id) 一条 DELETE；单连接连续执行。"""
+    deleted_rows = 0
+    idx = max(0, start_from - 1)
+    total = len(pairs)
+
+    if idx > 0:
+        print("resume from pair {0}/{1}".format(idx + 1, total), file=sys.stderr)
+
+    while idx < total:
+        attempt = 0
+        while idx < total:
+            conn = None
+            try:
+                conn = connect(cfg, read_timeout)
+                init_session(conn, read_timeout)
+                while idx < total:
+                    mobile, user_id = pairs[idx]
+                    n = delete_by_mobile_user(
+                        conn, mobile, user_id,
+                        only_closed_time=only_closed_time,
+                        closed_only=closed_only,
+                    )
+                    deleted_rows += n
+                    idx += 1
+                    if idx <= 5 or idx % 50 == 0 or idx == total:
+                        print(
+                            "  [{0}/{1}] mobile={2} user_id={3} -> {4} row(s)".format(
+                                idx, total, mobile, user_id, n,
+                            ),
+                            file=sys.stderr,
+                        )
+                    if sleep_ms > 0:
+                        time.sleep(sleep_ms / 1000.0)
+                return deleted_rows
+            except Exception as exc:
+                env_util.close_conn(conn)
+                conn = None
+                if not is_retryable(exc) or attempt >= retries:
+                    print(
+                        "abort at pair {0}/{1}, use --start-from {0} to resume".format(
+                            idx + 1, total,
+                        ),
+                        file=sys.stderr,
+                    )
+                    raise
+                attempt += 1
+                wait = min(2 ** attempt, 30)
+                print(
+                    "[retry] pair {0}/{1} attempt={2}/{3} wait={4}s err={5}".format(
+                        idx + 1, total, attempt, retries, wait, exc,
+                    ),
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+            finally:
+                env_util.close_conn(conn)
+
+    return deleted_rows
+
+
 def delete_rows_with_retry(
     cfg: dict,
     rows: Sequence[Dict[str, Any]],
@@ -261,14 +357,14 @@ def main() -> int:
         help="只删指定 closed_time，如 1（覆盖 strategy）",
     )
     p.add_argument("--lookup-batch", type=int, default=30, help="user_id IN 查询批次")
-    p.add_argument("--sleep-ms", type=int, default=50, help="每条 DELETE 间隔毫秒")
+    p.add_argument("--sleep-ms", type=int, default=10, help="每条 DELETE 间隔毫秒")
     p.add_argument("--retries", type=int, default=8, help="断连重试次数")
     p.add_argument("--query-timeout", type=int, default=600, help="MySQL 读写超时秒")
     p.add_argument(
         "--start-from",
         type=int,
         default=1,
-        help="从第几条开始删（1-based，断点续删用，如前次停在 61 则 --start-from 61）",
+        help="从第几个 (mobile,user_id) 开始删（1-based；已删过的重跑会自动跳过）",
     )
     args = p.parse_args()
 
@@ -320,6 +416,29 @@ def main() -> int:
         print("duplicate user_id (U1): {0} ids, e.g. {1}".format(len(multi), multi[:5]), file=sys.stderr)
 
     to_delete = select_rows_to_delete(all_rows, args.strategy, args.only_closed_time)
+
+    use_mobile = args.strategy == "all" and args.only_closed_time is None
+    if use_mobile:
+        pairs = mobile_user_pairs(all_rows)
+        est_rows = len(all_rows)
+        print(
+            "strategy=all -> {0} DELETE by (mobile, user_id), ~{1} row(s)".format(
+                len(pairs), est_rows,
+            ),
+            file=sys.stderr,
+        )
+        print("delete plan sample (first 10):", file=sys.stderr)
+        for mobile, uid in pairs[:10]:
+            print("  DEL mobile={0} user_id={1}".format(mobile, uid), file=sys.stderr)
+        if not args.apply:
+            print("re-run with --apply to execute", file=sys.stderr)
+            return 0
+        deleted = delete_mobile_user_with_retry(
+            cfg, pairs, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
+        )
+        print("done deleted_rows={0}".format(deleted), file=sys.stderr)
+        return 0
+
     print(
         "strategy={0} only_closed_time={1} -> will delete {2} row(s), keep {3}".format(
             args.strategy,
@@ -345,10 +464,23 @@ def main() -> int:
         print("re-run with --apply to execute", file=sys.stderr)
         return 0
 
-    deleted = delete_rows_with_retry(
-        cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
-    )
-    print("done deleted={0}".format(deleted), file=sys.stderr)
+    if args.strategy == "closed-only" or args.only_closed_time is not None:
+        pairs = mobile_user_pairs(to_delete)
+        deleted = delete_mobile_user_with_retry(
+            cfg,
+            pairs,
+            args.query_timeout,
+            args.retries,
+            args.sleep_ms,
+            args.start_from,
+            only_closed_time=args.only_closed_time,
+            closed_only=(args.strategy == "closed-only" and args.only_closed_time is None),
+        )
+    else:
+        deleted = delete_rows_with_retry(
+            cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
+        )
+    print("done deleted_rows={0}".format(deleted), file=sys.stderr)
     return 0
 
 
