@@ -182,24 +182,63 @@ def delete_rows_with_retry(
     read_timeout: int,
     retries: int,
     sleep_ms: int,
+    start_from: int,
 ) -> int:
+    """单连接连续删；断连后从当前行重连续删（已删行 autocommit 不会重复）。"""
     deleted = 0
-    for i, row in enumerate(rows, 1):
-        def _do(conn) -> int:
-            return delete_one_row(conn, row)
+    # start_from: 1-based，表示从第几条开始（便于断点续删）
+    idx = max(0, start_from - 1)
+    total = len(rows)
 
-        n = with_retry(cfg, "del-{0}".format(i), read_timeout, retries, _do)
-        deleted += n
-        if i <= 5 or i % 50 == 0 or i == len(rows):
-            print(
-                "  deleted {0}/{1} uid={2} pk=({3},{4},{5})".format(
-                    i, len(rows), row["user_id"],
-                    row["mobile"], row["app_id"], row["closed_time"],
-                ),
-                file=sys.stderr,
-            )
-        if sleep_ms > 0:
-            time.sleep(sleep_ms / 1000.0)
+    if idx > 0:
+        print("resume from row {0}/{1}".format(idx + 1, total), file=sys.stderr)
+
+    while idx < total:
+        attempt = 0
+        while idx < total:
+            conn = None
+            try:
+                conn = connect(cfg, read_timeout)
+                init_session(conn, read_timeout)
+                while idx < total:
+                    row = rows[idx]
+                    n = delete_one_row(conn, row)
+                    deleted += n
+                    idx += 1
+                    if idx <= 5 or idx % 50 == 0 or idx == total:
+                        print(
+                            "  deleted {0}/{1} uid={2} pk=({3},{4},{5})".format(
+                                idx, total, row["user_id"],
+                                row["mobile"], row["app_id"], row["closed_time"],
+                            ),
+                            file=sys.stderr,
+                        )
+                    if sleep_ms > 0:
+                        time.sleep(sleep_ms / 1000.0)
+                return deleted
+            except Exception as exc:
+                env_util.close_conn(conn)
+                conn = None
+                if not is_retryable(exc) or attempt >= retries:
+                    print(
+                        "abort at row {0}/{1}, use --start-from {0} to resume".format(
+                            idx + 1, total,
+                        ),
+                        file=sys.stderr,
+                    )
+                    raise
+                attempt += 1
+                wait = min(2 ** attempt, 30)
+                print(
+                    "[retry] resume row {0}/{1} attempt={2}/{3} wait={4}s err={5}".format(
+                        idx + 1, total, attempt, retries, wait, exc,
+                    ),
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+            finally:
+                env_util.close_conn(conn)
+
     return deleted
 
 
@@ -222,9 +261,15 @@ def main() -> int:
         help="只删指定 closed_time，如 1（覆盖 strategy）",
     )
     p.add_argument("--lookup-batch", type=int, default=30, help="user_id IN 查询批次")
-    p.add_argument("--sleep-ms", type=int, default=20, help="每条 DELETE 间隔毫秒")
-    p.add_argument("--retries", type=int, default=5, help="断连重试次数")
+    p.add_argument("--sleep-ms", type=int, default=50, help="每条 DELETE 间隔毫秒")
+    p.add_argument("--retries", type=int, default=8, help="断连重试次数")
     p.add_argument("--query-timeout", type=int, default=600, help="MySQL 读写超时秒")
+    p.add_argument(
+        "--start-from",
+        type=int,
+        default=1,
+        help="从第几条开始删（1-based，断点续删用，如前次停在 61 则 --start-from 61）",
+    )
     args = p.parse_args()
 
     if args.ids_file:
@@ -301,7 +346,7 @@ def main() -> int:
         return 0
 
     deleted = delete_rows_with_retry(
-        cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms,
+        cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
     )
     print("done deleted={0}".format(deleted), file=sys.stderr)
     return 0
