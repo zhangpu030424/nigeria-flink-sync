@@ -84,9 +84,14 @@ def call_with_conn_retry(
     fn: Callable[[Any], Any],
 ) -> Any:
     last_exc: Optional[BaseException] = None
+    sem = _DB_SLOT
     for attempt in range(retries + 1):
         conn = None
+        acquired = False
         try:
+            if sem is not None:
+                sem.acquire()
+                acquired = True
             conn = connect_target(cfg, read_timeout)
             init_session(conn, read_timeout)
             return fn(conn)
@@ -94,7 +99,7 @@ def call_with_conn_retry(
             last_exc = exc
             if attempt >= retries or not is_retryable(exc):
                 raise
-            wait_s = min(2 ** attempt, 30)
+            wait_s = min(2 ** attempt, 60)
             print(
                 "[retry] {0} attempt={1}/{2} wait={3}s err={4}".format(
                     label, attempt + 1, retries, wait_s, exc,
@@ -104,6 +109,8 @@ def call_with_conn_retry(
             time.sleep(wait_s)
         finally:
             env_util.close_conn(conn)
+            if acquired and sem is not None:
+                sem.release()
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("call_with_conn_retry: no result")
@@ -188,8 +195,22 @@ PAID_OFF_APP = (27,)
 WRITTEN_OFF_APP = (25,)
 CANCEL_APP = (7, 9)
 PRE_DISBURSE_APP = (1, 3, 5, 13, 15)
+# 尚未完成复核的态（对标 dq 报告 A6=0，勿用 NOT IN 过宽集合）
+PRE_REVIEW_APP = (1, 3, 5)
+# 未结清/未放款（A7/A8/A11）
+NOT_SETTLED_APP = (1, 3, 5, 7, 9, 11, 13, 15, 20, 23, 24, 29)
+NOT_DISBURSED_APP_STRICT = (1, 3, 5, 7, 9, 11, 13)
+
 DISBURSED_NEED_LOAN = (20, 23, 27, 29)
 UNSETTLED_APP = (5, 7, 9, 15, 27)  # complement used in G4
+
+# 全表扫/大 JOIN，并发时易 2013
+HEAVY_RULES = frozenset({
+    "G1", "G2", "G3", "U1", "U2", "U3", "D.1-PREND", "D.1-CANCEL",
+    "D.1-APPROVED", "D.1-PAIDOFF-MIX", "F4", "F11", "F14", "F15", "F16",
+})
+
+_DB_SLOT: Optional[threading.Semaphore] = None
 
 VALID_LOAN_STATUS = (1, 20, 23, 24, 25, 27, 29)
 ACTIVE_LOAN = (20, 23, 29)
@@ -274,14 +295,14 @@ def build_rules(bid_clause: str, loan_cols: Optional[frozenset] = None) -> List[
              "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} = 0{0}".format(
                  bc, _in(POST_REVIEW_APP), _coalesce("reviewed_time"))),
         Rule("A6", "ERROR", "application", "复核前有reviewed_time",
-             "SELECT COUNT(*) FROM application WHERE status NOT IN ({1}) AND {2} > 0{0}".format(
-                 bc, _in(POST_REVIEW_APP), _coalesce("reviewed_time"))),
+             "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
+                 bc, _in(PRE_REVIEW_APP), _coalesce("reviewed_time"))),
         Rule("A7", "ERROR", "application", "未结清态有paid_off_time",
-             "SELECT COUNT(*) FROM application WHERE status NOT IN ({1}) AND {2} > 0{0}".format(
-                 bc, _in(PAID_OFF_APP), _coalesce("paid_off_time"))),
+             "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
+                 bc, _in(NOT_SETTLED_APP), _coalesce("paid_off_time"))),
         Rule("A8", "ERROR", "application", "未放款态有disbursed_time",
-             "SELECT COUNT(*) FROM application WHERE status NOT IN ({1},15) AND {2} > 0{0}".format(
-                 bc, _in(DISBURSED_APP), _coalesce("disbursed_time"))),
+             "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
+                 bc, _in(NOT_DISBURSED_APP_STRICT), _coalesce("disbursed_time"))),
         Rule("A9", "ERROR", "application", "坏账有paid_off_time",
              "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
                  bc, _in(WRITTEN_OFF_APP), _coalesce("paid_off_time"))),
@@ -289,8 +310,8 @@ def build_rules(bid_clause: str, loan_cols: Optional[frozenset] = None) -> List[
              "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
                  bc, _in(CANCEL_APP), _coalesce("paid_off_time"))),
         Rule("A11", "ERROR", "application", "未放款却有结清时间",
-             "SELECT COUNT(*) FROM application WHERE status NOT IN ({1},15) AND {2} > 0{0}".format(
-                 bc, _in(PAID_OFF_APP + DISBURSED_APP), _coalesce("paid_off_time"))),
+             "SELECT COUNT(*) FROM application WHERE status IN ({1}) AND {2} > 0{0}".format(
+                 bc, _in(NOT_DISBURSED_APP_STRICT), _coalesce("paid_off_time"))),
         Rule("A12", "ERROR", "application", "未复核却有放款时间",
              "SELECT COUNT(*) FROM application WHERE {1} = 0 AND {2} > 0{0}".format(
                  bc, _coalesce("reviewed_time"), _coalesce("disbursed_time"))),
@@ -761,9 +782,18 @@ def export_one_rule_details(
     detail_dir: Optional[Path],
     export_limit: int,
     preview_limit: int,
+    detail_max_hits: int,
 ) -> None:
     if rec["hits"] <= 0:
         rec["detail_rows"] = []
+        return
+
+    if detail_max_hits > 0 and rec["hits"] > detail_max_hits:
+        rec["detail_rows"] = []
+        rec["detail_note"] = "hits={0} 超过 --detail-max-hits={1}，跳过 TSV 导出".format(
+            rec["hits"], detail_max_hits,
+        )
+        print("[skip-detail] {0}: {1}".format(rule.rule_id, rec["detail_note"]), file=sys.stderr)
         return
 
     detail_sql = build_detail_sql(rule, bc, a_bc)
@@ -807,30 +837,41 @@ def run_one_rule(
     detail_dir: Optional[Path],
     export_limit: int,
     preview_limit: int,
+    detail_max_hits: int,
     read_timeout: int,
     retries: int,
+    continue_on_error: bool,
 ) -> Dict[str, Any]:
     """单规则：独立连库；COUNT 与明细分开重试，明细失败不拖垮计数。"""
     t_rule = time.time()
+    base = {
+        "rule_id": rule.rule_id,
+        "level": rule.level,
+        "section": rule.section,
+        "description": rule.description,
+    }
 
-    def count_work(conn) -> Dict[str, Any]:
-        hits = run_count(conn, rule.sql)
-        return {
-            "rule_id": rule.rule_id,
-            "level": rule.level,
-            "section": rule.section,
-            "description": rule.description,
-            "hits": hits,
-        }
+    def count_work(conn) -> int:
+        return run_count(conn, rule.sql)
 
-    rec = call_with_conn_retry(
-        cfg, "{0}:count".format(rule.rule_id), read_timeout, retries, count_work,
-    )
+    try:
+        hits = call_with_conn_retry(
+            cfg, "{0}:count".format(rule.rule_id), read_timeout, retries, count_work,
+        )
+        rec: Dict[str, Any] = dict(base, hits=hits)
+    except Exception as exc:
+        if not continue_on_error:
+            raise
+        rec = dict(base, hits=-1, count_error=str(exc))
+        rec["elapsed_sec"] = round(time.time() - t_rule, 2)
+        print("[FAIL] {0} count: {1}".format(rule.rule_id, exc), file=sys.stderr)
+        return rec
 
     if rec["hits"] > 0 and (detail_dir is not None or preview_limit > 0):
         def detail_work(conn) -> None:
             export_one_rule_details(
                 conn, rule, rec, bc, a_bc, detail_dir, export_limit, preview_limit,
+                detail_max_hits,
             )
 
         try:
@@ -924,14 +965,25 @@ def render_markdown(
         lines.append("| 规则 | 级别 | 命中 | 语义 |")
         lines.append("|---|---|---|---|")
         for r in rows:
-            flag = " ⚠️" if r["hits"] > 0 else ""
+            flag = " ⚠️" if r.get("hits", 0) > 0 else ""
+            hits_disp = r.get("hits", 0)
+            if hits_disp < 0:
+                hits_disp = "FAIL"
+                flag = " ❌"
             lines.append("| {rule} | {lvl} | {hits}{flag} | {desc} |".format(
-                rule=r["rule_id"], lvl=r["level"], hits=r["hits"], flag=flag, desc=r["description"],
+                rule=r["rule_id"], lvl=r["level"], hits=hits_disp, flag=flag, desc=r["description"],
             ))
+            if r.get("count_error"):
+                lines.append("")
+                lines.append("_count_error: {0}_".format(r["count_error"]))
         lines.append("")
 
-    err_hits = sum(r["hits"] for r in results if r["level"] == "ERROR" and r["hits"] > 0)
-    warn_hits = sum(r["hits"] for r in results if r["level"] == "WARN" and r["hits"] > 0)
+    err_hits = sum(
+        r.get("hits", 0) for r in results if r["level"] == "ERROR" and r.get("hits", 0) > 0
+    )
+    warn_hits = sum(
+        r.get("hits", 0) for r in results if r["level"] == "WARN" and r.get("hits", 0) > 0
+    )
     lines.append("---")
     lines.append("")
     lines.append("耗时: {0:.1f}s  ERROR命中规则数: {1}  WARN命中规则数: {2}".format(
@@ -999,8 +1051,25 @@ def main() -> int:
         default=20,
         help="markdown/JSON 中每条命中规则预览行数 (0=不预览)",
     )
-    p.add_argument("--workers", type=int, default=4, help="并发跑规则的线程数（每线程独立连库，默认4防断连）")
-    p.add_argument("--retries", type=int, default=3, help="单规则失败后的重试次数")
+    p.add_argument("--workers", type=int, default=2, help="并发规则数（默认2，大库建议1-2）")
+    p.add_argument("--retries", type=int, default=5, help="单规则失败后的重试次数")
+    p.add_argument(
+        "--max-concurrent-db",
+        type=int,
+        default=2,
+        help="同时连库执行 SQL 的上限（全局信号量，防 2013）",
+    )
+    p.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="任一规则 COUNT 失败即退出（默认失败继续）",
+    )
+    p.add_argument(
+        "--detail-max-hits",
+        type=int,
+        default=10000,
+        help="命中超过此值则跳过 TSV 全量导出（0=不限制）",
+    )
     p.add_argument(
         "--query-timeout",
         type=int,
@@ -1052,10 +1121,15 @@ def main() -> int:
     all_rules = build_rules(bid_clause, loan_cols)
     rules = filter_rules(all_rules, args.rules.split(",") if args.rules else None)
 
+    global _DB_SLOT
+    _DB_SLOT = threading.Semaphore(max(1, args.max_concurrent_db))
+
     workers = max(1, args.workers)
+    continue_on_error = not args.fail_fast
     print(
-        "running {0} rules with {1} workers (timeout={2}s retries={3})".format(
-            len(rules), workers, args.query_timeout, args.retries,
+        "running {0} rules workers={1} max_db={2} timeout={3}s retries={4} continue_on_error={5}".format(
+            len(rules), workers, args.max_concurrent_db,
+            args.query_timeout, args.retries, continue_on_error,
         ),
         file=sys.stderr,
     )
@@ -1072,8 +1146,10 @@ def main() -> int:
                 detail_dir,
                 args.detail_limit,
                 args.detail_preview,
+                args.detail_max_hits,
                 args.query_timeout,
                 args.retries,
+                continue_on_error,
             ): rule
             for rule in rules
         }
@@ -1083,9 +1159,22 @@ def main() -> int:
                 rec = fut.result()
             except Exception as exc:
                 print("[FAIL] {0} err={1}".format(rule.rule_id, exc), file=sys.stderr)
-                raise
+                if not continue_on_error:
+                    raise
+                rec = {
+                    "rule_id": rule.rule_id,
+                    "level": rule.level,
+                    "section": rule.section,
+                    "description": rule.description,
+                    "hits": -1,
+                    "count_error": str(exc),
+                    "detail_rows": [],
+                    "elapsed_sec": 0,
+                }
             results_by_id[rule.rule_id] = rec
-            if rec["hits"] > 0:
+            if rec.get("count_error"):
+                print("[FAIL] {0} (count)".format(rule.rule_id), file=sys.stderr)
+            elif rec.get("hits", 0) > 0:
                 print("[{0}] {1} hits={2} ({3:.1f}s)".format(
                     rec["level"], rec["rule_id"], rec["hits"], rec["elapsed_sec"],
                 ), file=sys.stderr)
@@ -1125,6 +1214,13 @@ def main() -> int:
             print("details -> {0}/".format(detail_dir), file=sys.stderr)
     else:
         print(out)
+
+    failed = [r for r in results if r.get("count_error")]
+    if failed:
+        print("{0} rule(s) count failed: {1}".format(
+            len(failed), ", ".join(r["rule_id"] for r in failed),
+        ), file=sys.stderr)
+        return 1
 
     return 0
 
