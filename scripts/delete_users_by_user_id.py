@@ -33,6 +33,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "reconcile"))
 import env_util  # noqa: E402
 
+_MYSQL_RETRY_MARKERS = ("2013", "2006", "1205", "Lost connection", "Lock wait timeout")
 _RETRYABLE = frozenset({1205, 1213, 2003, 2006, 2013, 2014})
 _MYSQL_INIT = (
     "SET SESSION net_read_timeout=7200, net_write_timeout=7200, "
@@ -127,10 +128,59 @@ def mysql_query(cfg: dict, sql: str, *, retries: int = 3) -> str:
         if proc.returncode == 0:
             return proc.stdout
         last_err = (proc.stderr or proc.stdout or "").strip()
-        if attempt >= retries or not any(m in last_err for m in ("2013", "2006", "Lost connection")):
+        if attempt >= retries or not any(m in last_err for m in _MYSQL_RETRY_MARKERS):
             raise RuntimeError("mysql failed: {0}".format(last_err))
         time.sleep(min(2 ** attempt, 30))
     raise RuntimeError("mysql failed: {0}".format(last_err))
+
+
+def print_2013_hint() -> None:
+    print(
+        "\n2013 on DELETE (SELECT ok, read_only=0) usually means:\n"
+        "  1) Flink user incr JDBC sink holds row locks -> cancel sink_user Job on 165 first\n"
+        "  2) vedbm proxy kills connection while waiting for lock\n"
+        "Try: bash scripts/cancel-flink-jobs.sh --yes   # or cancel only user incr\n"
+        "Then: python3 scripts/delete_users_by_user_id.py ... --diagnose-locks --probe\n",
+        file=sys.stderr,
+    )
+
+
+def diagnose_locks(cfg: dict) -> None:
+    print("== active sessions on target ==" , file=sys.stderr)
+    try:
+        out = mysql_query(
+            cfg,
+            "SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, "
+            "LEFT(COALESCE(INFO,''), 160) "
+            "FROM information_schema.PROCESSLIST "
+            "WHERE DB = DATABASE() AND COMMAND <> 'Sleep' "
+            "ORDER BY TIME DESC LIMIT 25",
+        )
+        if out.strip():
+            print(out, file=sys.stderr)
+        else:
+            print("(no active non-Sleep sessions in current DB)", file=sys.stderr)
+    except Exception as exc:
+        print("processlist: {0}".format(exc), file=sys.stderr)
+
+    print("== innodb trx ==" , file=sys.stderr)
+    try:
+        out = mysql_query(
+            cfg,
+            "SELECT trx_id, trx_state, trx_started, trx_mysql_thread_id, "
+            "trx_rows_locked, trx_rows_modified, LEFT(trx_query, 160) "
+            "FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 15",
+        )
+        print(out.strip() or "(empty)", file=sys.stderr)
+    except Exception as exc:
+        print("innodb_trx: {0}".format(exc), file=sys.stderr)
+
+    print("== grants ==" , file=sys.stderr)
+    try:
+        out = mysql_query(cfg, "SHOW GRANTS FOR CURRENT_USER()")
+        print(out, file=sys.stderr)
+    except Exception as exc:
+        print("grants: {0}".format(exc), file=sys.stderr)
 
 
 def check_target_writable(cfg: dict) -> None:
@@ -151,6 +201,7 @@ def probe_first_row(cfg: dict, row: Dict[str, Any], read_timeout: int) -> None:
         row["user_id"], row["mobile"], row["app_id"], row["closed_time"],
     ), file=sys.stderr)
     check_target_writable(cfg)
+    diagnose_locks(cfg)
 
     conn = connect(cfg, read_timeout)
     try:
@@ -179,8 +230,16 @@ def probe_first_row(cfg: dict, row: Dict[str, Any], read_timeout: int) -> None:
                 print("delete (will rollback): {0:.3f}s rowcount={1}".format(
                     time.time() - t1, rc,
                 ), file=sys.stderr)
-            finally:
+            except pymysql.err.OperationalError as exc:
                 cur.execute("ROLLBACK")
+                if exc.args and int(exc.args[0]) == 1205:
+                    print("delete blocked: lock wait timeout (1205) -> stop Flink user incr first", file=sys.stderr)
+                raise
+            finally:
+                try:
+                    cur.execute("ROLLBACK")
+                except pymysql.err.OperationalError:
+                    pass
                 print("rolled back", file=sys.stderr)
     finally:
         env_util.close_conn(conn)
@@ -358,13 +417,15 @@ def delete_via_mysql_cli(
                     time.sleep(sleep_ms / 1000.0)
                 break
             err = (proc.stderr or proc.stdout or "").strip()
-            if attempt >= retries or not any(m in err for m in ("2013", "2006", "Lost connection")):
+            if attempt >= retries or not any(m in err for m in _MYSQL_RETRY_MARKERS):
                 print(
                     "abort at row {0}/{1}, use --start-from {0} to resume\n{2}".format(
                         idx + 1, total, err,
                     ),
                     file=sys.stderr,
                 )
+                if "2013" in err or "Lost connection" in err:
+                    print_2013_hint()
                 raise RuntimeError(err)
             attempt += 1
             wait = min(2 ** attempt, 30)
@@ -511,6 +572,11 @@ def main() -> int:
         help="诊断首行：检查只读 + 事务内试删并 rollback（不真删）",
     )
     p.add_argument(
+        "--diagnose-locks",
+        action="store_true",
+        help="打印 PROCESSLIST / innodb_trx / GRANTS（apply 前也会自动跑）",
+    )
+    p.add_argument(
         "--skip-writable-check",
         action="store_true",
         help="跳过 @@read_only 检查",
@@ -589,12 +655,20 @@ def main() -> int:
         probe_first_row(cfg, to_delete[0], args.query_timeout)
         return 0
 
+    if args.diagnose_locks:
+        if not args.skip_writable_check:
+            check_target_writable(cfg)
+        diagnose_locks(cfg)
+        if not args.apply:
+            return 0
+
     if not args.apply:
         print("re-run with --apply to execute", file=sys.stderr)
         return 0
 
     if not args.skip_writable_check:
         check_target_writable(cfg)
+    diagnose_locks(cfg)
 
     if args.via_mysql:
         deleted = delete_via_mysql_cli(
