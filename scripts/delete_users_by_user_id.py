@@ -2,28 +2,61 @@
 # -*- coding: utf-8 -*-
 """按 user_id 删除 target.user。
 
-lookup 拿到主键后，单连接顺序执行：
+lookup 拿到主键后顺序执行：
   DELETE FROM user WHERE mobile=? AND app_id=? AND closed_time=? LIMIT 1
+
+若 pymysql 一直 2013，可先 --probe 诊断，或 --export-sql 后在 101 本机 mysql 执行；
+也可 --via-mysql 走 mysql 客户端（每条独立连接，常比 pymysql 稳）。
+
+删前建议暂停 Flink user 增量 Job，避免与 JDBC sink 抢锁。
 
 Usage（101）:
   python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --apply
+  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --probe
+  python3 scripts/delete_users_by_user_id.py --env ./.env --ids-file scripts/del_user_ids.txt --export-sql /tmp/del_user.sql
 """
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import pymysql
+from pymysql.converters import escape_string
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "reconcile"))
 import env_util  # noqa: E402
 
 _RETRYABLE = frozenset({1205, 1213, 2003, 2006, 2013, 2014})
+_MYSQL_INIT = (
+    "SET SESSION net_read_timeout=7200, net_write_timeout=7200, "
+    "wait_timeout=7200, interactive_timeout=7200, innodb_lock_wait_timeout=120"
+)
+
+
+def sql_literal(val: Any) -> str:
+    if val is None:
+        return "NULL"
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return str(int(val) if isinstance(val, float) and val.is_integer() else val)
+    return "'{0}'".format(escape_string(str(val)))
+
+
+def delete_sql(row: Dict[str, Any]) -> str:
+    return (
+        "DELETE FROM `user` WHERE mobile={mobile} AND app_id={app_id} "
+        "AND closed_time={closed_time} LIMIT 1;".format(
+            mobile=sql_literal(row["mobile"]),
+            app_id=int(row["app_id"]),
+            closed_time=int(row["closed_time"]),
+        )
+    )
 
 
 def parse_ids(text: str) -> List[int]:
@@ -59,11 +92,100 @@ def connect(cfg: dict, read_timeout: int) -> Any:
         database=cfg["TARGET_MYSQL_DATABASE"],
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
-        connect_timeout=30,
+        connect_timeout=60,
         read_timeout=read_timeout,
         write_timeout=read_timeout,
         autocommit=True,
     )
+
+
+def mysql_cmd_base(cfg: dict) -> List[str]:
+    return [
+        "mysql",
+        "-h", str(cfg["TARGET_MYSQL_HOST"]),
+        "-P", str(int(cfg.get("TARGET_MYSQL_PORT") or 3306)),
+        "-u", str(cfg["TARGET_MYSQL_USER"]),
+        str(cfg["TARGET_MYSQL_DATABASE"]),
+        "--connect-timeout=60",
+        "--init-command", _MYSQL_INIT,
+    ]
+
+
+def mysql_env(cfg: dict) -> dict:
+    env = os.environ.copy()
+    env["MYSQL_PWD"] = str(cfg["TARGET_MYSQL_PASSWORD"])
+    return env
+
+
+def mysql_query(cfg: dict, sql: str, *, retries: int = 3) -> str:
+    cmd = mysql_cmd_base(cfg) + ["-N", "-B", "-e", sql]
+    last_err = ""
+    for attempt in range(retries + 1):
+        proc = subprocess.run(
+            cmd, env=mysql_env(cfg), capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            return proc.stdout
+        last_err = (proc.stderr or proc.stdout or "").strip()
+        if attempt >= retries or not any(m in last_err for m in ("2013", "2006", "Lost connection")):
+            raise RuntimeError("mysql failed: {0}".format(last_err))
+        time.sleep(min(2 ** attempt, 30))
+    raise RuntimeError("mysql failed: {0}".format(last_err))
+
+
+def check_target_writable(cfg: dict) -> None:
+    out = mysql_query(
+        cfg,
+        "SELECT @@hostname, @@port, @@read_only, @@innodb_read_only, @@super_read_only",
+    )
+    print("target: {0}".format(out.replace("\t", " ")), file=sys.stderr)
+    parts = out.strip().split("\t")
+    if len(parts) >= 3 and any(p == "1" for p in parts[2:]):
+        raise SystemExit(
+            "target looks read-only (read_only=1); use writer endpoint, not replica",
+        )
+
+
+def probe_first_row(cfg: dict, row: Dict[str, Any], read_timeout: int) -> None:
+    print("probe row uid={0} pk=({1},{2},{3})".format(
+        row["user_id"], row["mobile"], row["app_id"], row["closed_time"],
+    ), file=sys.stderr)
+    check_target_writable(cfg)
+
+    conn = connect(cfg, read_timeout)
+    try:
+        init_session(conn, read_timeout)
+        with conn.cursor() as cur:
+            cur.execute("SELECT @@read_only, @@innodb_read_only")
+            ro = cur.fetchone()
+            print("pymysql session read_only={0}".format(ro), file=sys.stderr)
+
+            t0 = time.time()
+            cur.execute(
+                "SELECT user_id FROM `user` WHERE mobile=%s AND app_id=%s AND closed_time=%s",
+                (row["mobile"], row["app_id"], row["closed_time"]),
+            )
+            found = cur.fetchone()
+            print("select pk: {0:.3f}s found={1}".format(time.time() - t0, bool(found)), file=sys.stderr)
+
+            cur.execute("START TRANSACTION")
+            try:
+                t1 = time.time()
+                cur.execute(
+                    "DELETE FROM `user` WHERE mobile=%s AND app_id=%s AND closed_time=%s LIMIT 1",
+                    (row["mobile"], row["app_id"], row["closed_time"]),
+                )
+                rc = cur.rowcount
+                print("delete (will rollback): {0:.3f}s rowcount={1}".format(
+                    time.time() - t1, rc,
+                ), file=sys.stderr)
+            finally:
+                cur.execute("ROLLBACK")
+                print("rolled back", file=sys.stderr)
+    finally:
+        env_util.close_conn(conn)
+
+    print("probe done (no rows deleted)", file=sys.stderr)
 
 
 def init_session(conn, read_timeout: int) -> None:
@@ -184,6 +306,79 @@ def delete_one_row(conn, row: Dict[str, Any]) -> int:
         return cur.rowcount
 
 
+def export_delete_sql(rows: Sequence[Dict[str, Any]], path: Path) -> None:
+    lines = [
+        "-- generated by delete_users_by_user_id.py",
+        "SET SESSION net_read_timeout=7200, net_write_timeout=7200;",
+        "SET SESSION innodb_lock_wait_timeout=120;",
+    ]
+    lines.extend(delete_sql(r) for r in rows)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("wrote {0} DELETE statement(s) to {1}".format(len(rows), path), file=sys.stderr)
+
+
+def delete_via_mysql_cli(
+    cfg: dict,
+    rows: Sequence[Dict[str, Any]],
+    retries: int,
+    sleep_ms: int,
+    start_from: int,
+) -> int:
+    row_list = list(rows)
+    total = len(row_list)
+    idx = max(0, start_from - 1)
+    deleted = 0
+
+    if idx > 0:
+        print("resume from row {0}/{1}".format(idx + 1, total), file=sys.stderr)
+
+    while idx < total:
+        row = row_list[idx]
+        sql = delete_sql(row).rstrip(";")
+        attempt = 0
+        while True:
+            proc = subprocess.run(
+                mysql_cmd_base(cfg) + ["-e", sql],
+                env=mysql_env(cfg),
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                deleted += 1
+                idx += 1
+                if idx <= 5 or idx % 50 == 0 or idx == total:
+                    print(
+                        "  deleted {0}/{1} uid={2} pk=({3},{4},{5})".format(
+                            idx, total, row["user_id"],
+                            row["mobile"], row["app_id"], row["closed_time"],
+                        ),
+                        file=sys.stderr,
+                    )
+                if sleep_ms > 0 and idx < total:
+                    time.sleep(sleep_ms / 1000.0)
+                break
+            err = (proc.stderr or proc.stdout or "").strip()
+            if attempt >= retries or not any(m in err for m in ("2013", "2006", "Lost connection")):
+                print(
+                    "abort at row {0}/{1}, use --start-from {0} to resume\n{2}".format(
+                        idx + 1, total, err,
+                    ),
+                    file=sys.stderr,
+                )
+                raise RuntimeError(err)
+            attempt += 1
+            wait = min(2 ** attempt, 30)
+            print(
+                "[retry] row {0}/{1} attempt={2}/{3} wait={4}s err={5}".format(
+                    idx + 1, total, attempt, retries, wait, err,
+                ),
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+    return deleted
+
+
 def _run_delete_loop(
     cfg: dict,
     total_units: int,
@@ -293,12 +488,32 @@ def main() -> int:
     p.add_argument("--lookup-batch", type=int, default=30, help="user_id IN 查询批次")
     p.add_argument("--sleep-ms", type=int, default=0, help="每条 DELETE 间隔毫秒")
     p.add_argument("--retries", type=int, default=8, help="断连重试次数")
-    p.add_argument("--query-timeout", type=int, default=600, help="MySQL 读写超时秒")
+    p.add_argument("--query-timeout", type=int, default=7200, help="MySQL 读写超时秒")
     p.add_argument(
         "--start-from",
         type=int,
         default=1,
         help="断点续删：从第几行开始(1-based)",
+    )
+    p.add_argument(
+        "--via-mysql",
+        action="store_true",
+        help="用 mysql 客户端逐条删（推荐；避开 pymysql 长连接 2013）",
+    )
+    p.add_argument(
+        "--export-sql",
+        metavar="FILE",
+        help="只导出 DELETE SQL 文件，不连库执行",
+    )
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help="诊断首行：检查只读 + 事务内试删并 rollback（不真删）",
+    )
+    p.add_argument(
+        "--skip-writable-check",
+        action="store_true",
+        help="跳过 @@read_only 检查",
     )
     args = p.parse_args()
 
@@ -366,13 +581,29 @@ def main() -> int:
         print("nothing to delete", file=sys.stderr)
         return 0
 
+    if args.export_sql:
+        export_delete_sql(to_delete, Path(args.export_sql))
+        return 0
+
+    if args.probe:
+        probe_first_row(cfg, to_delete[0], args.query_timeout)
+        return 0
+
     if not args.apply:
         print("re-run with --apply to execute", file=sys.stderr)
         return 0
 
-    deleted = delete_rows_with_retry(
-        cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
-    )
+    if not args.skip_writable_check:
+        check_target_writable(cfg)
+
+    if args.via_mysql:
+        deleted = delete_via_mysql_cli(
+            cfg, to_delete, args.retries, args.sleep_ms, args.start_from,
+        )
+    else:
+        deleted = delete_rows_with_retry(
+            cfg, to_delete, args.query_timeout, args.retries, args.sleep_ms, args.start_from,
+        )
     print("done deleted_rows={0}".format(deleted), file=sys.stderr)
     return 0
 
