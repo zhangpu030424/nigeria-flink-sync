@@ -88,7 +88,7 @@ def call_with_conn_retry(
         conn = None
         try:
             conn = connect_target(cfg, read_timeout)
-            ensure_session_tz(conn)
+            init_session(conn, read_timeout)
             return fn(conn)
         except Exception as exc:
             last_exc = exc
@@ -107,6 +107,43 @@ def call_with_conn_retry(
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("call_with_conn_retry: no result")
+
+
+def init_session(conn, read_timeout: int) -> None:
+    ensure_session_tz(conn)
+    with conn.cursor() as cur:
+        for stmt in (
+            "SET SESSION net_read_timeout = {0}".format(int(read_timeout)),
+            "SET SESSION net_write_timeout = {0}".format(int(read_timeout)),
+            "SET SESSION wait_timeout = {0}".format(max(int(read_timeout), 28800)),
+        ):
+            try:
+                cur.execute(stmt)
+            except pymysql.err.OperationalError:
+                pass
+
+
+def fetch_loan_columns(conn) -> frozenset:
+    with conn.cursor() as cur:
+        cur.execute("SHOW COLUMNS FROM `loan`")
+        return frozenset(row["Field"] for row in cur.fetchall())
+
+
+def loan_total_expr(prefix: str, loan_cols: frozenset) -> str:
+    """F4 分项加总；按目标库实际列动态拼接（部分库无 roll_fee）。"""
+    parts = [
+        "COALESCE({0}principal,0)".format(prefix),
+        "COALESCE({0}interest,0)".format(prefix),
+        "COALESCE({0}admin_fee,0)".format(prefix),
+    ]
+    if "roll_fee" in loan_cols:
+        parts.append("COALESCE({0}roll_fee,0)".format(prefix))
+    if "penalty_amount" in loan_cols:
+        parts.append("COALESCE({0}penalty_amount,0)".format(prefix))
+    expr = "+".join(parts)
+    if "reduction_amount" in loan_cols:
+        expr += "-COALESCE({0}reduction_amount,0)".format(prefix)
+    return expr
 
 
 def ensure_session_tz(conn) -> str:
@@ -212,9 +249,11 @@ class Rule:
     detail_sql: Optional[str] = None
 
 
-def build_rules(bid_clause: str) -> List[Rule]:
+def build_rules(bid_clause: str, loan_cols: Optional[frozenset] = None) -> List[Rule]:
     """bid_clause: '' or \"AND bid = 'ng01'\" (leading space included)."""
     bc = bid_clause
+    lc = loan_cols if loan_cols is not None else frozenset()
+    f4_total = loan_total_expr("l.", lc)
 
     rules: List[Rule] = []
 
@@ -353,10 +392,8 @@ def build_rules(bid_clause: str) -> List[Rule]:
              "SELECT COUNT(*) FROM loan WHERE principal < 0 OR interest < 0 OR admin_fee < 0 "
              "OR total_amount < 0 OR paid_amount < 0"),
         Rule("F4", "WARN", "loan", "total≠分项加总",
-             "SELECT COUNT(*) FROM loan l{0} WHERE l.total_amount <> ("
-             "COALESCE(l.principal,0)+COALESCE(l.interest,0)+COALESCE(l.admin_fee,0)"
-             "+COALESCE(l.roll_fee,0)+COALESCE(l.penalty_amount,0)"
-             "-COALESCE(l.reduction_amount,0))".format(app_join)),
+             "SELECT COUNT(*) FROM loan l{0} WHERE l.total_amount <> ({1})".format(
+                 app_join, f4_total)),
         Rule("F5", "ERROR", "loan", "结清缺结清日/时间",
              "SELECT COUNT(*) FROM loan WHERE status IN ({0}) AND ("
              "paid_off_date IS NULL OR {1} = 0)".format(
@@ -416,14 +453,13 @@ def build_rules(bid_clause: str) -> List[Rule]:
     rules += [
         Rule("F14", "ERROR", "sequence", "period 序列缺号(1..max 不连续)",
              "SELECT COUNT(*) FROM ("
-             "SELECT application_no, MAX(period) AS mx, COUNT(DISTINCT period) AS dc "
-             "FROM loan GROUP BY application_no HAVING mx <> dc) t"),
+             "SELECT application_no FROM loan GROUP BY application_no "
+             "HAVING MAX(period) <> COUNT(DISTINCT period)) t"),
         Rule("F15", "ERROR", "sequence", "period 内 roll_sequence 缺号(非0起或不连续)",
              "SELECT COUNT(*) FROM ("
-             "SELECT application_no, period, MAX(roll_sequence) AS mx, "
-             "MIN(roll_sequence) AS mn, COUNT(DISTINCT roll_sequence) AS dc "
-             "FROM loan GROUP BY application_no, period "
-             "HAVING mx <> dc OR mn <> 0) t"),
+             "SELECT application_no, period FROM loan GROUP BY application_no, period "
+             "HAVING MIN(roll_sequence) <> 0 "
+             "OR MAX(roll_sequence) + 1 <> COUNT(DISTINCT roll_sequence)) t"),
         Rule("F16", "ERROR", "sequence", "展期(roll>0)前序 loan 非 ROLLOVER_PAID_OFF(25)",
              "SELECT COUNT(*) FROM loan l "
              "INNER JOIN loan prev ON prev.application_no = l.application_no "
@@ -578,12 +614,15 @@ def build_detail_sql(rule: Rule, bc: str, a_bc: str) -> Optional[str]:
         ).format(a_bc=a_bc),
         "F14": (
             "SELECT application_no, MAX(period) AS max_period, COUNT(DISTINCT period) AS period_cnt "
-            "FROM loan GROUP BY application_no HAVING max_period <> period_cnt ORDER BY application_no"
+            "FROM loan GROUP BY application_no "
+            "HAVING MAX(period) <> COUNT(DISTINCT period) ORDER BY application_no"
         ),
         "F15": (
             "SELECT application_no, period, MAX(roll_sequence) AS max_roll, MIN(roll_sequence) AS min_roll, "
             "COUNT(DISTINCT roll_sequence) AS roll_cnt FROM loan GROUP BY application_no, period "
-            "HAVING max_roll <> roll_cnt OR min_roll <> 0 ORDER BY application_no, period"
+            "HAVING MIN(roll_sequence) <> 0 "
+            "OR MAX(roll_sequence) + 1 <> COUNT(DISTINCT roll_sequence) "
+            "ORDER BY application_no, period"
         ),
         "F16": (
             "SELECT l.application_no, l.period, l.roll_sequence, l.loan_no, l.status AS loan_status, "
@@ -771,28 +810,42 @@ def run_one_rule(
     read_timeout: int,
     retries: int,
 ) -> Dict[str, Any]:
-    """单规则：独立连库 → COUNT →（命中则）导出明细；失败可重试。"""
+    """单规则：独立连库；COUNT 与明细分开重试，明细失败不拖垮计数。"""
+    t_rule = time.time()
 
-    def work(conn) -> Dict[str, Any]:
-        t_rule = time.time()
+    def count_work(conn) -> Dict[str, Any]:
         hits = run_count(conn, rule.sql)
-        rec: Dict[str, Any] = {
+        return {
             "rule_id": rule.rule_id,
             "level": rule.level,
             "section": rule.section,
             "description": rule.description,
             "hits": hits,
         }
-        if hits > 0:
+
+    rec = call_with_conn_retry(
+        cfg, "{0}:count".format(rule.rule_id), read_timeout, retries, count_work,
+    )
+
+    if rec["hits"] > 0 and (detail_dir is not None or preview_limit > 0):
+        def detail_work(conn) -> None:
             export_one_rule_details(
                 conn, rule, rec, bc, a_bc, detail_dir, export_limit, preview_limit,
             )
-        else:
-            rec["detail_rows"] = []
-        rec["elapsed_sec"] = round(time.time() - t_rule, 2)
-        return rec
 
-    return call_with_conn_retry(cfg, rule.rule_id, read_timeout, retries, work)
+        try:
+            call_with_conn_retry(
+                cfg, "{0}:detail".format(rule.rule_id), read_timeout, retries, detail_work,
+            )
+        except Exception as exc:
+            rec["detail_error"] = str(exc)
+            rec["detail_rows"] = []
+            print("[warn] {0} detail failed: {1}".format(rule.rule_id, exc), file=sys.stderr)
+    else:
+        rec["detail_rows"] = []
+
+    rec["elapsed_sec"] = round(time.time() - t_rule, 2)
+    return rec
 
 
 def run_count(conn, sql: str) -> int:
@@ -946,7 +999,7 @@ def main() -> int:
         default=20,
         help="markdown/JSON 中每条命中规则预览行数 (0=不预览)",
     )
-    p.add_argument("--workers", type=int, default=8, help="并发跑规则的线程数（每线程独立连库）")
+    p.add_argument("--workers", type=int, default=4, help="并发跑规则的线程数（每线程独立连库，默认4防断连）")
     p.add_argument("--retries", type=int, default=3, help="单规则失败后的重试次数")
     p.add_argument(
         "--query-timeout",
@@ -969,9 +1022,6 @@ def main() -> int:
     elif args.output:
         detail_dir = Path(args.output).with_suffix("").parent / (Path(args.output).stem + "_details")
 
-    all_rules = build_rules(bid_clause)
-    rules = filter_rules(all_rules, args.rules.split(",") if args.rules else None)
-
     if detail_dir is not None:
         detail_dir.mkdir(parents=True, exist_ok=True)
 
@@ -983,6 +1033,24 @@ def main() -> int:
         args.retries,
         fetch_table_stats,
     )
+    loan_cols = call_with_conn_retry(
+        cfg,
+        "loan_columns",
+        args.query_timeout,
+        args.retries,
+        fetch_loan_columns,
+    )
+    print(
+        "loan schema: roll_fee={0} penalty_amount={1} reduction_amount={2}".format(
+            "roll_fee" in loan_cols,
+            "penalty_amount" in loan_cols,
+            "reduction_amount" in loan_cols,
+        ),
+        file=sys.stderr,
+    )
+
+    all_rules = build_rules(bid_clause, loan_cols)
+    rules = filter_rules(all_rules, args.rules.split(",") if args.rules else None)
 
     workers = max(1, args.workers)
     print(
