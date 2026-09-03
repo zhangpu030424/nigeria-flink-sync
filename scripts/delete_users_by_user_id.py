@@ -146,22 +146,31 @@ def print_2013_hint() -> None:
 
 
 def diagnose_locks(cfg: dict) -> None:
-    print("== active sessions on target ==" , file=sys.stderr)
+    db = str(cfg["TARGET_MYSQL_DATABASE"])
+    print("== SHOW FULL PROCESSLIST ==" , file=sys.stderr)
+    print(
+        "note: ng-export 无 PROCESS 权限时只能看到自己的连接，看不到 Flink 占锁会话",
+        file=sys.stderr,
+    )
     try:
-        out = mysql_query(
-            cfg,
-            "SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE, "
-            "LEFT(COALESCE(INFO,''), 160) "
-            "FROM information_schema.PROCESSLIST "
-            "WHERE DB = DATABASE() AND COMMAND <> 'Sleep' "
-            "ORDER BY TIME DESC LIMIT 25",
-        )
-        if out.strip():
-            print(out, file=sys.stderr)
-        else:
-            print("(no active non-Sleep sessions in current DB)", file=sys.stderr)
+        out = mysql_query(cfg, "SHOW FULL PROCESSLIST")
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        shown = 0
+        for ln in lines:
+            if "\tQuery\t" in ln or "\tExecute\t" in ln or "DELETE" in ln or "INSERT" in ln or "UPDATE" in ln:
+                print(ln, file=sys.stderr)
+                shown += 1
+        if shown == 0:
+            print("(no Query/Execute sessions visible to current user)", file=sys.stderr)
     except Exception as exc:
         print("processlist: {0}".format(exc), file=sys.stderr)
+
+    print("== triggers on `{0}.user` ==".format(db), file=sys.stderr)
+    try:
+        out = mysql_query(cfg, "SHOW TRIGGERS FROM `{0}` LIKE 'user'".format(db))
+        print(out.strip() or "(none)", file=sys.stderr)
+    except Exception as exc:
+        print("triggers: {0}".format(exc), file=sys.stderr)
 
     print("== innodb trx ==" , file=sys.stderr)
     try:
