@@ -6,8 +6,8 @@
 
 流程：
   1. 读入明文 BVN（跳过空值）
-  2. 先查 nigeria_backend.vt_token_cache(vt_type=4)，未命中再 POST /v2t
-  3. 默认 dry-run：会真实 VT（cache + /v2t），但不 UPDATE target.user_info
+  2. 直接 POST VT /v2t（不查 vt_token_cache）
+  3. 默认 dry-run：会真实 VT，但不 UPDATE target.user_info
   4. 加 --apply 才写入目标库
 
 Usage:
@@ -459,26 +459,16 @@ def main() -> None:
         or cfg.get("VT_URL")
         or mc.DEFAULT_VT_URL
     )
-    source_db = mc.DB(
-        mc.DbConfig(
-            host=cfg["SOURCE_MYSQL_HOST"],
-            port=int(cfg.get("SOURCE_MYSQL_PORT") or 3306),
-            user=cfg["SOURCE_MYSQL_USER"],
-            password=cfg["SOURCE_MYSQL_PASSWORD"],
-            database=cfg.get("SOURCE_MYSQL_DATABASE") or "nigeria_backend",
-        ),
-        readonly=True,
-    )
-    # dry-run 只跳过 UPDATE；VT 始终走真实 cache + /v2t
+    # db=None：跳过 vt_token_cache，直接调 /v2t
     vt = mc.VtClient(
         vt_url,
         dry_run=False,
-        db=source_db,
+        db=None,
         http_batch_size=max(1, args.vt_batch_size),
     )
 
     pairs = [(vt.VT_ID_NUMBER, bvn) for bvn in unique_bvns]
-    log("VT resolving {0} BVNs...".format(len(unique_bvns)))
+    log("VT /v2t only (skip vt_token_cache), resolving {0} BVNs...".format(len(unique_bvns)))
     tokens = vt.resolve(pairs)
     log("VT done: resolved={0}/{1}".format(len(tokens), len(unique_bvns)))
 
