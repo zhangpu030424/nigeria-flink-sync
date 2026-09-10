@@ -7,7 +7,8 @@
 流程：
   1. 读入明文 BVN（跳过空值）
   2. 先查 nigeria_backend.vt_token_cache(vt_type=4)，未命中再 POST /v2t
-  3. dry-run 默认只预览；加 --apply 才 UPDATE target.user_info
+  3. 默认 dry-run：会真实 VT（cache + /v2t），但不 UPDATE target.user_info
+  4. 加 --apply 才写入目标库
 
 Usage:
   python3 scripts/backfill_user_info_id_number_from_bvn.py \\
@@ -468,9 +469,10 @@ def main() -> None:
         ),
         readonly=True,
     )
+    # dry-run 只跳过 UPDATE；VT 始终走真实 cache + /v2t
     vt = mc.VtClient(
         vt_url,
-        dry_run=not args.apply,
+        dry_run=False,
         db=source_db,
         http_batch_size=max(1, args.vt_batch_size),
     )
@@ -526,7 +528,9 @@ def main() -> None:
         if args.apply:
             log("done: attempted={0} rowcount={1}".format(todo, updated))
         else:
-            log("dry-run only; add --apply to UPDATE {0} rows".format(todo))
+            log(
+                "dry-run: VT tokens are real; add --apply to UPDATE {0} rows".format(todo)
+            )
     finally:
         env_util.close_conn(target)
 
