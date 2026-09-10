@@ -25,7 +25,10 @@ import argparse
 import csv
 import importlib.util
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,46 +143,12 @@ def _read_csv(path: Path) -> List[Tuple[int, str]]:
     return out
 
 
-def _read_xls(path: Path) -> List[Tuple[int, str]]:
-    try:
-        import xlrd  # type: ignore
-    except ImportError as e:
-        raise SystemExit("reading .xls requires xlrd: pip install xlrd==1.2.0") from e
-    wb = xlrd.open_workbook(str(path))
-    sh = wb.sheet_by_index(0)
-    if sh.nrows < 2:
-        return []
-    headers = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
+def _rows_from_sheet(headers: Sequence[str], body: Iterable[Sequence[Any]]) -> List[Tuple[int, str]]:
     uid_key, bvn_key = _pick_columns(headers)
     uid_idx = headers.index(uid_key)
     bvn_idx = headers.index(bvn_key)
     out: List[Tuple[int, str]] = []
-    for r in range(1, sh.nrows):
-        uid = normalize_user_id(sh.cell_value(r, uid_idx))
-        bvn = normalize_bvn(sh.cell_value(r, bvn_idx))
-        if uid is None or not bvn:
-            continue
-        out.append((uid, bvn))
-    return out
-
-
-def _read_xlsx(path: Path) -> List[Tuple[int, str]]:
-    try:
-        from openpyxl import load_workbook  # type: ignore
-    except ImportError as e:
-        raise SystemExit("reading .xlsx requires openpyxl: pip install openpyxl") from e
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    rows = ws.iter_rows(values_only=True)
-    header = next(rows, None)
-    if not header:
-        return []
-    headers = [("" if h is None else str(h)).strip() for h in header]
-    uid_key, bvn_key = _pick_columns(headers)
-    uid_idx = headers.index(uid_key)
-    bvn_idx = headers.index(bvn_key)
-    out: List[Tuple[int, str]] = []
-    for row in rows:
+    for row in body:
         if row is None:
             continue
         uid = normalize_user_id(row[uid_idx] if uid_idx < len(row) else None)
@@ -187,8 +156,129 @@ def _read_xlsx(path: Path) -> List[Tuple[int, str]]:
         if uid is None or not bvn:
             continue
         out.append((uid, bvn))
-    wb.close()
     return out
+
+
+def _read_xls_xlrd(path: Path) -> List[Tuple[int, str]]:
+    import xlrd  # type: ignore
+
+    wb = xlrd.open_workbook(str(path))
+    sh = wb.sheet_by_index(0)
+    if sh.nrows < 2:
+        return []
+    headers = [str(sh.cell_value(0, c)).strip() for c in range(sh.ncols)]
+    body = (sh.row_values(r) for r in range(1, sh.nrows))
+    return _rows_from_sheet(headers, body)
+
+
+def _convert_spreadsheet_to_csv(path: Path) -> Path:
+    """用 LibreOffice/soffice 或 ssconvert 把 xls/xlsx 转成 csv。"""
+    outdir = Path(tempfile.mkdtemp(prefix="bvn_xls_"))
+    try:
+        convert_cmds = [
+            ["libreoffice", "--headless", "--convert-to", "csv", str(path), "--outdir", str(outdir)],
+            ["soffice", "--headless", "--convert-to", "csv", str(path), "--outdir", str(outdir)],
+            ["ssconvert", str(path), str(outdir / (path.stem + ".csv"))],
+        ]
+        last_err = ""
+        for cmd in convert_cmds:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+            except FileNotFoundError:
+                continue
+            if proc.returncode != 0:
+                last_err = (proc.stderr or proc.stdout or "exit {0}".format(proc.returncode)).strip()
+                continue
+            matches = sorted(outdir.glob("*.csv"))
+            if matches:
+                # 复制到独立临时文件，避免 outdir 被删后路径失效
+                with tempfile.NamedTemporaryFile(prefix="bvn_", suffix=".csv", delete=False) as tmp:
+                    dst = Path(tmp.name)
+                shutil.copy2(matches[0], dst)
+                return dst
+            last_err = "no csv produced in {0}".format(outdir)
+        raise RuntimeError(last_err or "no spreadsheet converter found")
+    finally:
+        shutil.rmtree(outdir, ignore_errors=True)
+
+
+def _read_xls(path: Path) -> List[Tuple[int, str]]:
+    errors: List[str] = []
+    try:
+        return _read_xls_xlrd(path)
+    except ImportError:
+        errors.append("xlrd not installed")
+    except Exception as e:
+        errors.append("xlrd: {0}".format(e))
+
+    try:
+        csv_path = _convert_spreadsheet_to_csv(path)
+        log("read .xls via converter -> {0}".format(csv_path))
+        try:
+            return _read_csv(csv_path)
+        finally:
+            csv_path.unlink(missing_ok=True)
+    except Exception as e:
+        errors.append("converter: {0}".format(e))
+
+    raise SystemExit(
+        "cannot read .xls:\n  - {0}\n\n"
+        "Fix options:\n"
+        "  1) pip install xlrd==1.2.0\n"
+        "  2) apt install libreoffice-calc  # or gnumeric (ssconvert)\n"
+        "  3) convert manually:\n"
+        "     libreoffice --headless --convert-to csv {1} --outdir /tmp\n"
+        "     python3 {2} --env ./.env --input /tmp/{3}.csv".format(
+            "\n  - ".join(errors),
+            path,
+            Path(__file__).name,
+            path.stem,
+        )
+    )
+
+
+def _read_xlsx(path: Path) -> List[Tuple[int, str]]:
+    errors: List[str] = []
+    try:
+        from openpyxl import load_workbook  # type: ignore
+
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = ws.iter_rows(values_only=True)
+        header = next(rows, None)
+        if not header:
+            wb.close()
+            return []
+        headers = [("" if h is None else str(h)).strip() for h in header]
+        out = _rows_from_sheet(headers, rows)
+        wb.close()
+        return out
+    except ImportError:
+        errors.append("openpyxl not installed")
+    except Exception as e:
+        errors.append("openpyxl: {0}".format(e))
+
+    try:
+        csv_path = _convert_spreadsheet_to_csv(path)
+        log("read .xlsx via converter -> {0}".format(csv_path))
+        try:
+            return _read_csv(csv_path)
+        finally:
+            csv_path.unlink(missing_ok=True)
+    except Exception as e:
+        errors.append("converter: {0}".format(e))
+
+    raise SystemExit(
+        "cannot read .xlsx:\n  - {0}\n\n"
+        "Fix: pip install openpyxl  OR  apt install libreoffice-calc".format(
+            "\n  - ".join(errors)
+        )
+    )
 
 
 def dedupe_rows(rows: Sequence[Tuple[int, str]]) -> Tuple[List[Tuple[int, str]], List[str]]:
