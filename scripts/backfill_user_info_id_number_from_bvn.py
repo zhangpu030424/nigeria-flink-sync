@@ -47,8 +47,11 @@ def log(msg: str) -> None:
 
 def load_migrate_collection():
     path = HERE / "migrate_collection.py"
-    spec = importlib.util.spec_from_file_location("migrate_collection", path)
+    name = "migrate_collection_vt"
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    # dataclass 等装饰器需要模块已注册到 sys.modules（Python 3.12+）
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
