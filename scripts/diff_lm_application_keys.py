@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
@@ -167,53 +169,99 @@ def load_app_ids(paths: dict) -> List[int]:
     return out
 
 
-def export_lm_app(cfg: dict, app_id: int, out_file: Path) -> int:
+def sort_key_file(path: Path, label: str) -> None:
+    """本地 sort，避免 SQL ORDER BY 在大表上长时间无输出。"""
+    if not path.is_file() or path.stat().st_size == 0:
+        return
+    t0 = time.time()
+    subprocess.run(
+        ["sort", "--parallel=2", "-T", "/tmp", "-o", str(path), str(path)],
+        check=True,
+    )
+    print(
+        "# {0}: sorted {1} ({2:.1f}s)".format(label, path.name, time.time() - t0),
+        flush=True,
+    )
+
+
+def export_lm_app(cfg: dict, app_id: int, out_file: Path, progress_every: int) -> int:
     conn = connect(cfg, "LM", "ng_loan_market")
+    # 不要 ORDER BY：否则 InnoDB 先排序千万行，客户端长时间收不到行
     sql = (
         "SELECT {0} AS k FROM application WHERE appId = %s "
-        "AND applicationNo IS NOT NULL AND TRIM(applicationNo) <> '' "
-        "ORDER BY k"
+        "AND applicationNo IS NOT NULL AND TRIM(applicationNo) <> ''"
     ).format(lm_key_sql())
     n = 0
+    t0 = time.time()
+    print("# LM app_id={0}: pull start -> {1}".format(app_id, out_file.name), flush=True)
     cur = conn.cursor(SSCursor)
     try:
         with out_file.open("w", encoding="utf-8") as fp:
             cur.execute(sql, (app_id,))
             while True:
-                rows = cur.fetchmany(10000)
+                rows = cur.fetchmany(20000)
                 if not rows:
                     break
                 for row in rows:
                     fp.write(str(row[0]) + "\n")
                     n += 1
+                if progress_every > 0 and n % progress_every == 0:
+                    print(
+                        "# LM app_id={0}: {1} rows ({2:.0f}s)".format(
+                            app_id, n, time.time() - t0,
+                        ),
+                        flush=True,
+                    )
     finally:
         cur.close()
         conn.close()
+    print(
+        "# LM app_id={0}: pull done rows={1} ({2:.1f}s)".format(
+            app_id, n, time.time() - t0,
+        ),
+        flush=True,
+    )
+    sort_key_file(out_file, "LM app_id={0}".format(app_id))
     return n
 
 
-def export_target_app(cfg: dict, app_id: int, out_file: Path) -> int:
+def export_target_app(cfg: dict, app_id: int, out_file: Path, progress_every: int) -> int:
     conn = connect(cfg, "TARGET", "ng")
     sql = (
         "SELECT application_no AS k FROM application WHERE app_id = %s "
-        "AND application_no IS NOT NULL AND TRIM(application_no) <> '' "
-        "ORDER BY k"
+        "AND application_no IS NOT NULL AND TRIM(application_no) <> ''"
     )
     n = 0
+    t0 = time.time()
+    print("# TARGET app_id={0}: pull start -> {1}".format(app_id, out_file.name), flush=True)
     cur = conn.cursor(SSCursor)
     try:
         with out_file.open("w", encoding="utf-8") as fp:
             cur.execute(sql, (app_id,))
             while True:
-                rows = cur.fetchmany(10000)
+                rows = cur.fetchmany(20000)
                 if not rows:
                     break
                 for row in rows:
                     fp.write(str(row[0]) + "\n")
                     n += 1
+                if progress_every > 0 and n % progress_every == 0:
+                    print(
+                        "# TARGET app_id={0}: {1} rows ({2:.0f}s)".format(
+                            app_id, n, time.time() - t0,
+                        ),
+                        flush=True,
+                    )
     finally:
         cur.close()
         conn.close()
+    print(
+        "# TARGET app_id={0}: pull done rows={1} ({2:.1f}s)".format(
+            app_id, n, time.time() - t0,
+        ),
+        flush=True,
+    )
+    sort_key_file(out_file, "TARGET app_id={0}".format(app_id))
     return n
 
 
@@ -225,6 +273,7 @@ def parallel_export(
     out_dir: Path,
     workers: int,
     skip_existing: bool,
+    progress_every: int,
 ) -> Dict[int, int]:
     counts: Dict[int, int] = {}
     todo = []
@@ -241,14 +290,20 @@ def parallel_export(
 
     print("# {0}: export {1} apps, workers={2}".format(label, len(todo), workers), flush=True)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futs = {pool.submit(fn, cfg, aid, dest): aid for aid, dest in todo}
+        futs = {
+            pool.submit(fn, cfg, aid, dest, progress_every): aid for aid, dest in todo
+        }
         done = 0
         for fut in as_completed(futs):
             aid = futs[fut]
             counts[aid] = fut.result()
             done += 1
-            if done % 10 == 0 or done == len(todo):
-                print("# {0}: {1}/{2} done".format(label, done, len(todo)), flush=True)
+            print(
+                "# {0}: finished app_id={1} rows={2} ({3}/{4} apps)".format(
+                    label, aid, counts[aid], done, len(todo),
+                ),
+                flush=True,
+            )
     return counts
 
 
@@ -258,6 +313,7 @@ def export_app_both(
     lm_file: Path,
     tgt_file: Path,
     skip_existing: bool,
+    progress_every: int,
 ) -> Tuple[int, int]:
     """单 app：LM + 目标两个独立连接，并行流式导出到本地 .keys。"""
     need_lm = not (
@@ -269,20 +325,35 @@ def export_app_both(
     if not need_lm and not need_tgt:
         return -1, -1
 
+    print("# export pair start app_id={0}".format(app_id), flush=True)
+    t0 = time.time()
     lm_n = 0
     tgt_n = 0
     with ThreadPoolExecutor(max_workers=2) as inner:
         futs = []
         if need_lm:
-            futs.append(("lm", inner.submit(export_lm_app, cfg, app_id, lm_file)))
+            futs.append(
+                ("lm", inner.submit(export_lm_app, cfg, app_id, lm_file, progress_every)),
+            )
         if need_tgt:
-            futs.append(("tgt", inner.submit(export_target_app, cfg, app_id, tgt_file)))
+            futs.append(
+                (
+                    "tgt",
+                    inner.submit(export_target_app, cfg, app_id, tgt_file, progress_every),
+                ),
+            )
         for kind, fut in futs:
             n = fut.result()
             if kind == "lm":
                 lm_n = n
             else:
                 tgt_n = n
+    print(
+        "# export pair done app_id={0} lm={1} tgt={2} ({3:.1f}s)".format(
+            app_id, lm_n, tgt_n, time.time() - t0,
+        ),
+        flush=True,
+    )
     return lm_n, tgt_n
 
 
@@ -292,6 +363,7 @@ def parallel_export_both(
     paths: dict,
     workers: int,
     skip_existing: bool,
+    progress_every: int,
 ) -> Tuple[Dict[int, int], Dict[int, int]]:
     lm_counts: Dict[int, int] = {}
     tgt_counts: Dict[int, int] = {}
@@ -333,6 +405,7 @@ def parallel_export_both(
                 paths["lm"] / "{0}.keys".format(aid),
                 paths["target"] / "{0}.keys".format(aid),
                 skip_existing,
+                progress_every,
             ): aid
             for aid in todo
         }
@@ -343,8 +416,12 @@ def parallel_export_both(
             lm_counts[aid] = lm_n
             tgt_counts[aid] = tgt_n
             done += 1
-            if done % 5 == 0 or done == len(todo):
-                print("# export: {0}/{1} apps done".format(done, len(todo)), flush=True)
+            print(
+                "# export: {0}/{1} apps complete (last app_id={2})".format(
+                    done, len(todo), aid,
+                ),
+                flush=True,
+            )
     return lm_counts, tgt_counts
 
 
@@ -540,7 +617,12 @@ def phase_all(cfg: dict, paths: dict, args: argparse.Namespace) -> int:
 
     print("# phase export (LM + target parallel per app)", flush=True)
     lm_export, tgt_counts = parallel_export_both(
-        cfg, app_ids, paths, args.workers, args.skip_existing,
+        cfg,
+        app_ids,
+        paths,
+        args.workers,
+        args.skip_existing,
+        args.progress_every,
     )
     for aid, c in lm_export.items():
         if c >= 0:
@@ -596,12 +678,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     app_ids = load_app_ids(paths)
 
     if args.phase == "export":
-        parallel_export_both(cfg, app_ids, paths, args.workers, args.skip_existing)
+        parallel_export_both(
+            cfg, app_ids, paths, args.workers, args.skip_existing, args.progress_every,
+        )
         return 0
 
     if args.phase == "export-lm":
         parallel_export(
-            "export-lm", export_lm_app, cfg, app_ids, paths["lm"], args.workers, args.skip_existing,
+            "export-lm",
+            export_lm_app,
+            cfg,
+            app_ids,
+            paths["lm"],
+            args.workers,
+            args.skip_existing,
+            args.progress_every,
         )
         return 0
 
@@ -614,6 +705,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             paths["target"],
             args.workers,
             args.skip_existing,
+            args.progress_every,
         )
         return 0
 
