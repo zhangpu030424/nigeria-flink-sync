@@ -59,7 +59,7 @@ def connect(cfg: dict, prefix: str, default_db: str):
         password = pick("TARGET_MYSQL_PASSWORD", "TARGET_PASSWORD")
         database = pick("TARGET_MYSQL_DATABASE", "TARGET_DB", default=default_db)
 
-    return pymysql.connect(
+    conn = pymysql.connect(
         host=host,
         port=int(port),
         user=user,
@@ -67,22 +67,70 @@ def connect(cfg: dict, prefix: str, default_db: str):
         database=database,
         charset="utf8mb4",
         cursorclass=DictCursor,
-        connect_timeout=60,
-        read_timeout=7200,
-        write_timeout=7200,
+        connect_timeout=120,
+        read_timeout=86400,
+        write_timeout=86400,
         autocommit=True,
     )
+    tune_session(conn)
+    return conn
+
+
+def tune_session(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SET SESSION wait_timeout=28800, "
+            "net_read_timeout=86400, net_write_timeout=86400"
+        )
 
 
 def exclude_ph() -> str:
     return ",".join(["%s"] * len(EXCLUDE_APP_IDS))
 
 
-def by_app_counts(cfg: dict, app_id_filter: Optional[int]) -> None:
+def stream_count_by_app(
+    conn,
+    label: str,
+    column_sql: str,
+    where: str,
+    params: Sequence,
+    progress_every: int,
+) -> Dict[int, int]:
+    """全表扫一列 appId，客户端分桶，避免 GROUP BY 大结果集断连。"""
+    counts: Dict[int, int] = {}
+    sql = "SELECT {0} FROM application WHERE {1}".format(column_sql, where)
+    print("# {0}: start scan ...".format(label), flush=True)
+    cur = conn.cursor(SSCursor)
+    rows_seen = 0
+    try:
+        cur.execute(sql, params)
+        while True:
+            batch = cur.fetchmany(20000)
+            if not batch:
+                break
+            for row in batch:
+                aid = int(row[0])
+                counts[aid] = counts.get(aid, 0) + 1
+                rows_seen += 1
+                if progress_every > 0 and rows_seen % progress_every == 0:
+                    print(
+                        "# {0}: scanned {1} rows, distinct_app={2}".format(
+                            label, rows_seen, len(counts),
+                        ),
+                        flush=True,
+                    )
+    finally:
+        cur.close()
+    print(
+        "# {0}: done rows={1} distinct_app={2}".format(label, rows_seen, len(counts)),
+        flush=True,
+    )
+    return counts
+
+
+def by_app_counts(cfg: dict, app_id_filter: Optional[int], progress_every: int) -> None:
     lm = connect(cfg, "LM", "ng_loan_market")
     tgt = connect(cfg, "TARGET", "ng")
-    lm_map: Dict[int, int] = {}
-    tgt_map: Dict[int, int] = {}
 
     lm_where = "appId NOT IN (" + exclude_ph() + ")"
     tgt_where = "app_id NOT IN (" + exclude_ph() + ")"
@@ -92,25 +140,12 @@ def by_app_counts(cfg: dict, app_id_filter: Optional[int]) -> None:
         tgt_where += " AND app_id = %s"
         params = params + [app_id_filter]
 
-    with lm.cursor() as cur:
-        cur.execute(
-            "SELECT appId AS app_id, COUNT(1) AS cnt FROM application WHERE "
-            + lm_where
-            + " GROUP BY appId ORDER BY appId",
-            params,
-        )
-        for row in cur.fetchall():
-            lm_map[int(row["app_id"])] = int(row["cnt"])
-
-    with tgt.cursor() as cur:
-        cur.execute(
-            "SELECT app_id, COUNT(1) AS cnt FROM application WHERE "
-            + tgt_where
-            + " GROUP BY app_id ORDER BY app_id",
-            params,
-        )
-        for row in cur.fetchall():
-            tgt_map[int(row["app_id"])] = int(row["cnt"])
+    lm_map = stream_count_by_app(
+        lm, "LM", "appId", lm_where, params, progress_every,
+    )
+    tgt_map = stream_count_by_app(
+        tgt, "TARGET", "app_id", tgt_where, params, progress_every,
+    )
 
     lm.close()
     tgt.close()
@@ -253,6 +288,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--app-id", type=int, default=None, help="只对比单个 appId")
     p.add_argument("--output", default="/tmp/lm_application_key_diff.txt")
     p.add_argument("--max-lines", type=int, default=5000, help="每侧最多写多少条差集到文件")
+    p.add_argument(
+        "--progress-every",
+        type=int,
+        default=500_000,
+        help="--by-app 每扫多少行打印进度（0=关闭）",
+    )
     args = p.parse_args(argv)
 
     env_path = Path(args.env).resolve()
@@ -265,7 +306,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.by_app = True
 
     if args.by_app:
-        by_app_counts(cfg, args.app_id)
+        by_app_counts(cfg, args.app_id, args.progress_every)
 
     if args.diff:
         return run_diff(cfg, args.app_id, Path(args.output), args.max_lines)
