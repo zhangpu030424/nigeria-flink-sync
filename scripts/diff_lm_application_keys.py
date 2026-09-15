@@ -12,13 +12,12 @@
   diff/by_app/{app_id}.only_lm.txt
   repair_plan.md
 
-每步均可多线程，每任务独立 MySQL 连接。
+导出阶段：按 app_id 多线程；**每个 app 内 LM 与目标各一条连接，并行拉键落盘**（最多 workers×2 连接）。
 
 Usage:
   python3 scripts/diff_lm_application_keys.py --env ./.env --phase all --workers 12
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase export-lm --workers 12
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase compare
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase plan
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase export --workers 12
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase compare --work-dir /data/lm_application_diff
 """
 from __future__ import annotations
 
@@ -253,6 +252,102 @@ def parallel_export(
     return counts
 
 
+def export_app_both(
+    cfg: dict,
+    app_id: int,
+    lm_file: Path,
+    tgt_file: Path,
+    skip_existing: bool,
+) -> Tuple[int, int]:
+    """单 app：LM + 目标两个独立连接，并行流式导出到本地 .keys。"""
+    need_lm = not (
+        skip_existing and lm_file.is_file() and lm_file.stat().st_size > 0
+    )
+    need_tgt = not (
+        skip_existing and tgt_file.is_file() and tgt_file.stat().st_size > 0
+    )
+    if not need_lm and not need_tgt:
+        return -1, -1
+
+    lm_n = 0
+    tgt_n = 0
+    with ThreadPoolExecutor(max_workers=2) as inner:
+        futs = []
+        if need_lm:
+            futs.append(("lm", inner.submit(export_lm_app, cfg, app_id, lm_file)))
+        if need_tgt:
+            futs.append(("tgt", inner.submit(export_target_app, cfg, app_id, tgt_file)))
+        for kind, fut in futs:
+            n = fut.result()
+            if kind == "lm":
+                lm_n = n
+            else:
+                tgt_n = n
+    return lm_n, tgt_n
+
+
+def parallel_export_both(
+    cfg: dict,
+    app_ids: Sequence[int],
+    paths: dict,
+    workers: int,
+    skip_existing: bool,
+) -> Tuple[Dict[int, int], Dict[int, int]]:
+    lm_counts: Dict[int, int] = {}
+    tgt_counts: Dict[int, int] = {}
+    todo: List[int] = []
+
+    for aid in app_ids:
+        lm_f = paths["lm"] / "{0}.keys".format(aid)
+        tg_f = paths["target"] / "{0}.keys".format(aid)
+        if (
+            skip_existing
+            and lm_f.is_file()
+            and lm_f.stat().st_size > 0
+            and tg_f.is_file()
+            and tg_f.stat().st_size > 0
+        ):
+            lm_counts[aid] = tgt_counts[aid] = -1
+            continue
+        todo.append(aid)
+
+    if not todo:
+        print(
+            "# export: all {0} app pairs on disk (--skip-existing)".format(len(app_ids)),
+            flush=True,
+        )
+        return lm_counts, tgt_counts
+
+    print(
+        "# export: {0} apps, workers={1} (each app: LM||TARGET parallel pull)".format(
+            len(todo), workers,
+        ),
+        flush=True,
+    )
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {
+            pool.submit(
+                export_app_both,
+                cfg,
+                aid,
+                paths["lm"] / "{0}.keys".format(aid),
+                paths["target"] / "{0}.keys".format(aid),
+                skip_existing,
+            ): aid
+            for aid in todo
+        }
+        done = 0
+        for fut in as_completed(futs):
+            aid = futs[fut]
+            lm_n, tgt_n = fut.result()
+            lm_counts[aid] = lm_n
+            tgt_counts[aid] = tgt_n
+            done += 1
+            if done % 5 == 0 or done == len(todo):
+                print("# export: {0}/{1} apps done".format(done, len(todo)), flush=True)
+    return lm_counts, tgt_counts
+
+
 def iter_lines(path: Path) -> Iterator[str]:
     with path.open(encoding="utf-8") as fp:
         for line in fp:
@@ -443,29 +538,16 @@ def phase_all(cfg: dict, paths: dict, args: argparse.Namespace) -> int:
     lm_counts = discover_apps(cfg, paths, args.progress_every)
     app_ids = load_app_ids(paths)
 
-    print("# phase export-lm", flush=True)
-    lm_file_counts = parallel_export(
-        "export-lm", export_lm_app, cfg, app_ids, paths["lm"], args.workers, args.skip_existing,
+    print("# phase export (LM + target parallel per app)", flush=True)
+    lm_export, tgt_counts = parallel_export_both(
+        cfg, app_ids, paths, args.workers, args.skip_existing,
     )
-    for aid, c in lm_file_counts.items():
-        lm_counts[aid] = c
-
-    print("# phase export-target", flush=True)
-    tgt_counts = parallel_export(
-        "export-target",
-        export_target_app,
-        cfg,
-        app_ids,
-        paths["target"],
-        args.workers,
-        args.skip_existing,
-    )
-    # fill missing from file line count
+    for aid, c in lm_export.items():
+        if c >= 0:
+            lm_counts[aid] = c
     for aid in app_ids:
         if aid not in tgt_counts:
-            tf = paths["target"] / "{0}.keys".format(aid)
-            if tf.is_file():
-                tgt_counts[aid] = sum(1 for ln in tf.open(encoding="utf-8") if ln.strip())
+            tgt_counts[aid] = -1
 
     write_counts_tsv(paths, app_ids, lm_counts, tgt_counts)
     summary = compare_all(paths, app_ids)
@@ -478,7 +560,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--env", default=str(REPO / ".env"))
     p.add_argument(
         "--phase",
-        choices=("all", "discover", "export-lm", "export-target", "compare", "plan"),
+        choices=(
+            "all",
+            "discover",
+            "export",
+            "export-lm",
+            "export-target",
+            "compare",
+            "plan",
+        ),
         default="all",
     )
     p.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
@@ -504,6 +594,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     app_ids = load_app_ids(paths)
+
+    if args.phase == "export":
+        parallel_export_both(cfg, app_ids, paths, args.workers, args.skip_existing)
+        return 0
 
     if args.phase == "export-lm":
         parallel_export(
