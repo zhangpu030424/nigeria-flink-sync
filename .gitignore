@@ -1,4 +1,5 @@
 .env
+scripts/oss_backup.env
 logs/
 data/
 *.log
