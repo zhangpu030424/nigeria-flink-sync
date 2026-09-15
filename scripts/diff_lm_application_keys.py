@@ -161,12 +161,31 @@ def discover_apps(cfg: dict, paths: dict, progress_every: int) -> Dict[int, int]
 def load_app_ids(paths: dict) -> List[int]:
     if not paths["app_ids"].is_file():
         raise SystemExit("missing {0}; run --phase discover first".format(paths["app_ids"]))
+    return _read_app_ids_file(paths["app_ids"])
+
+
+def _read_app_ids_file(path: Path) -> List[int]:
     out: List[int] = []
-    for line in paths["app_ids"].read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line:
             out.append(int(line))
     return out
+
+
+def ensure_app_ids(
+    cfg: dict, paths: dict, progress_every: int, auto_discover: bool = True
+) -> List[int]:
+    if paths["app_ids"].is_file():
+        return _read_app_ids_file(paths["app_ids"])
+    if not auto_discover:
+        raise SystemExit("missing {0}; run --phase discover first".format(paths["app_ids"]))
+    print(
+        "# {0} not found; running discover ...".format(paths["app_ids"]),
+        flush=True,
+    )
+    discover_apps(cfg, paths, progress_every)
+    return _read_app_ids_file(paths["app_ids"])
 
 
 def sort_key_file(path: Path, label: str) -> None:
@@ -675,7 +694,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         discover_apps(cfg, paths, args.progress_every)
         return 0
 
-    app_ids = load_app_ids(paths)
+    app_ids = ensure_app_ids(cfg, paths, args.progress_every)
 
     if args.phase == "export":
         parallel_export_both(
