@@ -11,6 +11,7 @@
   repair_plan.md
 
 Usage:
+  ./scripts/run_lm_application_diff_background.sh          # nohup 后台，日志 work_dir/run.log
   python3 scripts/diff_lm_application_keys.py --env ./.env --phase all --work-dir /data/lm_application_diff
   python3 scripts/diff_lm_application_keys.py --env ./.env --phase export --skip-existing
   python3 scripts/diff_lm_application_keys.py --env ./.env --phase compare
@@ -32,6 +33,7 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pymysql
 from pymysql.cursors import DictCursor, SSCursor
+from pymysql.err import OperationalError
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -190,6 +192,41 @@ def ensure_app_ids(
     return _read_app_ids_file(paths["app_ids"])
 
 
+def bulk_done_marker(key_file: Path) -> Path:
+    return key_file.with_suffix(key_file.suffix + ".done")
+
+
+def is_bulk_export_complete(key_file: Path, skip_existing: bool) -> bool:
+    if not skip_existing:
+        return False
+    marker = bulk_done_marker(key_file)
+    return marker.is_file() and key_file.is_file() and key_file.stat().st_size > 0
+
+
+def mark_bulk_export_done(key_file: Path, row_count: int) -> None:
+    bulk_done_marker(key_file).write_text(
+        "{0}\n".format(row_count), encoding="utf-8",
+    )
+
+
+def retry_stream_export(label: str, export_fn, max_retries: int = 5):
+    last_err: Optional[BaseException] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return export_fn()
+        except OperationalError as e:
+            last_err = e
+            wait = min(300, 30 * attempt)
+            print(
+                "# {0}: MySQL error {1}, retry {2}/{3} in {4}s".format(
+                    label, e, attempt, max_retries, wait,
+                ),
+                flush=True,
+            )
+            time.sleep(wait)
+    raise last_err  # type: ignore[misc]
+
+
 def sort_key_file(path: Path, label: str) -> None:
     """本地 sort，避免 SQL ORDER BY 在大表上长时间无输出。"""
     if not path.is_file() or path.stat().st_size == 0:
@@ -286,7 +323,7 @@ def export_target_app(cfg: dict, app_id: int, out_file: Path, progress_every: in
     return n
 
 
-def export_lm_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+def _export_lm_bulk_once(cfg: dict, out_file: Path, progress_every: int) -> int:
     conn = connect(cfg, "LM", "ng_loan_market")
     where = "appId NOT IN (" + exclude_ph() + ")"
     params: list = list(EXCLUDE_APP_IDS)
@@ -318,10 +355,18 @@ def export_lm_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
         conn.close()
     print("# LM bulk: done rows={0} ({1:.1f}s)".format(n, time.time() - t0), flush=True)
     sort_key_file(out_file, "LM bulk")
+    mark_bulk_export_done(out_file, n)
     return n
 
 
-def export_target_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+def export_lm_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+    return retry_stream_export(
+        "LM bulk",
+        lambda: _export_lm_bulk_once(cfg, out_file, progress_every),
+    )
+
+
+def _export_target_bulk_once(cfg: dict, out_file: Path, progress_every: int) -> int:
     conn = connect(cfg, "TARGET", "ng")
     where = "app_id NOT IN (" + exclude_ph() + ")"
     params: list = list(EXCLUDE_APP_IDS)
@@ -353,7 +398,15 @@ def export_target_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
         conn.close()
     print("# TARGET bulk: done rows={0} ({1:.1f}s)".format(n, time.time() - t0), flush=True)
     sort_key_file(out_file, "TARGET bulk")
+    mark_bulk_export_done(out_file, n)
     return n
+
+
+def export_target_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+    return retry_stream_export(
+        "TARGET bulk",
+        lambda: _export_target_bulk_once(cfg, out_file, progress_every),
+    )
 
 
 def parallel_export_bulk(
@@ -364,8 +417,8 @@ def parallel_export_bulk(
 ) -> Tuple[int, int]:
     lm_f = paths["lm_bulk"]
     tg_f = paths["tgt_bulk"]
-    need_lm = not (skip_existing and lm_f.is_file() and lm_f.stat().st_size > 0)
-    need_tgt = not (skip_existing and tg_f.is_file() and tg_f.stat().st_size > 0)
+    need_lm = not is_bulk_export_complete(lm_f, skip_existing)
+    need_tgt = not is_bulk_export_complete(tg_f, skip_existing)
     if not need_lm and not need_tgt:
         print("# bulk export: both all.keys exist (--skip-existing)", flush=True)
         return -1, -1
