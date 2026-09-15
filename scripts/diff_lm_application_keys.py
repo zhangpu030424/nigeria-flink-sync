@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""LM 贷超 application_no 与目标对比：分 app 并行落盘 → 本地 diff → 修复计划。
+"""LM 贷超 application_no 与目标对比：整库各 1 条流式 SQL 落盘 → 本地 sort → merge diff。
 
-目录（--work-dir，默认 /tmp/lm_application_diff）:
-  meta/app_ids.txt          贷超 appId 列表
-  meta/counts.tsv           lm_cnt / tgt_cnt / delta
-  lm/{app_id}.keys          源库键（一行一个 application_no）
-  target/{app_id}.keys      目标库键
-  diff/only_lm.txt          目标缺失（应补）
-  diff/only_target.txt      目标多出
-  diff/by_app/{app_id}.only_lm.txt
+默认 **不按 app_id 拆分**（仅 2 条连接：LM + 目标各扫一遍 application_no）。
+比对键即可找 570 条差，不必 SELECT *（全字段体积大数十倍）。
+
+目录（--work-dir）:
+  lm/all.keys / target/all.keys
+  diff/only_lm.txt / diff/only_target.txt
   repair_plan.md
 
-导出阶段：按 app_id 多线程；**每个 app 内 LM 与目标各一条连接，并行拉键落盘**（最多 workers×2 连接）。
-
 Usage:
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase all --workers 12
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase export --workers 12
-  python3 scripts/diff_lm_application_keys.py --env ./.env --phase compare --work-dir /data/lm_application_diff
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase all --work-dir /data/lm_application_diff
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase export --skip-existing
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase compare
+
+  # 旧模式：按 app_id 多连接（易 Connection closed，一般不推荐）
+  python3 scripts/diff_lm_application_keys.py --env ./.env --phase export --split-by-app --workers 4
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -112,6 +112,8 @@ def work_paths(work_dir: Path) -> dict:
         "only_lm": work_dir / "diff" / "only_lm.txt",
         "only_target": work_dir / "diff" / "only_target.txt",
         "plan": work_dir / "repair_plan.md",
+        "lm_bulk": work_dir / "lm" / "all.keys",
+        "tgt_bulk": work_dir / "target" / "all.keys",
     }
 
 
@@ -282,6 +284,101 @@ def export_target_app(cfg: dict, app_id: int, out_file: Path, progress_every: in
     )
     sort_key_file(out_file, "TARGET app_id={0}".format(app_id))
     return n
+
+
+def export_lm_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+    conn = connect(cfg, "LM", "ng_loan_market")
+    where = "appId NOT IN (" + exclude_ph() + ")"
+    params: list = list(EXCLUDE_APP_IDS)
+    sql = (
+        "SELECT {0} AS k FROM application WHERE {1} "
+        "AND applicationNo IS NOT NULL AND TRIM(applicationNo) <> ''"
+    ).format(lm_key_sql(), where)
+    n = 0
+    t0 = time.time()
+    print("# LM bulk: pull -> {0}".format(out_file), flush=True)
+    cur = conn.cursor(SSCursor)
+    try:
+        with out_file.open("w", encoding="utf-8") as fp:
+            cur.execute(sql, params)
+            while True:
+                rows = cur.fetchmany(50000)
+                if not rows:
+                    break
+                for row in rows:
+                    fp.write(str(row[0]) + "\n")
+                    n += 1
+                if progress_every > 0 and n % progress_every == 0:
+                    print(
+                        "# LM bulk: {0} rows ({1:.0f}s)".format(n, time.time() - t0),
+                        flush=True,
+                    )
+    finally:
+        cur.close()
+        conn.close()
+    print("# LM bulk: done rows={0} ({1:.1f}s)".format(n, time.time() - t0), flush=True)
+    sort_key_file(out_file, "LM bulk")
+    return n
+
+
+def export_target_bulk(cfg: dict, out_file: Path, progress_every: int) -> int:
+    conn = connect(cfg, "TARGET", "ng")
+    where = "app_id NOT IN (" + exclude_ph() + ")"
+    params: list = list(EXCLUDE_APP_IDS)
+    sql = (
+        "SELECT application_no AS k FROM application WHERE {0} "
+        "AND application_no IS NOT NULL AND TRIM(application_no) <> ''"
+    ).format(where)
+    n = 0
+    t0 = time.time()
+    print("# TARGET bulk: pull -> {0}".format(out_file), flush=True)
+    cur = conn.cursor(SSCursor)
+    try:
+        with out_file.open("w", encoding="utf-8") as fp:
+            cur.execute(sql, params)
+            while True:
+                rows = cur.fetchmany(50000)
+                if not rows:
+                    break
+                for row in rows:
+                    fp.write(str(row[0]) + "\n")
+                    n += 1
+                if progress_every > 0 and n % progress_every == 0:
+                    print(
+                        "# TARGET bulk: {0} rows ({1:.0f}s)".format(n, time.time() - t0),
+                        flush=True,
+                    )
+    finally:
+        cur.close()
+        conn.close()
+    print("# TARGET bulk: done rows={0} ({1:.1f}s)".format(n, time.time() - t0), flush=True)
+    sort_key_file(out_file, "TARGET bulk")
+    return n
+
+
+def parallel_export_bulk(
+    cfg: dict,
+    paths: dict,
+    skip_existing: bool,
+    progress_every: int,
+) -> Tuple[int, int]:
+    lm_f = paths["lm_bulk"]
+    tg_f = paths["tgt_bulk"]
+    need_lm = not (skip_existing and lm_f.is_file() and lm_f.stat().st_size > 0)
+    need_tgt = not (skip_existing and tg_f.is_file() and tg_f.stat().st_size > 0)
+    if not need_lm and not need_tgt:
+        print("# bulk export: both all.keys exist (--skip-existing)", flush=True)
+        return -1, -1
+    lm_n = tgt_n = -1
+    print("# bulk export: 2 connections (LM || TARGET)", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_lm = pool.submit(export_lm_bulk, cfg, lm_f, progress_every) if need_lm else None
+        f_tg = pool.submit(export_target_bulk, cfg, tg_f, progress_every) if need_tgt else None
+        if f_lm is not None:
+            lm_n = f_lm.result()
+        if f_tg is not None:
+            tgt_n = f_tg.result()
+    return lm_n, tgt_n
 
 
 def parallel_export(
@@ -495,6 +592,42 @@ def merge_diff_files(
     return only_lm, only_tgt, matched
 
 
+def compare_bulk(paths: dict) -> dict:
+    summary = {
+        "only_lm": 0,
+        "only_target": 0,
+        "matched": 0,
+        "by_app": {},
+        "mode": "bulk",
+    }
+    lm_f = paths["lm_bulk"]
+    tg_f = paths["tgt_bulk"]
+    if not lm_f.is_file() or not tg_f.is_file():
+        raise SystemExit(
+            "missing {0} or {1}; run --phase export first".format(lm_f, tg_f)
+        )
+    print("# compare: merge lm/all.keys vs target/all.keys ...", flush=True)
+    t0 = time.time()
+    with paths["only_lm"].open("w", encoding="utf-8") as olm, paths[
+        "only_target"
+    ].open("w", encoding="utf-8") as otg, open(os.devnull, "w", encoding="utf-8") as devnull:
+        ol, ot, m = merge_diff_files(lm_f, tg_f, olm, otg, devnull)
+    summary["only_lm"] = ol
+    summary["only_target"] = ot
+    summary["matched"] = m
+    (paths["meta"] / "compare_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        "# compare total only_lm={0} only_target={1} matched={2} ({3:.1f}s)".format(
+            ol, ot, m, time.time() - t0,
+        ),
+        flush=True,
+    )
+    return summary
+
+
 def compare_all(paths: dict, app_ids: Sequence[int]) -> dict:
     summary = {
         "only_lm": 0,
@@ -631,27 +764,33 @@ def write_repair_plan(paths: dict, summary: dict, work_dir: Path) -> None:
 
 def phase_all(cfg: dict, paths: dict, args: argparse.Namespace) -> int:
     ensure_dirs(paths)
-    lm_counts = discover_apps(cfg, paths, args.progress_every)
-    app_ids = load_app_ids(paths)
-
-    print("# phase export (LM + target parallel per app)", flush=True)
-    lm_export, tgt_counts = parallel_export_both(
-        cfg,
-        app_ids,
-        paths,
-        args.workers,
-        args.skip_existing,
-        args.progress_every,
-    )
-    for aid, c in lm_export.items():
-        if c >= 0:
-            lm_counts[aid] = c
-    for aid in app_ids:
-        if aid not in tgt_counts:
-            tgt_counts[aid] = -1
-
-    write_counts_tsv(paths, app_ids, lm_counts, tgt_counts)
-    summary = compare_all(paths, app_ids)
+    if args.split_by_app:
+        lm_counts = discover_apps(cfg, paths, args.progress_every)
+        app_ids = load_app_ids(paths)
+        print("# phase export (split by app_id)", flush=True)
+        lm_export, tgt_counts = parallel_export_both(
+            cfg,
+            app_ids,
+            paths,
+            args.workers,
+            args.skip_existing,
+            args.progress_every,
+        )
+        for aid, c in lm_export.items():
+            if c >= 0:
+                lm_counts[aid] = c
+        write_counts_tsv(paths, app_ids, lm_counts, tgt_counts)
+        summary = compare_all(paths, app_ids)
+    else:
+        print("# phase export (bulk: 2 connections)", flush=True)
+        lm_n, tgt_n = parallel_export_bulk(
+            cfg, paths, args.skip_existing, args.progress_every,
+        )
+        (paths["meta"] / "bulk_counts.json").write_text(
+            json.dumps({"lm_rows": lm_n, "tgt_rows": tgt_n}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        summary = compare_bulk(paths)
     write_repair_plan(paths, summary, paths["root"])
     return 0 if summary["only_lm"] == 0 and summary["only_target"] == 0 else 1
 
@@ -676,6 +815,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--skip-existing", action="store_true", help="跳过已存在的 .keys 文件")
     p.add_argument("--progress-every", type=int, default=500_000)
+    p.add_argument(
+        "--split-by-app",
+        action="store_true",
+        help="按 app_id 多连接导出（慢、易断连；默认整库 bulk）",
+    )
     args = p.parse_args(argv)
 
     env_path = Path(args.env).resolve()
@@ -694,15 +838,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         discover_apps(cfg, paths, args.progress_every)
         return 0
 
-    app_ids = ensure_app_ids(cfg, paths, args.progress_every)
-
     if args.phase == "export":
-        parallel_export_both(
-            cfg, app_ids, paths, args.workers, args.skip_existing, args.progress_every,
-        )
+        if args.split_by_app:
+            app_ids = ensure_app_ids(cfg, paths, args.progress_every)
+            parallel_export_both(
+                cfg,
+                app_ids,
+                paths,
+                args.workers,
+                args.skip_existing,
+                args.progress_every,
+            )
+        else:
+            parallel_export_bulk(cfg, paths, args.skip_existing, args.progress_every)
         return 0
 
     if args.phase == "export-lm":
+        app_ids = ensure_app_ids(cfg, paths, args.progress_every)
         parallel_export(
             "export-lm",
             export_lm_app,
@@ -716,6 +868,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.phase == "export-target":
+        app_ids = ensure_app_ids(cfg, paths, args.progress_every)
         parallel_export(
             "export-target",
             export_target_app,
@@ -729,7 +882,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.phase == "compare":
-        summary = compare_all(paths, app_ids)
+        if args.split_by_app or not paths["lm_bulk"].is_file():
+            app_ids = ensure_app_ids(cfg, paths, args.progress_every)
+            summary = compare_all(paths, app_ids)
+        else:
+            summary = compare_bulk(paths)
         write_repair_plan(paths, summary, paths["root"])
         return 0 if summary["only_lm"] == 0 else 1
 
