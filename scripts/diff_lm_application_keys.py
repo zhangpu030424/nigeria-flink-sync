@@ -645,13 +645,37 @@ def merge_diff_files(
     return only_lm, only_tgt, matched
 
 
-def compare_bulk(paths: dict) -> dict:
+def dedupe_sorted_keys(src: Path, dest: Path, label: str) -> None:
+    """sort -u：按唯一 application_no 对比（LM 表多行重复单号时，按行 merge 会误伤）。"""
+    t0 = time.time()
+    subprocess.run(
+        ["sort", "-u", "-T", "/tmp", "-o", str(dest), str(src)],
+        check=True,
+    )
+    print(
+        "# {0}: dedupe -> {1} ({2:.1f}s)".format(label, dest.name, time.time() - t0),
+        flush=True,
+    )
+
+
+def count_lines(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    n = 0
+    with path.open(encoding="utf-8") as fp:
+        for line in fp:
+            if line.strip():
+                n += 1
+    return n
+
+
+def compare_bulk(paths: dict, unique_keys: bool = True) -> dict:
     summary = {
         "only_lm": 0,
         "only_target": 0,
         "matched": 0,
         "by_app": {},
-        "mode": "bulk",
+        "mode": "bulk_unique" if unique_keys else "bulk_lines",
     }
     lm_f = paths["lm_bulk"]
     tg_f = paths["tgt_bulk"]
@@ -659,15 +683,38 @@ def compare_bulk(paths: dict) -> dict:
         raise SystemExit(
             "missing {0} or {1}; run --phase export first".format(lm_f, tg_f)
         )
-    print("# compare: merge lm/all.keys vs target/all.keys ...", flush=True)
+    if unique_keys:
+        lm_cmp = paths["lm"] / "all.u.keys"
+        tg_cmp = paths["target"] / "all.u.keys"
+        dedupe_sorted_keys(lm_f, lm_cmp, "LM")
+        dedupe_sorted_keys(tg_f, tg_cmp, "TARGET")
+        print(
+            "# compare: unique keys lm_u={0} tgt_u={1}".format(
+                count_lines(lm_cmp), count_lines(tg_cmp),
+            ),
+            flush=True,
+        )
+    else:
+        lm_cmp, tg_cmp = lm_f, tg_f
+        print("# compare: merge by line (含重复单号，only_lm 文件可能很大)", flush=True)
+
     t0 = time.time()
     with paths["only_lm"].open("w", encoding="utf-8") as olm, paths[
         "only_target"
     ].open("w", encoding="utf-8") as otg, open(os.devnull, "w", encoding="utf-8") as devnull:
-        ol, ot, m = merge_diff_files(lm_f, tg_f, olm, otg, devnull)
+        ol, ot, m = merge_diff_files(lm_cmp, tg_cmp, olm, otg, devnull)
     summary["only_lm"] = ol
     summary["only_target"] = ot
     summary["matched"] = m
+    ol_lines = count_lines(paths["only_lm"])
+    ot_lines = count_lines(paths["only_target"])
+    if ol_lines != ol or ot_lines != ot:
+        print(
+            "# WARN: line count mismatch only_lm file={0} stat={1} only_target file={2} stat={3}".format(
+                ol_lines, ol, ot_lines, ot,
+            ),
+            flush=True,
+        )
     (paths["meta"] / "compare_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -675,6 +722,12 @@ def compare_bulk(paths: dict) -> dict:
     print(
         "# compare total only_lm={0} only_target={1} matched={2} ({3:.1f}s)".format(
             ol, ot, m, time.time() - t0,
+        ),
+        flush=True,
+    )
+    print(
+        "# diff files: only_lm.txt {0} lines (~{1:.1f} KiB expected for missing orders)".format(
+            ol_lines, ol_lines * 30 / 1024,
         ),
         flush=True,
     )
@@ -843,7 +896,7 @@ def phase_all(cfg: dict, paths: dict, args: argparse.Namespace) -> int:
             json.dumps({"lm_rows": lm_n, "tgt_rows": tgt_n}, indent=2) + "\n",
             encoding="utf-8",
         )
-        summary = compare_bulk(paths)
+        summary = compare_bulk(paths, unique_keys=not args.line_compare)
     write_repair_plan(paths, summary, paths["root"])
     return 0 if summary["only_lm"] == 0 and summary["only_target"] == 0 else 1
 
@@ -872,6 +925,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--split-by-app",
         action="store_true",
         help="按 app_id 多连接导出（慢、易断连；默认整库 bulk）",
+    )
+    p.add_argument(
+        "--line-compare",
+        action="store_true",
+        help="compare 按导出行逐行 merge（默认 sort -u 按唯一 application_no）",
     )
     args = p.parse_args(argv)
 
@@ -939,7 +997,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             app_ids = ensure_app_ids(cfg, paths, args.progress_every)
             summary = compare_all(paths, app_ids)
         else:
-            summary = compare_bulk(paths)
+            summary = compare_bulk(paths, unique_keys=not args.line_compare)
         write_repair_plan(paths, summary, paths["root"])
         return 0 if summary["only_lm"] == 0 else 1
 
