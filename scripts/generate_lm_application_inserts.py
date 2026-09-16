@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""从 diff/only_lm.txt 拉 LM 源行，生成目标 ng.application 的 INSERT SQL（或 --apply 直写）。
+"""从 only_lm 列表拉 LM 源行，VT 后生成 application +（已放款）loan 的 INSERT / --apply。
 
-映射逻辑与老库迁移 application 校验 SQL 一致（coreAppId、group_user_id、status 等）；
-application_no = ng + LPAD(appId,4) + '-' + applicationNo。
+敏感字段 mobile / BVN / 银行卡 / GAID → VT（vt_token_cache + /v2t，对齐 ng01 Flink）。
+loan：disburseTime<>0 时写入（同 backfill_lm_orders_by_application_no.py）。
 
-Usage（101 内网，.env 需 LM_MYSQL_*；可选 LM_CORE_MYSQL_* 补 submited/last_paid）:
-  python3 scripts/generate_lm_application_inserts.py --env ./.env \\
-    --list-file /tmp/lm_application_diff/diff/only_lm.txt \\
-    --output /tmp/lm_application_diff/insert_application.sql
-
-  python3 scripts/generate_lm_application_inserts.py --env ./.env \\
-    --list-file /tmp/lm_application_diff/diff/only_lm.txt --apply
+Usage: LM_MYSQL_* + SOURCE_*（cache 库）+ VT_BASE_URL；可选 LM_CORE_*。
 """
 from __future__ import annotations
 
@@ -20,11 +14,16 @@ import importlib.util
 import json
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 HERE = Path(__file__).resolve().parent
+LM_LOAN_CREATED_MS = 1785340800000
+LM_LOAN_EXTRA_COLS = (
+    "disburseTime", "lm_status", "amount", "disburseAmount", "repayment",
+    "paidAmount", "paidTime", "dueDate", "appId", "applicationNo",
+)
 RECON = HERE / "reconcile"
 sys.path.insert(0, str(RECON))
 
@@ -115,7 +114,17 @@ SELECT
         WHEN 12 THEN 15 WHEN 13 THEN 20 WHEN 14 THEN 20
         WHEN 15 THEN 23 WHEN 17 THEN 27 WHEN 18 THEN 27 WHEN 19 THEN 27
         ELSE a.`status`
-    END AS status
+    END AS status,
+    a.`disburseTime` AS disburseTime,
+    a.`status` AS lm_status,
+    a.`amount` AS amount,
+    a.`disburseAmount` AS disburseAmount,
+    a.`repayment` AS repayment,
+    a.`paidAmount` AS paidAmount,
+    a.`paidTime` AS paidTime,
+    a.`dueDate` AS dueDate,
+    a.`appId` AS appId,
+    a.`applicationNo` AS applicationNo
 FROM `{mkt_db}`.`application` a
 INNER JOIN `{mkt_db}`.`user` u ON u.`id` = a.`userId`
 LEFT JOIN (
@@ -136,6 +145,14 @@ LEFT JOIN `{mkt_db}`.`device` d ON d.`id` = a.`deviceId`
 {core_joins}
 WHERE ({keys_in_clause})
 """
+
+
+def load_migrate_collection():
+    path = HERE / "migrate_collection.py"
+    spec = importlib.util.spec_from_file_location("migrate_collection", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def load_compare_module():
@@ -220,6 +237,175 @@ LEFT JOIN (
     return sql, params
 
 
+def vt_db_from_cfg(cfg: dict, mc_mod) -> Optional[Any]:
+    host = (cfg.get("SOURCE_MYSQL_HOST") or cfg.get("SOURCE_HOST") or "").strip()
+    if not host:
+        return None
+    return mc_mod.DB(
+        mc_mod.DbConfig(
+            host=host,
+            port=int(cfg.get("SOURCE_MYSQL_PORT") or cfg.get("SOURCE_PORT") or 3306),
+            user=cfg.get("SOURCE_MYSQL_USER") or cfg.get("SOURCE_USER") or "root",
+            password=cfg.get("SOURCE_MYSQL_PASSWORD") or cfg.get("SOURCE_PASSWORD") or "",
+            database=cfg.get("SOURCE_MYSQL_DATABASE") or "nigeria_backend",
+        ),
+        readonly=True,
+    )
+
+
+def build_vt_client(cfg: dict, mc_mod, *, use_cache: bool, dry_run: bool):
+    vt_url = (
+        (cfg.get("VT_BASE_URL") or cfg.get("VT_URL") or "").strip()
+        or mc_mod.DEFAULT_VT_URL
+    )
+    db = vt_db_from_cfg(cfg, mc_mod) if use_cache else None
+    return mc_mod.VtClient(vt_url, dry_run=dry_run, db=db)
+
+
+def looks_like_vt_token(val: str) -> bool:
+    s = (val or "").strip()
+    return bool(s) and (s.startswith("tk_") or (not s.startswith("+") and len(s) >= 20))
+
+
+def tokenize_application_fields(
+    vt: Any,
+    raw: dict,
+    *,
+    no_vt: bool,
+) -> Optional[str]:
+    """明文 → VT token；失败返回错误说明，成功写回 raw 的 mobile/id_number/bank/gaid。"""
+    mobile_p = str(raw.get("mobile") or "").strip()
+    bank_p = str(raw.get("bank_account_number") or "").strip()
+    id_p = str(raw.get("id_number") or "").strip()
+    gaid_p = str(raw.get("gaid_idfa") or "").strip()
+
+    if no_vt:
+        if not mobile_p or not bank_p:
+            return "empty_mobile_or_bank"
+        return None
+
+    pairs: List[Tuple[int, str]] = []
+    if mobile_p and not looks_like_vt_token(mobile_p):
+        pairs.append((vt.VT_MOBILE, mobile_p))
+    if bank_p and not looks_like_vt_token(bank_p):
+        pairs.append((vt.VT_BANK, bank_p))
+    if id_p and not looks_like_vt_token(id_p):
+        pairs.append((vt.VT_ID_NUMBER, id_p))
+    if gaid_p and not looks_like_vt_token(gaid_p):
+        pairs.append((vt.VT_GAID, gaid_p))
+
+    resolved: Dict[str, str] = {}
+    if pairs:
+        resolved = vt.resolve(pairs)
+
+    if mobile_p:
+        raw["mobile"] = (resolved.get(mobile_p) if not looks_like_vt_token(mobile_p) else mobile_p)[:28]
+    if bank_p:
+        raw["bank_account_number"] = resolved.get(bank_p) if not looks_like_vt_token(bank_p) else bank_p
+    if id_p:
+        raw["id_number"] = resolved.get(id_p) if not looks_like_vt_token(id_p) else id_p
+    elif not id_p:
+        raw["id_number"] = ""
+    if gaid_p:
+        tok = resolved.get(gaid_p) if not looks_like_vt_token(gaid_p) else gaid_p
+        raw["gaid_idfa"] = tok or None
+    else:
+        raw["gaid_idfa"] = None
+
+    if not str(raw.get("mobile") or "").strip():
+        return "vt_mobile_empty"
+    if not str(raw.get("bank_account_number") or "").strip():
+        return "vt_bank_empty"
+    if id_p and not str(raw.get("id_number") or "").strip():
+        return "vt_id_number_empty"
+    return None
+
+
+def strip_lm_loan_fields(raw: dict) -> dict:
+    return {k: raw.pop(k, None) for k in LM_LOAN_EXTRA_COLS if k in raw}
+
+
+def resolve_vt_batch(vt: Any, raws: Sequence[dict]) -> None:
+    pairs: List[Tuple[int, str]] = []
+    for raw in raws:
+        for field, vt_type in (
+            ("mobile", vt.VT_MOBILE),
+            ("bank_account_number", vt.VT_BANK),
+            ("id_number", vt.VT_ID_NUMBER),
+            ("gaid_idfa", vt.VT_GAID),
+        ):
+            plain = str(raw.get(field) or "").strip()
+            if plain and not looks_like_vt_token(plain):
+                pairs.append((vt_type, plain))
+    if pairs:
+        vt.resolve(pairs)
+
+
+def unix_to_date(ts: int) -> Optional[str]:
+    if ts <= 0:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+def build_lm_loan_row(cmp_mod, lm: dict, application_no: str) -> Optional[dict]:
+    if cmp_mod.to_int(lm.get("disburseTime")) == 0:
+        return None
+    sn = str(lm.get("applicationNo") or "")
+    src_status = cmp_mod.to_int(lm.get("lm_status"))
+    amount = cmp_mod.to_int(lm.get("amount"))
+    disburse = cmp_mod.to_int(lm.get("disburseAmount"))
+    admin_fee = max(amount - disburse, 0)
+    principal = max(disburse, 0)
+    total_amount = max(cmp_mod.to_int(lm.get("repayment")), 0)
+    paid_amount = cmp_mod.to_int(lm.get("paidAmount")) if src_status in (17, 18, 19) else 0
+    paid_ts = cmp_mod.to_int(lm.get("paidTime"))
+    paid_time = paid_ts * 1000 if paid_ts > 0 else None
+    paid_off_date = unix_to_date(paid_ts) if paid_ts > 0 else None
+    disburse_ts = cmp_mod.to_int(lm.get("disburseTime"))
+    due_ts = cmp_mod.to_int(lm.get("dueDate"))
+    return {
+        "loan_no": "ng-{0}-01000".format(sn),
+        "application_no": application_no,
+        "period": 1,
+        "roll_sequence": 0,
+        "start_date": unix_to_date(disburse_ts),
+        "due_date": unix_to_date(due_ts),
+        "due_date_final": unix_to_date(due_ts),
+        "principal": principal,
+        "interest": 0,
+        "admin_fee": admin_fee,
+        "penalty_amount": 0,
+        "reduction_amount": 0,
+        "total_amount": total_amount,
+        "paid_amount": paid_amount,
+        "paid_time": paid_time,
+        "paid_off_date": paid_off_date,
+        "created_time": LM_LOAN_CREATED_MS,
+        "status": cmp_mod.map_lm_status(src_status),
+    }
+
+
+def target_has_loan(cmp_mod, cfg: dict, application_no: str) -> bool:
+    conn = cmp_mod.connect_target(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM loan WHERE application_no = %s AND period = 1 "
+                "AND roll_sequence = 0 LIMIT 1",
+                (application_no,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def loan_output_path(app_output: Path) -> Path:
+    name = app_output.name
+    if "application" in name:
+        return app_output.with_name(name.replace("application", "loan"))
+    return app_output.with_name(app_output.stem + "_loan" + app_output.suffix)
+
+
 def fetch_rows(cmp_mod, cfg: dict, keys: Sequence[Tuple[int, str]]) -> Dict[str, dict]:
     if not keys:
         return {}
@@ -277,15 +463,19 @@ def format_insert(table: str, columns: Sequence[str], row: dict, ignore: bool) -
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Generate INSERT SQL for missing LM application rows")
+    p = argparse.ArgumentParser(description="Generate INSERT SQL for missing LM application (+ loan) rows")
     p.add_argument("--env", default=str(HERE.parent / ".env"))
     p.add_argument("--list-file", default="")
     p.add_argument("--application-no", nargs="*", default=[])
     p.add_argument("--stdin", action="store_true")
     p.add_argument("--output", default="/tmp/insert_lm_application.sql")
+    p.add_argument("--loan-output", default="", help="default: derive from --output (application→loan)")
     p.add_argument("--apply", action="store_true", help="execute INSERT on target (not dry-run)")
     p.add_argument("--insert-ignore", action="store_true", default=True)
     p.add_argument("--no-insert-ignore", action="store_false", dest="insert_ignore")
+    p.add_argument("--no-vt", action="store_true", help="明文直写（仅调试；生产目标库勿用）")
+    p.add_argument("--no-vt-cache", action="store_true", help="跳过 vt_token_cache，直接 /v2t")
+    p.add_argument("--without-loan", action="store_true", help="不生成 loan INSERT")
     p.add_argument("--batch-size", type=int, default=100)
     p.add_argument("--diag-file", default="/tmp/lm_application_insert_diag.jsonl")
     args = p.parse_args(argv)
@@ -301,9 +491,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     cfg = env_util.load_env(env_path)
     cmp_mod = load_compare_module()
+    mc_mod = load_migrate_collection()
 
     base_cols = list(M.APPLICATION_COLS) + ["due_date", "due_date_final"]
-    columns = resolve_columns(cfg, "application", base_cols)
+    app_columns = resolve_columns(cfg, "application", base_cols)
+    loan_columns = resolve_columns(cfg, "loan", M.LOAN_COLS)
 
     keys: List[Tuple[int, str]] = []
     bad: List[str] = []
@@ -323,17 +515,37 @@ def main(argv: Optional[List[str]] = None) -> int:
         chunk = keys[i:i + batch_size]
         by_no.update(fetch_rows(cmp_mod, cfg, chunk))
 
-    inserts: List[dict] = []
+    hit_raws: List[dict] = []
+    for app_no in app_nos:
+        raw = by_no.get(app_no)
+        if raw:
+            hit_raws.append(raw)
+
+    vt = None
+    if not args.no_vt and hit_raws:
+        vt = build_vt_client(
+            cfg, mc_mod, use_cache=not args.no_vt_cache, dry_run=False,
+        )
+        print("# VT: resolving sensitive fields for {0} rows ...".format(len(hit_raws)), flush=True)
+        resolve_vt_batch(vt, hit_raws)
+
+    app_inserts: List[dict] = []
+    loan_inserts: List[dict] = []
     diag: List[dict] = []
     stats = {
         "requested": len(app_nos),
         "source_hit": 0,
         "source_missing": 0,
+        "skipped_vt": 0,
         "skipped_empty_bank": 0,
+        "insert_application": 0,
+        "insert_loan": 0,
+        "skip_not_disbursed": 0,
+        "skip_loan_exists": 0,
     }
 
     for app_no in app_nos:
-        rec = {"application_no": app_no, "notes": []}
+        rec: Dict[str, Any] = {"application_no": app_no, "notes": []}
         raw = by_no.get(app_no)
         if not raw:
             stats["source_missing"] += 1
@@ -341,27 +553,65 @@ def main(argv: Optional[List[str]] = None) -> int:
             diag.append(rec)
             continue
         stats["source_hit"] += 1
+
+        raw = dict(raw)
+        vt_err = tokenize_application_fields(vt, raw, no_vt=args.no_vt)
+        if vt_err:
+            stats["skipped_vt"] += 1
+            rec["notes"].append(vt_err)
+            diag.append(rec)
+            continue
         if not str(raw.get("bank_account_number") or "").strip():
             stats["skipped_empty_bank"] += 1
             rec["notes"].append("empty_bank_account")
             diag.append(rec)
             continue
-        row = row_for_insert(raw, columns)
-        inserts.append(row)
-        rec["notes"].append("ok")
+
+        lm_extra = strip_lm_loan_fields(raw)
+        app_row = row_for_insert(raw, app_columns)
+        app_inserts.append(app_row)
+        stats["insert_application"] += 1
+        rec["notes"].append("application_ok")
+
+        if not args.without_loan:
+            loan_row = build_lm_loan_row(cmp_mod, lm_extra, app_no)
+            if loan_row is None:
+                stats["skip_not_disbursed"] += 1
+                rec["notes"].append("loan_skip_not_disbursed")
+            elif args.apply and target_has_loan(cmp_mod, cfg, app_no):
+                stats["skip_loan_exists"] += 1
+                rec["notes"].append("loan_exists")
+            else:
+                loan_inserts.append({c: loan_row.get(c) for c in loan_columns})
+                stats["insert_loan"] += 1
+                rec["notes"].append("loan_ok")
         diag.append(rec)
 
     out_path = Path(args.output)
-    lines = [
-        "-- LM application backfill: {0} rows (requested {1})".format(len(inserts), len(app_nos)),
+    app_lines = [
+        "-- LM application backfill (VT={0}): {1} rows / requested {2}".format(
+            not args.no_vt, len(app_inserts), len(app_nos),
+        ),
         "-- generated by scripts/generate_lm_application_inserts.py",
         "SET NAMES utf8mb4;",
         "",
     ]
-    for row in inserts:
-        lines.append(format_insert("application", columns, row, args.insert_ignore))
-    lines.append("")
-    out_path.write_text("\n".join(lines), encoding="utf-8")
+    for row in app_inserts:
+        app_lines.append(format_insert("application", app_columns, row, args.insert_ignore))
+    app_lines.append("")
+    out_path.write_text("\n".join(app_lines), encoding="utf-8")
+
+    loan_path = Path(args.loan_output) if args.loan_output else loan_output_path(out_path)
+    if not args.without_loan:
+        loan_lines = [
+            "-- LM loan backfill: {0} rows (disburseTime<>0)".format(len(loan_inserts)),
+            "SET NAMES utf8mb4;",
+            "",
+        ]
+        for row in loan_inserts:
+            loan_lines.append(format_insert("loan", loan_columns, row, args.insert_ignore))
+        loan_lines.append("")
+        loan_path.write_text("\n".join(loan_lines), encoding="utf-8")
 
     diag_path = Path(args.diag_file)
     with diag_path.open("w", encoding="utf-8") as fp:
@@ -369,20 +619,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             fp.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
     print("stats={0}".format(stats))
-    print("sql -> {0} ({1} statements)".format(out_path, len(inserts)))
+    print("application sql -> {0} ({1})".format(out_path, len(app_inserts)))
+    if not args.without_loan:
+        print("loan sql -> {0} ({1})".format(loan_path, len(loan_inserts)))
     print("diag -> {0}".format(diag_path))
     if not has_lm_core(cfg):
         print("NOTE: LM_CORE_MYSQL_* unset; submited_time/reviewed_time/last_paid_time use 0")
+    if args.no_vt:
+        print("WARN: --no-vt 明文写入，与生产 Flink/VT 目标不一致")
 
     if args.apply:
-        if inserts:
-            n = _insert_batch(cfg, "application", columns, inserts)
+        if app_inserts:
+            n = _insert_batch(cfg, "application", app_columns, app_inserts)
             print("inserted application rows={0}".format(n))
+        if loan_inserts:
+            n = _insert_batch(cfg, "loan", loan_columns, loan_inserts)
+            print("inserted loan rows={0}".format(n))
     else:
-        print("dry-run; add --apply to insert, or run the .sql on target")
+        print("dry-run; add --apply to insert, or mysql < insert_*.sql on target")
 
     print("elapsed={0:.1f}s".format(time.time() - t0))
-    return 0 if inserts else (1 if stats["source_missing"] else 0)
+    return 0 if app_inserts else (1 if stats["source_missing"] else 0)
 
 
 if __name__ == "__main__":
