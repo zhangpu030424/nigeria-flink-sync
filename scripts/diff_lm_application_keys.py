@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,6 +41,28 @@ REPO = HERE.parent
 
 EXCLUDE_APP_IDS = (567, 568, 569, 571, 572, 573)
 DEFAULT_WORK_DIR = Path("/tmp/lm_application_diff")
+MAX_KEY_LEN = 128
+APP_NO_KEY_RE = re.compile(r"ng\d{4}-\d+")
+
+
+def write_application_key(fp, raw: object, stats: dict) -> int:
+    """写入一行合法 application_no；异常超长字段按正则拆 token。"""
+    s = str(raw or "").strip()
+    if not s:
+        stats["empty"] = stats.get("empty", 0) + 1
+        return 0
+    if len(s) <= MAX_KEY_LEN and APP_NO_KEY_RE.fullmatch(s):
+        fp.write(s + "\n")
+        return 1
+    tokens = APP_NO_KEY_RE.findall(s)
+    if not tokens:
+        stats["bad"] = stats.get("bad", 0) + 1
+        return 0
+    stats["salvaged"] = stats.get("salvaged", 0) + 1
+    stats["salvaged_chars"] = stats.get("salvaged_chars", 0) + len(s)
+    for tok in tokens:
+        fp.write(tok + "\n")
+    return len(tokens)
 
 
 def load_env(path: Path) -> dict:
@@ -261,8 +284,8 @@ def export_lm_app(cfg: dict, app_id: int, out_file: Path, progress_every: int) -
                 if not rows:
                     break
                 for row in rows:
-                    fp.write(str(row[0]) + "\n")
                     n += 1
+                    write_application_key(fp, row[0], {})
                 if progress_every > 0 and n % progress_every == 0:
                     print(
                         "# LM app_id={0}: {1} rows ({2:.0f}s)".format(
@@ -329,9 +352,11 @@ def _export_lm_bulk_once(cfg: dict, out_file: Path, progress_every: int) -> int:
     params: list = list(EXCLUDE_APP_IDS)
     sql = (
         "SELECT {0} AS k FROM application WHERE {1} "
-        "AND applicationNo IS NOT NULL AND TRIM(applicationNo) <> ''"
+        "AND applicationNo IS NOT NULL AND TRIM(applicationNo) <> '' "
+        "AND CHAR_LENGTH(applicationNo) <= 64"
     ).format(lm_key_sql(), where)
     n = 0
+    key_stats: dict = {}
     t0 = time.time()
     print("# LM bulk: pull -> {0}".format(out_file), flush=True)
     cur = conn.cursor(SSCursor)
@@ -343,8 +368,8 @@ def _export_lm_bulk_once(cfg: dict, out_file: Path, progress_every: int) -> int:
                 if not rows:
                     break
                 for row in rows:
-                    fp.write(str(row[0]) + "\n")
                     n += 1
+                    write_application_key(fp, row[0], key_stats)
                 if progress_every > 0 and n % progress_every == 0:
                     print(
                         "# LM bulk: {0} rows ({1:.0f}s)".format(n, time.time() - t0),
@@ -353,9 +378,30 @@ def _export_lm_bulk_once(cfg: dict, out_file: Path, progress_every: int) -> int:
     finally:
         cur.close()
         conn.close()
+    if key_stats:
+        print("# LM bulk: key_stats={0}".format(json.dumps(key_stats)), flush=True)
     print("# LM bulk: done rows={0} ({1:.1f}s)".format(n, time.time() - t0), flush=True)
     sort_key_file(out_file, "LM bulk")
     mark_bulk_export_done(out_file, n)
+    return n
+
+
+def sanitize_keys_file(src: Path, dest: Path, label: str) -> int:
+    """从可能含 271MB 脏行的 all.keys 里抽出合法 application_no。"""
+    n = 0
+    t0 = time.time()
+    with src.open(encoding="utf-8", errors="replace") as inp, dest.open(
+        "w", encoding="utf-8",
+    ) as out:
+        for line in inp:
+            n += write_application_key(out, line.rstrip("\n"), {})
+    sort_key_file(dest, label)
+    print(
+        "# sanitize {0}: keys={1} ({2:.1f}s) -> {3}".format(
+            label, n, time.time() - t0, dest,
+        ),
+        flush=True,
+    )
     return n
 
 
@@ -830,10 +876,12 @@ def write_repair_plan(paths: dict, summary: dict, work_dir: Path) -> None:
         "   ```",
         "",
         "2. **补 application 行**",
-        "   - 仓库暂无 LM→target.application 全字段自动 INSERT 脚本。",
-        "   - 按 LM 源行映射字段写入目标（application_no = `ng`+LPAD(appId,4)+`-`+applicationNo）。",
-        "   - 可先从 LM 拉明细:",
-        "     `SELECT * FROM application WHERE appId=? AND applicationNo=?`",
+        "   ```bash",
+        "   python3 scripts/generate_lm_application_inserts.py --env ./.env \\",
+        "     --list-file {0}/diff/only_lm.txt \\",
+        "     --output {0}/insert_application.sql".format(work_dir),
+        "   ```",
+        "   加 `--apply` 直写目标库；映射同老库 application 迁移 SQL。",
         "",
         "3. **补 loan（已放款）**",
         "   ```bash",
@@ -914,6 +962,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "export-target",
             "compare",
             "plan",
+            "sanitize-keys",
         ),
         default="all",
     )
@@ -947,6 +996,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.phase == "discover":
         discover_apps(cfg, paths, args.progress_every)
+        return 0
+
+    if args.phase == "sanitize-keys":
+        if not paths["lm_bulk"].is_file():
+            raise SystemExit("missing {0}".format(paths["lm_bulk"]))
+        clean = paths["lm"] / "all.clean.keys"
+        sanitize_keys_file(paths["lm_bulk"], clean, "LM")
+        clean.replace(paths["lm_bulk"])
+        marker = bulk_done_marker(paths["lm_bulk"])
+        if marker.is_file():
+            marker.unlink()
+        print("# replaced lm/all.keys with sanitized version", flush=True)
         return 0
 
     if args.phase == "export":
