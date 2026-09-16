@@ -149,16 +149,21 @@ WHERE ({keys_in_clause})
 
 def load_migrate_collection():
     path = HERE / "migrate_collection.py"
-    spec = importlib.util.spec_from_file_location("migrate_collection", path)
+    name = "migrate_collection_lm_app_ins"
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    # dataclass 装饰器在 Python 3.12+ 要求模块已注册到 sys.modules
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
 
 def load_compare_module():
     path = HERE / "compare_orders_source_target.py"
-    spec = importlib.util.spec_from_file_location("order_compare", path)
+    name = "order_compare_lm_app_ins"
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
 
