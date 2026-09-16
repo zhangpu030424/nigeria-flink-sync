@@ -3,7 +3,8 @@
 """从 only_lm 列表拉 LM 源行，VT 后生成 application +（已放款）loan 的 INSERT / --apply。
 
 敏感字段 mobile / BVN / 银行卡 / GAID → 直接 POST VT /v2t（不查 vt_token_cache）。
-loan：disburseTime<>0 时写入（同 backfill_lm_orders_by_application_no.py）。
+loan：disburseTime<>0 时写入；total=principal+interest+admin_fee+penalty（fee 进 admin_fee）。
+application.total_amount = loan_amount（LM amount，非 repayment）。
 
 Usage: LM_MYSQL_* + VT_BASE_URL；可选 LM_CORE_*。
 """
@@ -86,19 +87,36 @@ SELECT
     1 AS repayment_method,
     JSON_OBJECT(
         'roll_sequence', 0, 'period', 1,
-        'principal', a.`shouldLoanAmount`, 'disbursed_amount', a.`disburseAmount`,
-        'interest', 0, 'admin_fee', GREATEST(a.`amount` - a.`shouldLoanAmount`, 0),
+        'principal', CASE
+            WHEN a.`disburseTime` <> 0 AND COALESCE(a.`disburseAmount`, 0) > 0
+            THEN GREATEST(a.`disburseAmount`, 0)
+            ELSE GREATEST(COALESCE(a.`shouldLoanAmount`, 0), 0)
+        END,
+        'disbursed_amount', GREATEST(COALESCE(a.`disburseAmount`, 0), 0),
+        'interest', 0,
+        'admin_fee', GREATEST(
+            a.`amount` - CASE
+                WHEN a.`disburseTime` <> 0 AND COALESCE(a.`disburseAmount`, 0) > 0
+                THEN COALESCE(a.`disburseAmount`, 0)
+                ELSE COALESCE(a.`shouldLoanAmount`, 0)
+            END,
+            0
+        ),
         'service_fee', 0, 'tax_fee', 0, 'reduction_amount', 0,
-        'total_amount', a.`repayment`, 'term', a.`term`,
+        'total_amount', a.`amount`, 'term', a.`term`,
         'start_date', DATE(FROM_UNIXTIME(a.`applyDate`)),
         'due_date', DATE(FROM_UNIXTIME(a.`dueDate`)),
         'roll_allowed', 0
     ) AS repayment_plan,
     a.`amount` AS credit_limit,
     a.`amount` AS loan_amount,
-    a.`shouldLoanAmount` AS principal,
-    a.`repayment` AS total_amount,
-    a.`disburseAmount` AS disbursed_amount,
+    a.`amount` AS total_amount,
+    CASE
+        WHEN a.`disburseTime` <> 0 AND COALESCE(a.`disburseAmount`, 0) > 0
+        THEN GREATEST(a.`disburseAmount`, 0)
+        ELSE GREATEST(COALESCE(a.`shouldLoanAmount`, 0), 0)
+    END AS principal,
+    GREATEST(COALESCE(a.`disburseAmount`, 0), 0) AS disbursed_amount,
     a.`applyDate` * 1000 AS created_time,
     {submited_expr} AS submited_time,
     {reviewed_expr} AS reviewed_time,
@@ -343,9 +361,12 @@ def build_lm_loan_row(cmp_mod, lm: dict, application_no: str) -> Optional[dict]:
     src_status = cmp_mod.to_int(lm.get("lm_status"))
     amount = cmp_mod.to_int(lm.get("amount"))
     disburse = cmp_mod.to_int(lm.get("disburseAmount"))
-    admin_fee = max(amount - disburse, 0)
     principal = max(disburse, 0)
-    total_amount = max(cmp_mod.to_int(lm.get("repayment")), 0)
+    interest = 0
+    admin_fee = max(amount - disburse, 0)
+    penalty_amount = 0
+    # total = principal + interest + (admin+service+tax) + penalty；目标 loan 表无 service/tax 列，并入 admin_fee
+    total_amount = principal + interest + admin_fee + penalty_amount
     paid_amount = cmp_mod.to_int(lm.get("paidAmount")) if src_status in (17, 18, 19) else 0
     paid_ts = cmp_mod.to_int(lm.get("paidTime"))
     paid_time = paid_ts * 1000 if paid_ts > 0 else None
@@ -361,9 +382,9 @@ def build_lm_loan_row(cmp_mod, lm: dict, application_no: str) -> Optional[dict]:
         "due_date": unix_to_date(due_ts),
         "due_date_final": unix_to_date(due_ts),
         "principal": principal,
-        "interest": 0,
+        "interest": interest,
         "admin_fee": admin_fee,
-        "penalty_amount": 0,
+        "penalty_amount": penalty_amount,
         "reduction_amount": 0,
         "total_amount": total_amount,
         "paid_amount": paid_amount,
