@@ -6,7 +6,7 @@
 loan：disburseTime<>0 时写入；total=principal+interest+admin_fee+penalty（fee 进 admin_fee）。
 application.total_amount = loan_amount（LM amount，非 repayment）。
 
-Usage: LM_MYSQL_* + VT_BASE_URL；可选 LM_CORE_*。
+Usage: LM_MYSQL_* + VT_BASE_URL。core 与 market 同实例，仅库名不同（默认 ng_loan_core，可用 LM_CORE_MYSQL_DATABASE）。
 """
 from __future__ import annotations
 
@@ -207,13 +207,14 @@ def read_application_nos(args: argparse.Namespace) -> List[str]:
     return out
 
 
-def has_lm_core(cfg: dict) -> bool:
-    return bool((cfg.get("LM_CORE_MYSQL_HOST") or "").strip())
+def lm_core_database(cfg: dict) -> str:
+    """与 ng_loan_market 同 MySQL 实例，跨库 JOIN。"""
+    return (cfg.get("LM_CORE_MYSQL_DATABASE") or "ng_loan_core").strip()
 
 
 def build_sql(cfg: dict, keys: Sequence[Tuple[int, str]]) -> Tuple[str, List[Any]]:
     mkt_db = cfg.get("LM_MYSQL_DATABASE") or "ng_loan_market"
-    core_db = cfg.get("LM_CORE_MYSQL_DATABASE") or "ng_loan_core"
+    core_db = lm_core_database(cfg)
     parts: List[str] = []
     where_params: List[Any] = []
     for app_id, sn in keys:
@@ -221,9 +222,8 @@ def build_sql(cfg: dict, keys: Sequence[Tuple[int, str]]) -> Tuple[str, List[Any
         where_params.extend([app_id, sn])
     keys_in = " OR ".join(parts)
 
-    if has_lm_core(cfg):
-        sns_ph = ",".join(["%s"] * len(keys))
-        core_joins = """
+    sns_ph = ",".join(["%s"] * len(keys))
+    core_joins = """
 LEFT JOIN `{core_db}`.`application` ca ON ca.`ext_sn` = a.`applicationNo`
 LEFT JOIN (
     SELECT ca2.`ext_sn`, MAX(rr.`repay_time`) AS last_paid_time
@@ -233,14 +233,9 @@ LEFT JOIN (
     GROUP BY ca2.`ext_sn`
 ) lpt ON lpt.`ext_sn` = a.`applicationNo`
 """.format(core_db=core_db, sns_ph=sns_ph)
-        submited = "IFNULL(ca.`apply_time`, 0) * 1000"
-        reviewed = "IFNULL(ca.`audit_time`, 0) * 1000"
-        last_paid = "IFNULL(lpt.`last_paid_time`, 0) * 1000"
-    else:
-        core_joins = ""
-        submited = "0"
-        reviewed = "0"
-        last_paid = "0"
+    submited = "IFNULL(ca.`apply_time`, 0) * 1000"
+    reviewed = "IFNULL(ca.`audit_time`, 0) * 1000"
+    last_paid = "IFNULL(lpt.`last_paid_time`, 0) * 1000"
 
     sql = LM_APPLICATION_SQL.format(
         mkt_db=mkt_db,
@@ -253,9 +248,7 @@ LEFT JOIN (
         core_joins=core_joins,
         keys_in_clause=keys_in,
     )
-    params: List[Any] = []
-    if has_lm_core(cfg):
-        params.extend([sn for _, sn in keys])
+    params: List[Any] = [sn for _, sn in keys]
     params.extend(where_params)
     return sql, params
 
@@ -630,8 +623,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.without_loan:
         print("loan sql -> {0} ({1})".format(loan_path, len(loan_inserts)))
     print("diag -> {0}".format(diag_path))
-    if not has_lm_core(cfg):
-        print("NOTE: LM_CORE_MYSQL_* unset; submited_time/reviewed_time/last_paid_time use 0")
+    print("# LM core DB (same instance): {0}".format(lm_core_database(cfg)), flush=True)
     if args.no_vt:
         print("WARN: --no-vt 明文写入，与生产 Flink/VT 目标不一致")
 
