@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """从 only_lm 列表拉 LM 源行，VT 后生成 application +（已放款）loan 的 INSERT / --apply。
 
-敏感字段 mobile / BVN / 银行卡 / GAID → VT（vt_token_cache + /v2t，对齐 ng01 Flink）。
+敏感字段 mobile / BVN / 银行卡 / GAID → 直接 POST VT /v2t（不查 vt_token_cache）。
 loan：disburseTime<>0 时写入（同 backfill_lm_orders_by_application_no.py）。
 
-Usage: LM_MYSQL_* + SOURCE_*（cache 库）+ VT_BASE_URL；可选 LM_CORE_*。
+Usage: LM_MYSQL_* + VT_BASE_URL；可选 LM_CORE_*。
 """
 from __future__ import annotations
 
@@ -242,29 +242,13 @@ LEFT JOIN (
     return sql, params
 
 
-def vt_db_from_cfg(cfg: dict, mc_mod) -> Optional[Any]:
-    host = (cfg.get("SOURCE_MYSQL_HOST") or cfg.get("SOURCE_HOST") or "").strip()
-    if not host:
-        return None
-    return mc_mod.DB(
-        mc_mod.DbConfig(
-            host=host,
-            port=int(cfg.get("SOURCE_MYSQL_PORT") or cfg.get("SOURCE_PORT") or 3306),
-            user=cfg.get("SOURCE_MYSQL_USER") or cfg.get("SOURCE_USER") or "root",
-            password=cfg.get("SOURCE_MYSQL_PASSWORD") or cfg.get("SOURCE_PASSWORD") or "",
-            database=cfg.get("SOURCE_MYSQL_DATABASE") or "nigeria_backend",
-        ),
-        readonly=True,
-    )
-
-
-def build_vt_client(cfg: dict, mc_mod, *, use_cache: bool, dry_run: bool):
+def build_vt_client(cfg: dict, mc_mod, *, dry_run: bool):
     vt_url = (
         (cfg.get("VT_BASE_URL") or cfg.get("VT_URL") or "").strip()
         or mc_mod.DEFAULT_VT_URL
     )
-    db = vt_db_from_cfg(cfg, mc_mod) if use_cache else None
-    return mc_mod.VtClient(vt_url, dry_run=dry_run, db=db)
+    # 本脚本只走 HTTP /v2t，不连 vt_token_cache
+    return mc_mod.VtClient(vt_url, dry_run=dry_run, db=None)
 
 
 def looks_like_vt_token(val: str) -> bool:
@@ -479,7 +463,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--insert-ignore", action="store_true", default=True)
     p.add_argument("--no-insert-ignore", action="store_false", dest="insert_ignore")
     p.add_argument("--no-vt", action="store_true", help="明文直写（仅调试；生产目标库勿用）")
-    p.add_argument("--no-vt-cache", action="store_true", help="跳过 vt_token_cache，直接 /v2t")
     p.add_argument("--without-loan", action="store_true", help="不生成 loan INSERT")
     p.add_argument("--batch-size", type=int, default=100)
     p.add_argument("--diag-file", default="/tmp/lm_application_insert_diag.jsonl")
@@ -528,10 +511,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     vt = None
     if not args.no_vt and hit_raws:
-        vt = build_vt_client(
-            cfg, mc_mod, use_cache=not args.no_vt_cache, dry_run=False,
-        )
-        print("# VT: resolving sensitive fields for {0} rows ...".format(len(hit_raws)), flush=True)
+        vt = build_vt_client(cfg, mc_mod, dry_run=False)
+        print("# VT /v2t only (no vt_token_cache), {0} rows ...".format(len(hit_raws)), flush=True)
         resolve_vt_batch(vt, hit_raws)
 
     app_inserts: List[dict] = []
